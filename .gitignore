@@ -219,3 +219,12 @@ __marimo__/
 
 # Node
 node_modules/
+
+# Terraform
+infra/.terraform/
+infra/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+infra/terraform.tfvars
+*.tfplan
+infra/tf.plan

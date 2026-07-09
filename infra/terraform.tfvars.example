@@ -1,0 +1,6 @@
+subscription_id = "7bc68c68-f434-49ad-ab3e-b883ec39da86"
+location        = "eastus2"
+
+# Set the Postgres admin password out-of-band, e.g.:
+#   export TF_VAR_postgres_admin_password='...'
+# postgres_admin_password = "CHANGE-ME"
