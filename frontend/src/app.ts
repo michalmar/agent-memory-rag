@@ -16,7 +16,7 @@ import {
   type ProfileDoc,
 } from './client.js';
 import { convertToolResult } from './converters.js';
-import { getMockUserId, setMockUserId, getConfig } from './auth.js';
+import { getMockUserId, setMockUserId, getConfig, signOut } from './auth.js';
 import { uiLogger } from './ui-logger.js';
 
 interface ChatTurn {
@@ -784,9 +784,13 @@ export class NativeApp extends LitElement {
         <button class="ctl" @click=${this.newChat} title="Start a new chat">
           <span class="material-symbols-outlined">add</span> New
         </button>
-        <select .value=${this.mockUser} @change=${this.onMockUserChange} title="Switch mock user">
-          ${MOCK_USERS.map((u) => html`<option value=${u} ?selected=${u === this.mockUser}>${u}</option>`)}
-        </select>
+        ${getConfig().authMode === 'mock'
+          ? html`<select .value=${this.mockUser} @change=${this.onMockUserChange} title="Switch mock user">
+              ${MOCK_USERS.map((u) => html`<option value=${u} ?selected=${u === this.mockUser}>${u}</option>`)}
+            </select>`
+          : html`<button class="ctl" @click=${() => void signOut()} title="Sign out">
+              <span class="material-symbols-outlined">logout</span> Sign out
+            </button>`}
         <button class="ctl" @click=${this.toggleTheme} title="Toggle theme">
           <span class="material-symbols-outlined">
             ${this.theme === 'light' ? 'dark_mode' : 'light_mode'}

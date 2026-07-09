@@ -47,6 +47,19 @@ class Settings:
     rag_mode_default = _get("RAG_MODE_DEFAULT", "agentic")
     auth_mode = _get("AUTH_MODE", "mock")
 
+    # Entra ID (auth_mode == "entra")
+    entra_tenant_id = _get("ENTRA_TENANT_ID")
+    entra_audience = _get("ENTRA_AUDIENCE")  # api client id or api://<id>
+    entra_issuer = _get("ENTRA_ISSUER")  # optional override; else derived from tenant
+    entra_jwks_uri = _get("ENTRA_JWKS_URI")  # optional override
+    # space/comma-delimited lists; empty => not required
+    entra_required_scopes = _get("ENTRA_REQUIRED_SCOPES")
+    entra_required_roles = _get("ENTRA_REQUIRED_ROLES")
+
+    @property
+    def entra_configured(self) -> bool:
+        return bool(self.entra_tenant_id and self.entra_audience)
+
     @property
     def cosmos_configured(self) -> bool:
         return bool(self.cosmos_endpoint)
