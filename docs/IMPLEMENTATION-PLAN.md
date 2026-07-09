@@ -207,6 +207,17 @@ These must be **authored**; the PRD gives contracts/behavior but no source:
   deprecated `azurerm_ai_services` + preview azapi project (which failed because the account
   lacked `allowProjectManagement`). See
   https://learn.microsoft.com/azure/foundry/how-to/create-resource-terraform.
+- **P8 deploy as-built (live, verified):** both images built server-side with `az acr build`
+  (ACR is Premium + private, so the deploy script toggles `--public-network-enabled true
+  --default-action Allow` for the build window, then re-locks to Deny/private). Backend on ACA
+  internal ingress (`:8000`), frontend nginx external (`:8080`) reverse-proxies `/api` to the
+  backend's internal FQDN with `proxy_ssl_server_name on` (SNI + Host must match for ACA
+  routing) and serves `/config.js` via envsubst. KB indexes (orders + return-policy) are
+  provisioned by an **in-VNet ACA Job** (`kb-setup`) using the app's user-assigned identity —
+  needed because both AI Search and Foundry are private, so app-side embedding + index upload
+  must run from inside the VNet. Classic RAG searches **both** indexes and merges by score.
+  Smoke-tested end-to-end: real-LLM chat + `get_order_status` tool, classic RAG with citations,
+  Cosmos profile round-trip, pgvector memory create + semantic search (cosine ~0.66).
 - The PRD's §16 acceptance criterion #2 (session survives backend restart via Redis) is
   intentionally **descoped** by the in-memory decision; treat single-replica in-memory as
   the accepted behavior and document it.
