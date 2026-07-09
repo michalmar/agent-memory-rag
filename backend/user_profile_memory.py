@@ -135,7 +135,14 @@ class UserProfileMemoryStore:
 
 
 def profile_to_prompt_context(profile: dict | None) -> dict:
-    """Reduce a profile doc to the fields injected into the system prompt."""
+    """Reduce a profile doc to the fields injected into the system prompt.
+
+    Returns {} when the profile is empty so the template skips the block. When any
+    section is populated, ALL section keys are included (empty defaults) so the
+    StrictUndefined template can safely reference every section.
+    """
     if not profile:
         return {}
-    return {k: profile.get(k) for k in PROFILE_SECTIONS if profile.get(k)}
+    if not any(profile.get(k) for k in PROFILE_SECTIONS):
+        return {}
+    return {k: profile.get(k) for k in PROFILE_SECTIONS}

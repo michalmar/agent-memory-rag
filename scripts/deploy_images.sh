@@ -34,15 +34,15 @@ echo "==> Backend  : $BACKEND_APP"
 echo "==> Frontend : $FRONTEND_APP"
 
 cleanup() {
-  echo "==> Disabling ACR public network access"
-  az acr update -n "$ACR_NAME" -g "$RG" --public-network-enabled false -o none || true
+  echo "==> Locking ACR back down (deny + private only)"
+  az acr update -n "$ACR_NAME" -g "$RG" --default-action Deny --public-network-enabled false -o none || true
 }
 trap cleanup EXIT
 
 echo "==> Temporarily enabling ACR public network access for build upload"
-az acr update -n "$ACR_NAME" -g "$RG" --public-network-enabled true -o none
-# Give the network rule a moment to propagate.
-sleep 20
+az acr update -n "$ACR_NAME" -g "$RG" --public-network-enabled true --default-action Allow -o none
+# Give the network rule a moment to propagate (ACR build agents use dynamic IPs).
+sleep 40
 
 echo "==> Building backend image (server-side ACR task)"
 az acr build -r "$ACR_NAME" -t "backend:$TAG" -f "$REPO_ROOT/backend/Dockerfile" "$REPO_ROOT/backend"

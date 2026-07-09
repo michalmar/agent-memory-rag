@@ -1,4 +1,4 @@
-"""ClassicRAGClient — hybrid search over the orders index (PRD §F5, classic path).
+"""ClassicRAGClient — hybrid search over the orders + return-policy indexes (PRD §F5).
 
 Computes the query embedding app-side (keeps AI Search fully private — no
 Search->OpenAI vectorizer link needed) and issues a keyword+vector+semantic
@@ -49,6 +49,40 @@ class ClassicRAGClient:
         token = await get_credential().get_token("https://search.azure.com/.default")
         return {"Authorization": f"Bearer {token.token}", "Content-Type": "application/json"}
 
+    async def _search_index(self, client, index: str, query: str, embedding: list) -> list[dict]:
+        """Run one hybrid (keyword+vector+semantic) query against a single index.
+
+        Only `id` and `page_chunk` are selected so the same query works across the
+        orders and return-policy indexes (which have different extra fields).
+        """
+        s = get_settings()
+        url = f"{s.search_endpoint}/indexes/{index}/docs/search"
+        payload = {
+            "search": query,
+            "vectorQueries": [
+                {"kind": "vector", "vector": embedding, "fields": "page_embedding", "k": 5}
+            ],
+            "queryType": "semantic",
+            "semanticConfiguration": "semantic_config",
+            "select": "id, page_chunk",
+            "top": 5,
+        }
+        headers = await self._headers()
+        for attempt in range(3):
+            resp = await client.post(
+                url, params={"api-version": _SEARCH_API_VERSION},
+                json=payload, headers=headers,
+            )
+            if resp.status_code == 502:  # integrated-vectorizer / semantic cold start
+                logger.warning("search 502 on %s, retry %d", index, attempt + 1)
+                continue
+            if resp.status_code == 404:  # index not provisioned — skip gracefully
+                logger.warning("search index %s not found (404), skipping", index)
+                return []
+            resp.raise_for_status()
+            return resp.json().get("value", [])
+        return []
+
     async def search(self, query: str) -> dict:
         if not self._enabled:
             return {"content": "", "citations": []}
@@ -58,41 +92,23 @@ class ClassicRAGClient:
 
         s = get_settings()
         embedding = await embed_text(query)
-        url = f"{s.search_endpoint}/indexes/{s.search_orders_index}/docs/search"
-        payload = {
-            "search": query,
-            "vectorQueries": [
-                {
-                    "kind": "vector",
-                    "vector": embedding,
-                    "fields": "page_embedding",
-                    "k": 5,
-                }
-            ],
-            "queryType": "semantic",
-            "semanticConfiguration": "semantic_config",
-            "select": "id, order_id, category, page_chunk",
-            "top": 5,
-        }
-        headers = await self._headers()
-        async with httpx.AsyncClient(timeout=30) as client:
-            for attempt in range(3):
-                resp = await client.post(
-                    url, params={"api-version": _SEARCH_API_VERSION},
-                    json=payload, headers=headers,
-                )
-                if resp.status_code == 502:  # integrated-vectorizer cold start
-                    logger.warning("search 502, retry %d", attempt + 1)
-                    continue
-                resp.raise_for_status()
-                break
-            else:
-                return {"content": "", "citations": []}
+        indexes = [i for i in (s.search_orders_index, s.search_policy_index) if i]
 
-        docs = resp.json().get("value", [])
+        merged: list[dict] = []
+        async with httpx.AsyncClient(timeout=30) as client:
+            for index in indexes:
+                merged.extend(await self._search_index(client, index, query, embedding))
+
+        # Rank across both indexes by reranker/search score, keep the best few.
+        def _score(d: dict) -> float:
+            return d.get("@search.rerankerScore") or d.get("@search.score") or 0.0
+
+        merged.sort(key=_score, reverse=True)
+        merged = merged[:5]
+
         chunks: list[str] = []
         citations: list[dict] = []
-        for i, doc in enumerate(docs):
+        for i, doc in enumerate(merged):
             chunk = doc.get("page_chunk", "") or ""
             ref_id = doc.get("id", f"doc-{i}")
             source_name = _derive_source_name(chunk, ref_id)
