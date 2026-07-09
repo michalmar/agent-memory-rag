@@ -232,7 +232,15 @@ These must be **authored**; the PRD gives contracts/behavior but no source:
   (valid / bad-aud / expired / missing-scope / no-bearer / sub-fallback), mock 401 cases, server
   import, frontend build (MSAL in a separate lazy chunk), and live 401 on unauthenticated `/me`.
   Entra remains dormant unless `ENTRA_TENANT_ID`+`ENTRA_AUDIENCE` are set and `AUTH_MODE=entra`
-  (an app registration is required to exercise the live login flow).
+  (an app registration is required to exercise the live login flow). The app registration is a
+  **manual, non-Terraform** step (creating one needs Entra directory rights — a separate grant
+  from the subscription Contributor role used for the resource infra); it is scripted in
+  `scripts/create_entra_app.sh` (SPA app: exposes `access_as_user`, v2 tokens, SPA redirect,
+  Azure-CLI pre-auth) and documented in the root README. **Verified live** against a real tenant
+  token: created the app reg, fetched a v2 access token via the pre-authorized Azure CLI, and ran
+  the backend in `AUTH_MODE=entra` — `/me` with the bearer token → 200 (correct `oid`/name), and
+  no/bad token → 401. Note: v2 access tokens carry the client-id GUID as `aud`, so
+  `ENTRA_AUDIENCE=<clientId>` (not `api://<clientId>`).
 - The PRD's §16 acceptance criterion #2 (session survives backend restart via Redis) is
   intentionally **descoped** by the in-memory decision; treat single-replica in-memory as
   the accepted behavior and document it.

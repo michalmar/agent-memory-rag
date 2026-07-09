@@ -53,3 +53,50 @@ backend/    FastAPI app, prompts, mock + real agent runners
 frontend/   Vite + Lit app, A2UI renderer, tool→surface converters
 docs/        PRD spec + implementation plan
 ```
+
+## Authentication (mock vs Entra ID)
+
+The app supports two auth modes, selected by the backend `AUTH_MODE` env var:
+
+- **`mock`** (default, used for local dev and the live demo): the frontend sends an
+  `X-Mock-User-ID` header; the backend resolves a fixed user table
+  (`user-alice` / `user-bob` / `user-charlie`). No directory setup required.
+- **`entra`** (production): the frontend signs in with MSAL and sends an
+  `Authorization: Bearer <JWT>`; the backend validates the RS256 token against the
+  tenant JWKS (audience / issuer / expiry, plus optional required scopes/roles).
+
+### The Entra app registration is a **manual** step — *not* Terraform
+
+The `infra/` Terraform provisions all Azure **resources** (Foundry, Cosmos, Postgres,
+AI Search, ACA, networking, RBAC) using subscription-scoped permissions. The Entra
+**app registration** is intentionally kept **out of Terraform** because creating one
+requires **Entra directory permissions** (Application Administrator /
+`Application.ReadWrite.All`) — a different, often separately-governed grant than the
+subscription Contributor role used for everything else. Keeping it manual lets the
+infra apply cleanly for operators who don't hold directory rights, and keeps the app
+runnable in `mock` mode with zero directory setup.
+
+Provision it with the helper script (requires directory rights):
+
+```bash
+AZURE_CONFIG_DIR="$HOME/.azure-365" \
+  ./scripts/create_entra_app.sh \
+    --frontend-url https://<frontend-fqdn> \
+    --localhost            # also allow http://localhost:5175 for dev
+```
+
+The script creates one SPA app registration that exposes an `access_as_user` scope,
+issues **v2** access tokens, registers the SPA redirect URI, and pre-authorizes the
+Azure CLI (so you can fetch a test token). It prints the exact env values to set.
+Note: for v2 tokens `aud` is the **client-id GUID**, so `ENTRA_AUDIENCE=<clientId>`
+(not `api://<clientId>`).
+
+Then flip both apps to Entra mode (backend `AUTH_MODE=entra` + `ENTRA_TENANT_ID` /
+`ENTRA_AUDIENCE` / `ENTRA_REQUIRED_SCOPES`; frontend `/config.js` `authMode=entra` +
+`ENTRA_TENANT_ID` / `ENTRA_CLIENT_ID` / `ENTRA_API_SCOPE`) and redeploy. Verify:
+
+```bash
+TOKEN=$(az account get-access-token --scope api://<clientId>/access_as_user --query accessToken -o tsv)
+curl -H "Authorization: Bearer $TOKEN" https://<frontend-fqdn>/api/me   # -> 200
+curl https://<frontend-fqdn>/api/me                                     # -> 401
+```
