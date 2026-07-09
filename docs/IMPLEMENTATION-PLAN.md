@@ -218,6 +218,21 @@ These must be **authored**; the PRD gives contracts/behavior but no source:
   must run from inside the VNet. Classic RAG searches **both** indexes and merges by score.
   Smoke-tested end-to-end: real-LLM chat + `get_order_status` tool, classic RAG with citations,
   Cosmos profile round-trip, pgvector memory create + semantic search (cosine ~0.66).
+- **P9 harden as-built (implemented, verified):** dual-mode auth. `AUTH_MODE=mock` (default,
+  live) uses the `X-Mock-User-ID` header + fixed user table; `AUTH_MODE=entra` validates an
+  RS256 Entra ID JWT via the tenant JWKS (`PyJWKClient`, cached), checking `aud/iss/exp/iat`
+  and optional `ENTRA_REQUIRED_SCOPES` (403) / `ENTRA_REQUIRED_ROLES` (403); `User` built from
+  `oid|sub`, `preferred_username|email|upn`, `name`. Frontend `auth.ts` adds a lazy-loaded MSAL
+  Browser path (`loginPopup` → `acquireTokenSilent`/`acquireTokenPopup` → `Authorization: Bearer`)
+  and `signOut()`; `app.ts` swaps the mock-user picker for a Sign-out button in Entra mode.
+  Per-user isolation is enforced across all stores by partition/scope: sessions raise 403 on
+  cross-owner access; Cosmos history/profile and pgvector memory are keyed by `user_id`, so
+  cross-user reads return 404 (a user can't observe another user's records). Structured
+  `[IN]/[OUT]` chat logging + Azure SDK noise suppression retained. Verified: 6 Entra JWT cases
+  (valid / bad-aud / expired / missing-scope / no-bearer / sub-fallback), mock 401 cases, server
+  import, frontend build (MSAL in a separate lazy chunk), and live 401 on unauthenticated `/me`.
+  Entra remains dormant unless `ENTRA_TENANT_ID`+`ENTRA_AUDIENCE` are set and `AUTH_MODE=entra`
+  (an app registration is required to exercise the live login flow).
 - The PRD's §16 acceptance criterion #2 (session survives backend restart via Redis) is
   intentionally **descoped** by the in-memory decision; treat single-replica in-memory as
   the accepted behavior and document it.
