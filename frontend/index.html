@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agentic Memory — Support Chat</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #ffffff;
+        --bg-alt: #f5f6f8;
+        --fg: #1a1a1a;
+        --fg-muted: #6b7280;
+        --border: #e3e6ea;
+        --accent: #2563eb;
+        --accent-fg: #ffffff;
+        --card: #ffffff;
+        --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+      }
+      [data-theme='dark'] {
+        --bg: #0f1115;
+        --bg-alt: #171a21;
+        --fg: #e8eaed;
+        --fg-muted: #9aa0a6;
+        --border: #2a2f3a;
+        --accent: #3b82f6;
+        --accent-fg: #ffffff;
+        --card: #1b1f27;
+        --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        font-family: 'Inter', system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+      }
+      .material-symbols-outlined {
+        font-family: 'Material Symbols Outlined';
+        font-weight: normal;
+        font-style: normal;
+        line-height: 1;
+        vertical-align: middle;
+      }
+    </style>
+    <script src="/config.js" onerror="void 0"></script>
+  </head>
+  <body>
+    <a2ui-native-app></a2ui-native-app>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>
