@@ -96,28 +96,119 @@ class MockAgentRunner:
             yield ev
 
 
+_MAX_TOOL_ROUNDS = 5
+
+
 class RealAgentRunner:
-    """Real Azure/Agent-Framework runner (scaffold — not exercised in the slice)."""
+    """Real Azure OpenAI runner (stock openai SDK, Chat Completions + tool calling).
+
+    agent-framework is not on public PyPI, so this uses AsyncAzureOpenAI directly and
+    maps streaming deltas + tool calls to the same AG-UI event stream the mock emits.
+    """
 
     def __init__(self, instructions: str, rag_mode: str) -> None:
-        try:
-            from agent_framework import Agent  # noqa: F401
-            from agent_framework.azure import AzureOpenAIResponsesClient  # noqa: F401
-        except Exception as exc:  # pragma: no cover - depends on private package
+        from config import get_settings
+
+        s = get_settings()
+        if not s.openai_configured:
             raise RuntimeError(
-                "RealAgentRunner requires the 'agent-framework-ag-ui' package and Azure "
-                "OpenAI configuration, which are unavailable in this environment. "
-                "Set LLM_MODE=mock (default) for the offline slice."
-            ) from exc
+                "RealAgentRunner requires Azure OpenAI configuration "
+                "(AZURE_OPENAI_ENDPOINT / deployment). Set LLM_MODE=mock for offline."
+            )
         self._instructions = instructions
         self._rag_mode = rag_mode
-        # Full construction (client, tools, streaming loop) lands in a later phase.
+        self._deployment = s.chat_deployment
 
     async def stream(
         self, user_message: str, session: Session, rag_mode: str
-    ) -> AsyncIterator[object]:  # pragma: no cover - not reachable offline
-        raise RuntimeError("RealAgentRunner.stream is not implemented in this build")
-        yield  # make this an async generator
+    ) -> AsyncIterator[object]:
+        from azure_clients import get_openai_client
+        from agent_tools import execute_tool, for_rag_mode
+
+        client = get_openai_client()
+        tools = for_rag_mode(rag_mode)
+        message_id = str(uuid.uuid4())
+
+        messages: list[dict] = [{"role": "system", "content": self._instructions}]
+        for m in session.messages:
+            if m.get("role") in ("user", "assistant") and m.get("content"):
+                messages.append({"role": m["role"], "content": m["content"]})
+        messages.append({"role": "user", "content": user_message})
+
+        for _ in range(_MAX_TOOL_ROUNDS):
+            stream = await client.chat.completions.create(
+                model=self._deployment,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                stream=True,
+            )
+            text_buf = ""
+            tool_acc: dict[int, dict] = {}
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    text_buf += delta.content
+                    yield TextMessageContentEvent(
+                        message_id=message_id, delta=delta.content
+                    )
+                for tc in delta.tool_calls or []:
+                    slot = tool_acc.setdefault(
+                        tc.index, {"id": "", "name": "", "arguments": ""}
+                    )
+                    if tc.id:
+                        slot["id"] = tc.id
+                    if tc.function and tc.function.name:
+                        slot["name"] = tc.function.name
+                    if tc.function and tc.function.arguments:
+                        slot["arguments"] += tc.function.arguments
+
+            if not tool_acc:
+                return
+
+            # Replay the assistant tool-call turn, then execute each tool.
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": text_buf or None,
+                    "tool_calls": [
+                        {
+                            "id": slot["id"],
+                            "type": "function",
+                            "function": {
+                                "name": slot["name"],
+                                "arguments": slot["arguments"] or "{}",
+                            },
+                        }
+                        for slot in tool_acc.values()
+                    ],
+                }
+            )
+            for slot in tool_acc.values():
+                try:
+                    args = json.loads(slot["arguments"] or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                yield ToolCallStartEvent(
+                    tool_call_id=slot["id"], tool_call_name=slot["name"]
+                )
+                result = await execute_tool(slot["name"], args)
+                result_json = json.dumps(result)
+                yield ToolCallResultEvent(
+                    message_id=message_id,
+                    tool_call_id=slot["id"],
+                    content=result_json,
+                )
+                yield ToolCallEndEvent(tool_call_id=slot["id"])
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": slot["id"],
+                        "content": result_json,
+                    }
+                )
 
 
 def build_runner(mode: str, instructions: str, rag_mode: str) -> AgentRunner:

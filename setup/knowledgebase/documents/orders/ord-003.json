@@ -1,0 +1,20 @@
+[
+  {
+    "id": "ord-003-order_detail",
+    "order_id": "ORD-003",
+    "category": "order_detail",
+    "page_chunk": "Order ORD-003 detail: Placed January 5, 2026. Contains 2 items — Logitech MX Master 3S mouse (Graphite, $99.99) and MX Keys S keyboard (Graphite, $109.99). Subtotal $209.98, shipping $9.99, tax $17.60, order total $237.57. Paid with Visa ending 4242."
+  },
+  {
+    "id": "ord-003-shipping",
+    "order_id": "ORD-003",
+    "category": "shipping",
+    "page_chunk": "Order ORD-003 shipping: Shipped January 8, 2026 via FedEx Home Delivery. Tracking number 794612345678. Delivered January 20, 2026, left at front door. Current status: delivered."
+  },
+  {
+    "id": "ord-003-product",
+    "order_id": "ORD-003",
+    "category": "product",
+    "page_chunk": "Products in order ORD-003: Logitech MX Master 3S — 8000 DPI quiet-click sensor, MagSpeed scroll, USB-C, multi-device Flow. MX Keys S — low-profile backlit keys, Logi Options+ smart actions. Both carry a 1-year warranty."
+  }
+]

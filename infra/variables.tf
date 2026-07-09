@@ -9,6 +9,18 @@ variable "location" {
   description = "Azure region. Must support Foundry gpt-4o-mini + text-embedding-3-large + AI Search."
 }
 
+variable "postgres_location" {
+  type        = string
+  default     = "northcentralus"
+  description = "Region for PostgreSQL Flexible Server. Separate from var.location because eastus2 is offer-restricted for Postgres on this subscription. Reached from the eastus2 VNet via a cross-region private endpoint."
+}
+
+variable "search_location" {
+  type        = string
+  default     = "westeurope"
+  description = "Region for Azure AI Search. Separate from var.location because eastus2 is out of Search capacity for this subscription. Reached from the eastus2 VNet via a cross-region private endpoint."
+}
+
 variable "resource_group_name" {
   type        = string
   default     = "rg-agent-memory-rag"

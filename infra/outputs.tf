@@ -27,7 +27,7 @@ output "backend_internal_fqdn" {
 }
 
 output "openai_endpoint" {
-  value = azurerm_ai_services.main.endpoint
+  value = azurerm_cognitive_account.main.endpoint
 }
 
 output "cosmos_endpoint" {

@@ -1,0 +1,22 @@
+[
+  {
+    "id": "return-policy_eligibility",
+    "section": "eligibility",
+    "page_chunk": "Return eligibility: Most items can be returned within a 30-day window from the delivery date. Items must be in original packaging and in resellable condition. Electronics must include all accessories, cables, and manuals. Final-sale items and downloadable software are non-returnable. Furniture is covered by a 30-day comfort guarantee."
+  },
+  {
+    "id": "return-policy_process",
+    "section": "process",
+    "page_chunk": "Return process: Start a return to receive an RMA (Return Merchandise Authorization) number, typically issued within 1 business day. A prepaid shipping label is provided. Returns are free for defective items; non-defective returns incur a $7.99 return shipping fee. Large or freight items are scheduled for pickup."
+  },
+  {
+    "id": "return-policy_refunds",
+    "section": "refunds",
+    "page_chunk": "Refunds: Once received and inspected, refunds are issued to the original payment method within 5-7 business days; credit card refunds may take an additional 3-5 days to post. A restocking fee of up to 15% may apply if an item is returned damaged. Customers may instead choose an exchange for 110% of the value in store credit."
+  },
+  {
+    "id": "return-policy_exceptions",
+    "section": "exceptions",
+    "page_chunk": "Return exceptions: Holiday purchases have an extended return window through January 31. Manufacturer warranty claims are handled beyond the 30-day window. Bulk or wholesale orders qualify for a 20% consideration with manager approval. International returns are shipped at the customer's expense. A 14-day price match is available on eligible items."
+  }
+]

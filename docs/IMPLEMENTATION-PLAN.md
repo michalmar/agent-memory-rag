@@ -20,8 +20,11 @@ authored. This plan sequences that work and flags every gap.
 | Deliverable | Plan first, then implement the full stack |
 | Environment | Truly greenfield; **no local emulators** — provision real Azure |
 | Hosting | Backend + Frontend → **Azure Container Apps** (separate apps) |
-| LLM/Embeddings | **Azure AI Foundry** (account + **project**) with `gpt-4o-mini` + `text-embedding-3-large` deployments |
+| LLM/Embeddings | **Azure AI Foundry** — `azurerm_cognitive_account` (kind `AIServices`, `project_management_enabled=true`) + `azurerm_cognitive_account_project` with `gpt-4o-mini` + `text-embedding-3-large` deployments (replaces deprecated `azurerm_ai_services` + azapi project) |
+| Agent runtime | **Stock `openai` `AsyncAzureOpenAI` SDK** (Chat Completions + tool calling + streaming) — `agent-framework` is not on public PyPI; AG-UI contracts unchanged |
 | Session memory (F1) | **In-memory only** — no Azure Cache for Redis; **pin backend to 1 replica** (min=max=1) |
+| RAG default | **`classic`** (app-side embeddings → AI Search hybrid) to keep Search fully private; agentic MCP deferred |
+| Regions | Core stack + VNet **eastus2**; **Postgres → northcentralus** (eastus2 offer-restricted) via cross-region private endpoint; **AI Search → westeurope** (eastus2 out of capacity) via cross-region private endpoint |
 | IaC | **Terraform** (AzureRM + AzAPI); containers built/pushed/deployed **separately** from `terraform apply` |
 
 ## 3. Revised architecture (deltas from PRD)
@@ -191,6 +194,19 @@ These must be **authored**; the PRD gives contracts/behavior but no source:
 
 ## 8. Notes
 
+- **As-built region resolution (this deployment):** eastus2 is offer-restricted for PostgreSQL
+  Flexible Server and was out of AI Search capacity on this subscription. Resolution: core stack
+  + VNet in **eastus2**, **Postgres in northcentralus**, **AI Search in westeurope**, each reached
+  from the eastus2 VNet via a **cross-region private endpoint**. Postgres therefore uses
+  private-endpoint networking (public access disabled, no delegated-subnet VNet injection —
+  injection can't span regions), and the unused `snet-postgres` delegated subnet is retained but
+  inert. Open decision #2 (region) is resolved this way; risk #6's VNet-injection assumption is
+  superseded by the PE approach.
+- **Foundry as-built:** provisioned via `azurerm_cognitive_account` (kind `AIServices`,
+  `project_management_enabled=true`) + `azurerm_cognitive_account_project`, replacing the
+  deprecated `azurerm_ai_services` + preview azapi project (which failed because the account
+  lacked `allowProjectManagement`). See
+  https://learn.microsoft.com/azure/foundry/how-to/create-resource-terraform.
 - The PRD's §16 acceptance criterion #2 (session survives backend restart via Redis) is
   intentionally **descoped** by the in-memory decision; treat single-replica in-memory as
   the accepted behavior and document it.

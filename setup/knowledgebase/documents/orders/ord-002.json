@@ -1,0 +1,20 @@
+[
+  {
+    "id": "ord-002-order_detail",
+    "order_id": "ORD-002",
+    "category": "order_detail",
+    "page_chunk": "Order ORD-002 detail: Placed January 20, 2026. Contains 1 item — Anker 737 Power Bank (24000mAh, $99.99). Subtotal $99.99, shipping $0.00 (free), tax $8.25, order total $108.24. Paid with Mastercard ending 5510."
+  },
+  {
+    "id": "ord-002-shipping",
+    "order_id": "ORD-002",
+    "category": "shipping",
+    "page_chunk": "Order ORD-002 shipping: Currently processing at the Seattle fulfillment center. No tracking number assigned yet. Estimated delivery January 23, 2026. Current status: processing, awaiting carrier pickup."
+  },
+  {
+    "id": "ord-002-product",
+    "order_id": "ORD-002",
+    "category": "product",
+    "page_chunk": "Product Anker 737 Power Bank (in order ORD-002): 24000mAh capacity, 140W max output, USB-C PD 3.1, smart digital display, charges a laptop and phone simultaneously. 18-month warranty."
+  }
+]

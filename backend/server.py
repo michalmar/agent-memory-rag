@@ -30,6 +30,18 @@ from agent_runner import build_runner
 from auth import User, get_current_user
 from session_manager import SessionManager
 
+import agent_tools
+from classic_rag_client import ClassicRAGClient
+from config import get_settings
+from conversation_history import ConversationHistoryStore
+from conversation_memory import ConversationMemoryStore
+from memory_agent import MemoryAgent
+from profile_agent import ProfileAgent
+from user_profile_memory import (
+    UserProfileMemoryStore,
+    profile_to_prompt_context,
+)
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -47,14 +59,16 @@ _jinja = Environment(
 VALID_RAG_MODES = {"none", "agentic", "classic"}
 
 session_manager = SessionManager()
+history_store = ConversationHistoryStore()
+profile_store = UserProfileMemoryStore()
+memory_store = ConversationMemoryStore()
+classic_rag = ClassicRAGClient()
+memory_agent = MemoryAgent()
+profile_agent = ProfileAgent()
 
 
 def _resolve_llm_mode() -> str:
-    mode = os.getenv("LLM_MODE", "").lower()
-    if mode in {"mock", "real"}:
-        return mode
-    # Default: real only when an Azure endpoint is configured, else mock.
-    return "real" if os.getenv("AZURE_OPENAI_ENDPOINT") else "mock"
+    return get_settings().resolve_llm_mode()
 
 
 def _render_system_prompt(user_profile: dict | None, rag_mode: str) -> str:
@@ -65,8 +79,28 @@ def _render_system_prompt(user_profile: dict | None, rag_mode: str) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await session_manager.connect()
-    logger.info("[startup] backend ready (llm_mode=%s)", _resolve_llm_mode())
+    for store in (history_store, profile_store, memory_store):
+        try:
+            await store.initialize()
+        except Exception:  # noqa: BLE001
+            logger.exception("[startup] store init failed: %s", type(store).__name__)
+    agent_tools.set_stores(
+        memory_store=memory_store, profile_store=profile_store, classic_rag=classic_rag
+    )
+    logger.info(
+        "[startup] backend ready (llm_mode=%s history=%s profile=%s memory=%s search=%s)",
+        _resolve_llm_mode(),
+        history_store.enabled,
+        profile_store.enabled,
+        memory_store.enabled,
+        classic_rag.enabled,
+    )
     yield
+    for store in (history_store, profile_store, memory_store):
+        try:
+            await store.close()
+        except Exception:  # noqa: BLE001
+            pass
     await session_manager.close()
 
 
@@ -134,7 +168,14 @@ async def chat(req: ChatRequest, user: User = Depends(get_current_user)):
     if session.user_id is None:
         session.user_id = user.user_id
 
-    instructions = _render_system_prompt(user_profile=None, rag_mode=rag_mode)
+    profile_ctx = {}
+    try:
+        profile = await profile_store.get_profile(user.user_id)
+        profile_ctx = profile_to_prompt_context(profile)
+    except Exception:  # noqa: BLE001
+        logger.exception("[chat] profile fetch failed")
+
+    instructions = _render_system_prompt(user_profile=profile_ctx, rag_mode=rag_mode)
     runner = build_runner(_resolve_llm_mode(), instructions, rag_mode)
 
     encoder = EventEncoder()
@@ -142,6 +183,7 @@ async def chat(req: ChatRequest, user: User = Depends(get_current_user)):
 
     async def event_stream():
         logger.info("[IN] chat user=%s session=%s rag=%s", user.user_id, session_id, rag_mode)
+        token = agent_tools.current_user_id.set(user.user_id)
         assistant_text = ""
         try:
             yield encoder.encode(RunStartedEvent(thread_id=session_id, run_id=run_id))
@@ -154,12 +196,18 @@ async def chat(req: ChatRequest, user: User = Depends(get_current_user)):
             logger.exception("[chat] run failed")
             yield encoder.encode(RunErrorEvent(message=str(exc), code="RUN_ERROR"))
             return
+        finally:
+            agent_tools.current_user_id.reset(token)
 
-        # Persist the turn into the in-memory session history.
+        # Persist the turn into the in-memory session + durable history store.
         session.messages.append({"role": "user", "content": user_message})
         session.messages.append({"role": "assistant", "content": assistant_text})
         await session_manager.increment_message_count(session_id, 2)
         await session_manager.save_session_state(session)
+        await history_store._persist_turn(
+            session_id, user.user_id, user_message, assistant_text,
+            title=session.title, rag_mode=rag_mode,
+        )
         logger.info("[OUT] chat session=%s chars=%d", session_id, len(assistant_text))
 
     return StreamingResponse(
@@ -217,3 +265,140 @@ async def delete_session(session_id: str, user: User = Depends(get_current_user)
 @app.get("/health")
 async def health():
     return {"status": "ok", "llm_mode": _resolve_llm_mode()}
+
+
+# ---------------------------------------------------------------- conversations (history)
+@app.get("/conversations")
+async def list_conversations(user: User = Depends(get_current_user)):
+    return await history_store.list_conversations(user.user_id)
+
+
+@app.get("/conversations/{session_id}")
+async def get_conversation(session_id: str, user: User = Depends(get_current_user)):
+    doc = await history_store.get_conversation(session_id, user.user_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return doc
+
+
+class UpdateTitleRequest(BaseModel):
+    title: str
+
+
+@app.put("/conversations/{session_id}/title")
+async def update_conversation_title(
+    session_id: str, req: UpdateTitleRequest, user: User = Depends(get_current_user)
+):
+    doc = await history_store.update_title(session_id, user.user_id, req.title)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return doc
+
+
+@app.delete("/conversations/{session_id}")
+async def delete_conversation(session_id: str, user: User = Depends(get_current_user)):
+    ok = await history_store.delete_conversation(session_id, user.user_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    await memory_store.delete_by_conversation(session_id, user.user_id)
+    return {"deleted": session_id}
+
+
+# ---------------------------------------------------------------- user profile
+@app.get("/profile")
+async def get_profile(user: User = Depends(get_current_user)):
+    profile = await profile_store.get_profile(user.user_id)
+    return profile or {"user_id": user.user_id, "version": 0}
+
+
+class ProfilePutRequest(BaseModel):
+    sections: dict
+
+
+@app.put("/profile")
+async def put_profile(req: ProfilePutRequest, user: User = Depends(get_current_user)):
+    doc = await profile_store.upsert_profile(user.user_id, req.sections)
+    if doc is None:
+        raise HTTPException(status_code=503, detail="Profile store unavailable")
+    return doc
+
+
+@app.delete("/profile")
+async def delete_profile(user: User = Depends(get_current_user)):
+    await profile_store.delete_profile(user.user_id)
+    return {"deleted": user.user_id}
+
+
+class ProfileGenerateRequest(BaseModel):
+    session_id: str
+
+
+@app.post("/profile/generate")
+async def generate_profile(
+    req: ProfileGenerateRequest, user: User = Depends(get_current_user)
+):
+    doc = await history_store.get_conversation(req.session_id, user.user_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    sections = await profile_agent.extract(doc.get("messages", []), doc.get("title"))
+    if not sections:
+        return {"updated": False, "sections": {}}
+    source = {"session_id": req.session_id, "title": doc.get("title")}
+    updated = await profile_store.upsert_profile(user.user_id, sections, source)
+    return {"updated": True, "profile": updated}
+
+
+# ---------------------------------------------------------------- conversation memory
+@app.get("/memories")
+async def list_memories(user: User = Depends(get_current_user)):
+    return await memory_store.list_memories(user.user_id)
+
+
+class MemoryCreateRequest(BaseModel):
+    conversation_id: str
+    title: str | None = None
+
+
+@app.post("/memories", status_code=201)
+async def create_memory(
+    req: MemoryCreateRequest, user: User = Depends(get_current_user)
+):
+    doc = await history_store.get_conversation(req.conversation_id, user.user_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    messages = doc.get("messages", [])
+    result = await memory_agent.create_memory(messages, req.title or doc.get("title"))
+    row = await memory_store.create_memory(
+        conversation_id=req.conversation_id,
+        user_id=user.user_id,
+        summary=result.summary,
+        embedding=result.embedding,
+        source_title=req.title or doc.get("title"),
+        message_count=len(messages),
+    )
+    if row is None:
+        raise HTTPException(status_code=503, detail="Memory store unavailable")
+    return row
+
+
+class MemorySearchRequest(BaseModel):
+    query: str
+    limit: int = 3
+
+
+@app.post("/memories/search")
+async def search_memories(
+    req: MemorySearchRequest, user: User = Depends(get_current_user)
+):
+    from azure_clients import embed_text
+
+    embedding = await embed_text(req.query)
+    return await memory_store.search(user.user_id, embedding, limit=req.limit)
+
+
+@app.delete("/memories/{memory_id}")
+async def delete_memory(memory_id: str, user: User = Depends(get_current_user)):
+    ok = await memory_store.delete_memory(memory_id, user.user_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return {"deleted": memory_id}

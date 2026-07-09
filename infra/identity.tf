@@ -2,7 +2,7 @@ data "azurerm_client_config" "current" {}
 
 # App identity → Azure OpenAI (chat + embeddings via Responses/Embeddings API).
 resource "azurerm_role_assignment" "app_openai_user" {
-  scope                = azurerm_ai_services.main.id
+  scope                = azurerm_cognitive_account.main.id
   role_definition_name = "Cognitive Services OpenAI User"
   principal_id         = azurerm_user_assigned_identity.app.principal_id
 }

@@ -141,6 +141,29 @@ Backend Python deps (pin-compatible): `agent-framework-ag-ui`, `aiohttp`, `async
 `azure-cosmos`, `azure-identity`, `jinja2`, `openai`, `pyjwt[crypto]`, `python-dotenv`,
 plus `redis>=5.0.0` (Challenge 01), `httpx` (MCP), `azure-search-documents` (setup only).
 
+> **As-built deltas (this deployment).** The reference implementation in this repo diverges
+> from the spec above in a few deliberate ways, driven by package availability and Azure
+> subscription constraints:
+> - **Agent runtime:** `agent-framework` is not on public PyPI, so the real runner uses the
+>   stock `openai` `AsyncAzureOpenAI` SDK (Chat Completions + tool calling + streaming),
+>   mapped to the same AG-UI event stream. Contracts (§B3/§B4) are unchanged.
+> - **Session store:** Redis is **not** provisioned; `SessionManager` runs in-memory only and
+>   the backend is pinned to a single replica (§F1 acceptance descoped accordingly).
+> - **RAG:** default `rag_mode=classic` (app-side embeddings → AI Search hybrid query), which
+>   keeps AI Search fully private with no Search→OpenAI vectorizer link. Agentic MCP retrieval
+>   is left as a future enhancement.
+> - **Foundry resource:** provisioned as `azurerm_cognitive_account` (kind `AIServices`,
+>   `project_management_enabled = true`) + `azurerm_cognitive_account_project` — the current
+>   Microsoft Foundry resource shape, replacing the deprecated `azurerm_ai_services` +
+>   preview `azapi` project.
+> - **Regions (fully-private, cross-region private endpoints):** core stack + VNet in
+>   **eastus2**; **PostgreSQL Flexible Server in northcentralus** (eastus2 is offer-restricted
+>   for Postgres on this subscription) reached via a cross-region private endpoint (no VNet
+>   injection); **Azure AI Search in westeurope** (eastus2 was out of Search capacity) reached
+>   via a cross-region private endpoint. All data-plane access is private; the local machine
+>   cannot reach Cosmos/Postgres/Search directly — KB setup runs in-VNet or with a temporary
+>   public toggle.
+
 ---
 
 ## 6. Memory Taxonomy (the 5 layers)

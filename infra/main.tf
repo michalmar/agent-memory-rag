@@ -10,7 +10,7 @@ locals {
     identity        = "id-${var.name_prefix}-${local.suffix}"
     foundry         = "${local.base}aif"
     cosmos          = "${local.base}cosmos"
-    postgres        = "${local.base}pg"
+    postgres        = "${local.base}pgnc"
     search          = "${local.base}search"
     acr             = "${local.base}acr"
     aca_env         = "cae-${var.name_prefix}-${local.suffix}"

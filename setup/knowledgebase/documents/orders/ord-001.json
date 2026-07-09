@@ -1,0 +1,20 @@
+[
+  {
+    "id": "ord-001-order_detail",
+    "order_id": "ORD-001",
+    "category": "order_detail",
+    "page_chunk": "Order ORD-001 detail: Placed January 15, 2026. Contains 2 items — Sony WH-1000XM5 wireless headphones (Black, $349.99) and USB-C cable 2m x2 ($14.99 each). Subtotal $379.97, shipping $9.99, tax $31.20, order total $421.16. Paid with Visa ending 4242. Billing and shipping to the customer's default address."
+  },
+  {
+    "id": "ord-001-shipping",
+    "order_id": "ORD-001",
+    "category": "shipping",
+    "page_chunk": "Order ORD-001 shipping: Shipped January 18, 2026 via UPS Ground. Tracking number 1Z999AA1. Departed the Seattle fulfillment center. Estimated delivery January 25, 2026. Current status: in transit, last scanned in Portland."
+  },
+  {
+    "id": "ord-001-product",
+    "order_id": "ORD-001",
+    "category": "product",
+    "page_chunk": "Product WH-1000XM5 (in order ORD-001): Sony flagship noise-cancelling headphones. Up to 30 hours battery life, Bluetooth multipoint (connect two devices at once), quick charge (3 min for 3 hours), and a 1-year limited manufacturer warranty."
+  }
+]

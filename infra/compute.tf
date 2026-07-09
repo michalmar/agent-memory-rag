@@ -54,7 +54,7 @@ locals {
   backend_env = {
     LLM_MODE                     = "real"
     AZURE_CLIENT_ID              = azurerm_user_assigned_identity.app.client_id
-    AZURE_OPENAI_ENDPOINT        = azurerm_ai_services.main.endpoint
+    AZURE_OPENAI_ENDPOINT        = azurerm_cognitive_account.main.endpoint
     AZURE_OPENAI_CHAT_DEPLOYMENT = azurerm_cognitive_deployment.chat.name
     AZURE_OPENAI_EMBED_DEPLOYMENT = azurerm_cognitive_deployment.embedding.name
     COSMOS_ENDPOINT              = azurerm_cosmosdb_account.main.endpoint
