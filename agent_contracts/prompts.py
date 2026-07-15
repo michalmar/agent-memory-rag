@@ -1,0 +1,22 @@
+"""Single prompt source used for both production agents."""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+_PROMPT_PATH = Path(__file__).with_name("customer_support.txt")
+_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
+PROMPT_VERSION = hashlib.sha256(_PROMPT.encode("utf-8")).hexdigest()
+
+_FOUNDRY_PROMPT_PATH = Path(__file__).with_name("foundry_prompt.txt")
+_FOUNDRY_PROMPT = _FOUNDRY_PROMPT_PATH.read_text(encoding="utf-8")
+FOUNDRY_PROMPT_VERSION = hashlib.sha256(_FOUNDRY_PROMPT.encode("utf-8")).hexdigest()
+
+
+def render_instructions() -> str:
+    return _PROMPT
+
+
+def render_foundry_prompt_instructions() -> str:
+    return _FOUNDRY_PROMPT

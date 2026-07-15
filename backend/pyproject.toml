@@ -1,47 +1,36 @@
 [project]
 name = "agentic-memory-backend"
 version = "0.1.0"
-description = "Agentic AI Memory backend (Challenges 1-5) — vertical slice P0-P2"
+description = "FastAPI trust boundary for the dual-Foundry agent memory application"
 requires-python = ">=3.11"
 dependencies = [
   # --- Core runtime (offline slice + deployed) ---
+  "agent-memory-rag-contracts==0.1.0",
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.30.0",
   "ag-ui-protocol>=0.1.19",     # AG-UI events + EventEncoder (SSE frames, see B4)
-  "jinja2>=3.1.0",              # prompt templates
   "python-dotenv>=1.2.1",
   "pydantic>=2.7.0",
-  # --- Azure stores + LLM (used by the real runner; imported lazily) ---
+  # --- Azure stores + LLM ---
   "aiohttp>=3.9.0",
   "asyncpg>=0.30.0",
   "azure-cosmos>=4.9.0",
+  "azure-ai-projects==2.3.0",
   "azure-identity>=1.19.0",
+  "azure-monitor-opentelemetry>=1.6.0",
   "openai>=1.40.0",
   "httpx>=0.27.0",
   "pyjwt[crypto]>=2.10.1",
 ]
 
-[project.optional-dependencies]
-# `agent-framework-ag-ui` is a private/beta build NOT on public PyPI. The real runner
-# uses the stock `openai` Azure SDK instead, so no private registry is required.
-azure = []
+[tool.uv.sources]
+agent-memory-rag-contracts = { path = "../agent_contracts", editable = true }
 
-[tool.setuptools]
-py-modules = [
-  "server",
-  "config",
-  "auth",
-  "session_manager",
-  "agent_tools",
-  "agent_runner",
-  "conversation_history",
-  "user_profile_memory",
-  "conversation_memory",
-  "memory_agent",
-  "profile_agent",
-  "classic_rag_client",
-  "azure_clients",
-]
+[tool.setuptools.packages.find]
+include = ["agent_memory_backend*"]
+
+[tool.setuptools.package-data]
+agent_memory_backend = ["prompts/*.txt"]
 
 [build-system]
 requires = ["setuptools>=68"]

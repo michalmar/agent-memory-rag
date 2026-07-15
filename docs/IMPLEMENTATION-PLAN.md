@@ -1,250 +1,221 @@
-# Implementation Plan — Agentic AI Memory (Challenges 1–5) on Azure
+# Implementation Plan - Selectable Dual Foundry Agents
 
-## 1. Problem & Approach
+**Status:** Implemented, deployed, and accepted
 
-Build the full customer-support chat app described in `docs/PRD-Solution-Challenges-1-5.md`
-(5 memory layers: session, history, conversation memory, user profile, KB RAG) **from an
-empty repo**, and — per this session's decisions — **provision all required Azure services
-with Terraform and deploy backend + frontend to Azure Container Apps**, with LLM/embeddings
-served from an **Azure AI Foundry project**.
+## 1. Target
 
-The PRD is detailed and ~80% self-contained (prompts, framework contracts, algorithms, A2UI
-templates, SSE contract are all verbatim). The two largest source files (`server.py`,
-`app.ts`) and **all infrastructure** are specified by *contract/behavior only* and must be
-authored. This plan sequences that work and flags every gap.
+Add one Microsoft Foundry Basic Setup account/project containing:
 
-## 2. Decisions locked in this session
+- `customer-support-prompt`: native Foundry Prompt Agent;
+- `customer-support-maf-hosted`: Foundry Hosted Agent implemented with Microsoft
+  Agent Framework and Hosted Responses protocol `2.0.0`.
 
-| Topic | Decision |
-|---|---|
-| Deliverable | Plan first, then implement the full stack |
-| Environment | Truly greenfield; **no local emulators** — provision real Azure |
-| Hosting | Backend + Frontend → **Azure Container Apps** (separate apps) |
-| LLM/Embeddings | **Azure AI Foundry** — `azurerm_cognitive_account` (kind `AIServices`, `project_management_enabled=true`) + `azurerm_cognitive_account_project` with `gpt-4o-mini` + `text-embedding-3-large` deployments (replaces deprecated `azurerm_ai_services` + azapi project) |
-| Agent runtime | **Stock `openai` `AsyncAzureOpenAI` SDK** (Chat Completions + tool calling + streaming) — `agent-framework` is not on public PyPI; AG-UI contracts unchanged |
-| Session memory (F1) | **In-memory only** — no Azure Cache for Redis; **pin backend to 1 replica** (min=max=1) |
-| RAG default | **`classic`** (app-side embeddings → AI Search hybrid) to keep Search fully private; agentic MCP deferred |
-| Regions | Core stack + VNet **eastus2**; **Postgres → northcentralus** (eastus2 offer-restricted) via cross-region private endpoint; **AI Search → westeurope** (eastus2 out of capacity) via cross-region private endpoint |
-| IaC | **Terraform** (AzureRM + AzAPI); containers built/pushed/deployed **separately** from `terraform apply` |
+Both agents use Foundry IQ and share normalized result/citation envelopes and the
+AG-UI stream. The Prompt Agent is knowledge-only. Hosted MAF additionally uses the
+strict application tools and owner-scoped application data.
 
-## 3. Revised architecture (deltas from PRD)
+## 2. Locked decisions
 
-- **Remove Redis** from the runtime and infra. `SessionManager` runs its documented in-memory
-  fallback path; `REDIS_HOST` stays unset. Sessions do **not** survive an ACA revision restart
-  or a second replica — hence the single-replica pin. (Update PRD §F1 acceptance expectations.)
-- **Add infra layer** (`infra/` Terraform) the PRD explicitly left out of scope (§3, §14 note).
-- **Add container build/deploy** (ACR + image build/push + ACA revision update) as a separate
-  step from Terraform provisioning.
-- Everything else (F2 Cosmos, F3 Postgres/pgvector, F4 Cosmos, F5 AI Search) stays as specified.
+| Area | Decision |
+| --- | --- |
+| Agent choice | Required for new conversations and immutable afterward |
+| Retrieval | Foundry IQ only; no `classic`, `none`, or runtime RAG selector |
+| Trust boundary | FastAPI authenticates users, owns application data, persists routing, and emits AG-UI |
+| Prompt tools | Foundry IQ `knowledge_base_retrieve` only |
+| Hosted tools | Foundry IQ plus app-only backend gateway through the public frontend proxy |
+| Networking | Public Entra-only Foundry/Search/ACR endpoints; private backend, Cosmos, and PostgreSQL |
+| Backend identity | Existing application UAMI |
+| Hosted identity | Foundry-created service principal; no UAMI support in preview |
+| Agent state | Foundry conversations; private mapping persisted in Cosmos schema v3 |
+| Runtime coordination | In-memory mappings and locks, single backend replica, durable restoration from Cosmos |
+| Rollback | Keep current Foundry generation and prior agent versions during soak |
 
-Target service set to provision:
-1. Azure AI Foundry (Cognitive Services `AIServices` account) **+ project** + 2 model deployments.
-2. Azure Cosmos DB (NoSQL) — DB + **history** container (`/user_id`) + **profiles** container (`/user_id`).
-3. Azure Database for PostgreSQL Flexible Server + `vector` (pgvector) extension allow-listed.
-4. Azure AI Search (**Basic tier+**, required for agentic retrieval / KB MCP).
-5. Azure Container Registry (ACR).
-6. Container Apps Environment + Log Analytics + 2 Container Apps (backend, frontend).
-7. User-assigned managed identity + all cross-service **RBAC / data-plane role assignments**.
+## 3. Implementation phases
 
-## 4. Build phases (todos tracked in SQL)
+### Phase 0 - Platform and SDK validation
 
-**Phase 0 — Repo scaffold & tooling**
-- `p0-scaffold`: Create B1 file tree (backend/, frontend/, setup/, infra/), `.env.example`, READMEs.
+- [x] Confirmed private outbound isolation requires Standard Setup and BYO resources.
+- [x] Confirmed Hosted Agents can use platform-managed default session storage.
+- [x] Selected Basic Setup to comply with the tenant policy that disables Storage
+  shared-key access.
+- [x] Confirmed Hosted Responses protocol `2.0.0`.
+- [x] Pinned `azure-ai-projects==2.3.0`,
+  `agent-framework-foundry==1.10.1`, and
+  `agent-framework-foundry-hosting==1.0.0a260709`.
+- [x] Confirmed project and Hosted Agent identity requirements.
+- [x] Confirmed East US 2 model quota.
 
-**Phase 1 — Backend core (Challenge 01 + chat)**
-- `p1-backend-app`: `server.py` FastAPI app, lifespan, CORS (expose `X-Session-ID`), logging.
-- `p1-auth`: `auth.py` — mock header auth first; Entra JWT path scaffolded.
-- `p1-agent-framework`: Verify `agent-framework-ag-ui` API surface; wire `AzureOpenAIResponsesClient`.
-- `p1-session-mgr`: `SessionManager` in-memory only (skip Redis branches at runtime).
-- `p1-chat-sse`: `/chat` streaming loop → AG-UI events (B3/B4 contract); `get_order_status` tool.
+### Phase 1 - Shared contracts
 
-**Phase 2 — Frontend shell**
-- `p2-frontend-shell`: Vite + Lit scaffold, `index.html`, `main.ts`, runtime config, `/api` proxy.
-- `p2-agui-client`: `client.ts` REST+SSE parsing; `auth.ts` (mock + MSAL).
-- `p2-a2ui`: `a2ui/` types + processor + `<a2ui-surface>` renderer (B8, verbatim behavior).
-- `p2-templates`: `shipping-status.ts` + `rag-citations.ts` templates + `converters.ts`.
-- `p2-app`: `app.ts` root component (layout, sidebar, chat stream, drawers) — **authored from §12**.
+- [x] Added `agent_contracts/`.
+- [x] Added strict Pydantic schemas for the four Hosted application tools.
+- [x] Added shared result/citation and normalized event models.
+- [x] Added separate deterministic prompt versions for the IQ-only Prompt Agent and
+  the application-tool Hosted agent.
+- [x] Removed identity fields from model-visible tool schemas.
+- [x] Removed the legacy direct Chat Completions runner and classic RAG client.
 
-**Phase 3 — Conversation history (Challenge 02, Cosmos)**
-- `p3-history-store`: `conversation_history.py` + `_persist_turn` + emulator-safe delete note.
-- `p3-history-endpoints`: `/conversations*`, `/sessions/{id}/history`; sidebar History UI.
+### Phase 2 - Durable runtime state
 
-**Phase 4 — User profile (Challenge 04, Cosmos)**
-- `p4-profile-store`: `user_profile_memory.py` (merge-patch, versioning, audit).
-- `p4-profile-agent`: `profile_agent.py` + extraction prompt; `update_user_profile` tool.
-- `p4-profile-prompts`: `user_profile.j2`, `profile_update.j2`; wire into system prompt per turn.
-- `p4-profile-endpoints`: `/profile*` (get/put/delete/generate/generate-all) + Profile drawer UI.
+- [x] Added Cosmos schema v3 agent descriptors and private runtime state.
+- [x] Added explicit public summary/detail allowlists.
+- [x] Added ETag conditional replacement.
+- [x] Added per-conversation overlap rejection.
+- [x] Added owner-partitioned Hosted session lookup.
+- [x] Added lazy migration of existing conversations to Hosted MAF.
+- [x] Added cleanup when remote state cannot be persisted.
 
-**Phase 5 — Conversation memory (Challenge 03, Postgres/pgvector)**
-- `p5-memory-store`: `conversation_memory.py` (asyncpg pool, table+extension, cosine `search`).
-- `p5-memory-agent`: `memory_agent.py` + `conversation_memory.j2` summariser.
-- `p5-memory-endpoints`: `/memories*` + `check_memory` tool + Memory list/search UI.
+### Phase 3 - App-only Hosted tool gateway
 
-**Phase 6 — Knowledge Base RAG (Challenge 05, AI Search)**
-- `p6-kb-seed`: Author verbatim seed JSON for orders (ord-001..003) + return-policy (4 sections).
-- `p6-kb-setup`: `setup/knowledgebase/setup_search.py` — indexes, vectorizer, knowledge sources, KB.
-- `p6-rag-agentic`: `rag_client.py` (`create_rag_mcp_tool`, MCP parser, `_derive_source_name`).
-- `p6-rag-classic`: `classic_rag_client.py` (hybrid REST, 502 retry).
-- `p6-rag-wire`: Tool registration per `rag_mode`; `customer_support.j2` RAG rules; RAG toggle + citation cards.
+- [x] Added application-only token validation.
+- [x] Rejects delegated `scp` tokens.
+- [x] Requires `AgentTools.Invoke`.
+- [x] Requires an allowlisted Hosted Agent principal.
+- [x] Validates user/session binding before dispatch.
+- [x] Uses shared async handlers under trusted context.
+- [x] Returns typed error envelopes without sensitive payload logging.
 
-**Phase 7 — Infrastructure (Terraform)**
-- `p7-tf-foundation`: providers, RG, Log Analytics, naming, `terraform.tfvars.example`.
-- `p7-tf-foundry`: Foundry account + project + `gpt-4o-mini` + `text-embedding-3-large` deployments.
-- `p7-tf-data`: Cosmos (DB+2 containers), Postgres Flexible + pgvector allow-list, AI Search (Basic+).
-- `p7-tf-compute`: ACR, Container Apps Env, 2 Container Apps, ingress, env-var wiring.
-- `p7-tf-identity`: user-assigned MI + RBAC (OpenAI User, Cosmos data-plane, Search roles, Search→OpenAI for vectorizer, Postgres AAD).
+### Phase 4 - Policy-compliant hybrid Foundry infrastructure
 
-**Phase 8 — Containerize, deploy, run KB setup**
-- `p8-dockerfiles`: Backend Dockerfile (B2), Frontend multi-stage nginx Dockerfile (B9) + config.js.
-- `p8-build-push`: `az acr build` (or docker) for both images; update ACA revisions.
-- `p8-kb-provision`: Run `setup_search.py` against provisioned Search + Foundry (one-time).
-- `p8-smoke`: End-to-end verification of §16 acceptance criteria (minus Redis restart item).
+- [x] Added an additive Foundry `AIServices` account using Basic Agent Setup.
+- [x] Enabled public Entra-only Foundry access for backend and Hosted invocation.
+- [x] Removed outbound network injection and Standard Setup state resources.
+- [x] Enabled public Entra-only KB Search access for all clients and removed
+  incompatible private endpoint/DNS paths for non-injected runtimes.
+- [x] Added chat and embedding deployments.
+- [x] Added the Foundry IQ `RemoteTool` project connection using
+  `ProjectManagedIdentity`.
+- [x] Added project, backend, setup, ACR, Search, and telemetry RBAC.
+- [x] Added backend feature flags and safe Terraform outputs.
+- [x] Removed the empty resources left by the interrupted Standard Setup apply;
+  the final Terraform plan has no changes.
 
-**Phase 9 — Harden**
-- `p9-entra`: Optional Entra auth path (backend JWKS + frontend MSAL) if selected.
-- `p9-isolation`: Per-user ownership/403 checks across all stores; error handling; structured logs.
+### Phase 5 - Hosted Microsoft Agent Framework agent
 
-## 5. GAP ANALYSIS — Missing content the PRD does NOT provide verbatim
+- [x] Added Hosted Agent source and Dockerfile.
+- [x] Uses `FoundryChatClient`, `Agent`, and `ResponsesHostServer`.
+- [x] Uses async Azure Identity.
+- [x] Uses Foundry IQ MCP plus async gateway wrappers routed through the public
+  frontend to the internal backend.
+- [x] Reads Foundry request context for user/session/call IDs.
+- [x] Enforces five function-invocation iterations.
+- [x] Built and pushed the immutable image through public Entra/RBAC-only ACR.
+- [x] Deployed Hosted Agent version and captured
+  `instance_identity.principal_id`.
+- [x] Assigned `AgentTools.Invoke` and updated the backend allowlist.
 
-These must be **authored**; the PRD gives contracts/behavior but no source:
+### Phase 6 - Native Prompt Agent
 
-1. **`server.py`** — the single most important file. Only endpoint list, lifecycle steps, and the
-   streaming-loop *shape* (B3) are given. The full SSE orchestration, endpoint bodies,
-   dependency injection, `_build_personalized_agent`, global default-agent reuse, and error
-   mapping must be written from §4/§8/§10.
-2. **`app.ts`** — B12 explicitly says UI styling/layout is "the only judgment left to
-   implementers." A large Lit component (sidebar, chat stream, history/memory/profile panels,
-   RAG toggle, theme, mock-user switch) authored from §12 prose.
-3. **`client.ts`, `auth.ts`, `converters.ts`, `ui-logger.ts`** — behavior described, no code.
-4. **KB seed JSON** (B10) — prose only. `ord-002`/`ord-003` are just "analogous"; exact chunks,
-   IDs, categories, and page text for all orders + the 4 policy sections must be written so the
-   `_derive_source_name` and citation formats line up with the templates.
-5. **`setup_search.py`** — behavior in §F5/B10 but no code: index schemas, integrated
-   Azure OpenAI vectorizer config, semantic config, 2 knowledge sources, 1 knowledge base,
-   embedding backfill.
-6. **All Terraform** — nothing in the PRD (infra was out of scope). Entire `infra/` authored.
-7. **Dockerfiles** — backend described in prose (B2); frontend nginx template partially given (B9);
-   both need finalizing.
-8. **`.env` / `terraform.tfvars`** — §14 lists variables but no filled example values.
-9. **`pyproject.toml` / `package.json`** — dependency lists given (B2/B9) but exact lockable
-   manifests and `uv.lock` / `package-lock.json` must be generated.
-10. **Tests** — no test suite is specified anywhere; §16 acceptance is manual. Any automated
-    tests are net-new.
+- [x] Added idempotent Prompt Agent release tooling.
+- [x] Publishes prompt/retrieval/release hashes.
+- [x] Uses Foundry IQ MCP with project managed identity.
+- [x] Exposes only `knowledge_base_retrieve`; no application function tools.
+- [x] Added a dedicated knowledge-only prompt and async Responses adapter.
+- [x] Sends trusted user identity on conversation operations.
+- [x] Published and activated the Prompt Agent in the new project.
 
-## 6. GAP ANALYSIS — Technical risks & bleeding-edge dependencies (verified)
+### Phase 7 - Unified runtime and AG-UI
 
-1. **Azure AI Search agentic retrieval / KB MCP endpoint (`api-version=2025-11-01-Preview`)** —
-   *Verified*: real but **PREVIEW** (no SLA, "not recommended for production"), **region-limited**,
-   **Basic tier or higher** required. This is the **highest-risk** external dependency. Agentic
-   RAG (F5) may be unavailable in some regions and the exact API version may shift. **Mitigation:**
-   pick a supported region; classic RAG (F5 hybrid) is a non-preview fallback; keep agentic path
-   feature-flagged so the app degrades if the MCP endpoint is absent.
-2. **`agent-framework-ag-ui>=1.0.0b260304`** — a **beta** build of Microsoft Agent Framework
-   (date-stamped ~Feb 2026). API surface (`Agent`, `AgentSession`, `MCPStreamableHTTPTool`,
-   `AzureOpenAIResponsesClient`, streaming `update.contents` shape) must be verified against the
-   actually-published package; beta APIs can drift. **Mitigation:** pin exact version; validate
-   imports in Phase 1 before building on them.
-3. **Azure OpenAI Responses API via `AzureOpenAIResponsesClient` + `store=false`** — relatively
-   new; region + api-version + Foundry-project routing must be confirmed. **Mitigation:** verify
-   `base_url=.../openai/v1/` works against the Foundry deployment early.
-4. **pgvector `vector(3072)`** — *Verified*: storable; the PRD query does a full-scan cosine sort
-   (no ANN index), so it works, but **HNSW indexing is capped at 2000 dims** → won't scale.
-   Azure Postgres Flexible Server must have a pgvector version supporting 3072-dim columns and
-   `vector` must be in `azure.extensions` allow-list. **Mitigation:** fine for demo scale; note
-   the scaling ceiling.
-5. **Cosmos DB data-plane RBAC via Terraform** — AAD auth needs
-   `azurerm_cosmosdb_sql_role_assignment` (data-plane), *not* just control-plane RBAC. Easy to get
-   wrong. **Mitigation:** explicit data-plane role module; or use key auth to start.
-6. **Postgres managed-identity auth** — requires registering the ACA managed identity as an AAD
-   principal inside Postgres + `PG_AAD_PRINCIPAL_NAME`; non-trivial bootstrap not expressible
-   purely in Terraform. **Mitigation:** start with `PG_AUTH_MODE=password`, move to MI later.
-7. **AI Search integrated vectorizer → Azure OpenAI** — Search service needs a managed identity
-   with **Cognitive Services OpenAI User** on the Foundry resource, and embedding deployment name
-   must match (`text-embedding-3-large`, 3072). Cross-service RBAC dependency.
-8. **ACA image chicken-and-egg** — a Container App needs an image at creation, but images are
-   built/pushed separately. **Mitigation:** create apps with a placeholder image, then update the
-   revision after `az acr build`; or gate the compute module on images existing.
-9. **`text-embedding-3-large` = 3072 dims** must be identical across AI Search vector fields,
-   pgvector column, and the embedding client — any mismatch breaks search silently.
-10. **Model/region availability** — `gpt-4o-mini` + `text-embedding-3-large` + AI Search agentic
-    retrieval must all be available in **one** region. May force a compromise region.
+- [x] Added application-owned async `AgentRuntime` protocol.
+- [x] Added Prompt and Hosted remote adapters with lifecycle methods.
+- [x] Added normalized stream parsing and AG-UI conversion.
+- [x] Added immutable routing and no-failover behavior.
+- [x] Added runtime/dependency readiness.
+- [x] Preserves a precreated Hosted session ID if a completed response omits it.
 
-## 7. OPEN DECISIONS still needed (with recommendations)
+### Phase 8 - Frontend
 
-1. **Auth mode for the deployed app** — mock header vs Entra ID.
-   *Recommendation:* ship **mock** first (no app registration needed), keep Entra code path;
-   add Entra in Phase 9 if real users are expected. **Needs your call.**
-2. **Azure region** — must satisfy risk #10 (Foundry models + AI Search agentic + Postgres +
-   Cosmos). *Recommendation:* choose from a Foundry+agentic-retrieval-supported region
-   (e.g., `eastus2` / `swedencentral` pending verification). **Needs your call.**
-3. **Cosmos auth & capacity** — key vs AAD; serverless vs provisioned throughput.
-   *Recommendation:* **serverless + AAD data-plane** (cheap, least-privilege). **Confirm.**
-4. **Postgres auth mode** — password vs managed identity (see risk #6).
-   *Recommendation:* **password** to start.
-5. **Container build/deploy mechanism** — local `az acr build` + `az containerapp update`, or a
-   **GitHub Actions** pipeline. *Recommendation:* scripted `az acr build` now; CI later.
-6. **Naming / resource group / tags / subscription** — need target subscription ID, RG name,
-   name prefix, and tag policy. **Needs your input.**
-7. **Secrets handling** — Key Vault vs ACA secrets for any keys. *Recommendation:* prefer
-   managed identity; ACA secrets for the few remaining keys; Key Vault optional.
-8. **Frontend RAG default & policy coverage** — PRD defaults `rag_mode=agentic`; if agentic is
-   region-blocked, default to `classic`. **Depends on region (decision #2).**
-9. **Cost ceiling** — AI Search Basic, Postgres Flexible, Cosmos, Foundry, ACA, Log Analytics all
-   accrue cost. Any budget cap or auto-shutdown expectation? **Needs your input.**
+- [x] Added the two-agent selector.
+- [x] Locks selection after conversation creation.
+- [x] Restores safe agent metadata from history.
+- [x] Added runtime badges and fixed Foundry IQ indicator.
+- [x] Removed the RAG selector.
+- [x] Preserved identity-change and late-stream guards.
 
-## 8. Notes
+### Phase 9 - Tests, security, and documentation
 
-- **As-built region resolution (this deployment):** eastus2 is offer-restricted for PostgreSQL
-  Flexible Server and was out of AI Search capacity on this subscription. Resolution: core stack
-  + VNet in **eastus2**, **Postgres in northcentralus**, **AI Search in westeurope**, each reached
-  from the eastus2 VNet via a **cross-region private endpoint**. Postgres therefore uses
-  private-endpoint networking (public access disabled, no delegated-subnet VNet injection —
-  injection can't span regions), and the unused `snet-postgres` delegated subnet is retained but
-  inert. Open decision #2 (region) is resolved this way; risk #6's VNet-injection assumption is
-  superseded by the PE approach.
-- **Foundry as-built:** provisioned via `azurerm_cognitive_account` (kind `AIServices`,
-  `project_management_enabled=true`) + `azurerm_cognitive_account_project`, replacing the
-  deprecated `azurerm_ai_services` + preview azapi project (which failed because the account
-  lacked `allowProjectManagement`). See
-  https://learn.microsoft.com/azure/foundry/how-to/create-resource-terraform.
-- **P8 deploy as-built (live, verified):** both images built server-side with `az acr build`
-  (ACR is Premium + private, so the deploy script toggles `--public-network-enabled true
-  --default-action Allow` for the build window, then re-locks to Deny/private). Backend on ACA
-  internal ingress (`:8000`), frontend nginx external (`:8080`) reverse-proxies `/api` to the
-  backend's internal FQDN with `proxy_ssl_server_name on` (SNI + Host must match for ACA
-  routing) and serves `/config.js` via envsubst. KB indexes (orders + return-policy) are
-  provisioned by an **in-VNet ACA Job** (`kb-setup`) using the app's user-assigned identity —
-  needed because both AI Search and Foundry are private, so app-side embedding + index upload
-  must run from inside the VNet. Classic RAG searches **both** indexes and merges by score.
-  Smoke-tested end-to-end: real-LLM chat + `get_order_status` tool, classic RAG with citations,
-  Cosmos profile round-trip, pgvector memory create + semantic search (cosine ~0.66).
-- **P9 harden as-built (implemented, verified):** dual-mode auth. `AUTH_MODE=mock` (default,
-  live) uses the `X-Mock-User-ID` header + fixed user table; `AUTH_MODE=entra` validates an
-  RS256 Entra ID JWT via the tenant JWKS (`PyJWKClient`, cached), checking `aud/iss/exp/iat`
-  and optional `ENTRA_REQUIRED_SCOPES` (403) / `ENTRA_REQUIRED_ROLES` (403); `User` built from
-  `oid|sub`, `preferred_username|email|upn`, `name`. Frontend `auth.ts` adds a lazy-loaded MSAL
-  Browser path (`loginPopup` → `acquireTokenSilent`/`acquireTokenPopup` → `Authorization: Bearer`)
-  and `signOut()`; `app.ts` swaps the mock-user picker for a Sign-out button in Entra mode.
-  Per-user isolation is enforced across all stores by partition/scope: sessions raise 403 on
-  cross-owner access; Cosmos history/profile and pgvector memory are keyed by `user_id`, so
-  cross-user reads return 404 (a user can't observe another user's records). Structured
-  `[IN]/[OUT]` chat logging + Azure SDK noise suppression retained. Verified: 6 Entra JWT cases
-  (valid / bad-aud / expired / missing-scope / no-bearer / sub-fallback), mock 401 cases, server
-  import, frontend build (MSAL in a separate lazy chunk), and live 401 on unauthenticated `/me`.
-  Entra remains dormant unless `ENTRA_TENANT_ID`+`ENTRA_AUDIENCE` are set and `AUTH_MODE=entra`
-  (an app registration is required to exercise the live login flow). The app registration is a
-  **manual, non-Terraform** step (creating one needs Entra directory rights — a separate grant
-  from the subscription Contributor role used for the resource infra); it is scripted in
-  `scripts/create_entra_app.sh` (SPA app: exposes `access_as_user`, v2 tokens, SPA redirect,
-  Azure-CLI pre-auth) and documented in the root README. **Verified live** against a real tenant
-  token: created the app reg, fetched a v2 access token via the pre-authorized Azure CLI, and ran
-  the backend in `AUTH_MODE=entra` — `/me` with the bearer token → 200 (correct `oid`/name), and
-  no/bad token → 401. Note: v2 access tokens carry the client-id GUID as `aud`, so
-  `ENTRA_AUDIENCE=<clientId>` (not `api://<clientId>`).
-- The PRD's §16 acceptance criterion #2 (session survives backend restart via Redis) is
-  intentionally **descoped** by the in-memory decision; treat single-replica in-memory as
-  the accepted behavior and document it.
-- Suggested build order (PRD §17) is preserved but **extended** with Phases 0, 7, 8, 9 for
-  scaffold + infra + deploy + harden.
-- Prompts, algorithms (B6), SSE contract (B4), A2UI templates (B8), and framework contract (B3)
-  are copied **verbatim** — do not paraphrase.
+- [x] Added tests for strict tools and typed validation.
+- [x] Added tests for gateway binding and app-only token policy.
+- [x] Added tests for immutable routing and remote-state cleanup.
+- [x] Added tests for ETag writes and runtime-state privacy.
+- [x] Added tests for tenant-scoped identity and owner-partitioned lists.
+- [x] Added Hosted session continuity and trusted identity-header tests.
+- [x] Updated PRD, implementation plan, environment examples, and READMEs.
+- [x] Completed Azure validation and deployment verification.
+
+### Phase 10 - Staged rollout
+
+- [x] Deployed Foundry Basic Setup, the Hosted MAF agent, and Prompt Agent version 3.
+- [x] Verified the Prompt definition contains only Foundry IQ
+  `knowledge_base_retrieve`.
+- [x] Deployed backend revision `ca-agmem-backend--0000020`.
+- [x] Verified Prompt and Hosted Foundry IQ grounding with citations.
+- [x] Verified Prompt requests cannot invoke application tools.
+- [x] Verified Hosted order lookup through the app-role-protected gateway.
+- [x] Verified delegated gateway rejection and immutable per-conversation routing.
+- [x] Enabled both selectors after acceptance.
+- [x] Confirmed the final Terraform plan has no changes.
+
+## 4. Azure topology
+
+| Component | Region | Notes |
+| --- | --- | --- |
+| Foundry/Container Apps/VNet | East US 2 | Foundry Basic Setup uses public Entra-only ingress; Container Apps retains its VNet |
+| PostgreSQL | North Central US | Private endpoint; Entra-only runtime |
+| KB Search | West Europe | Public Entra-only endpoint for Foundry IQ and setup clients |
+
+Interactive jumpboxes and Bastion are not part of the deployed topology.
+
+## 5. Security rules
+
+- Never enable public access on application Cosmos, PostgreSQL, or the backend
+  Container App.
+- Public Foundry, KB Search, and ACR must remain Entra/RBAC-only with local/key,
+  admin, and anonymous authentication disabled as applicable.
+- Use the Foundry project endpoint, not an unmanaged Hosted Agent URL.
+- Never grant the Hosted identity direct application-data roles.
+- Never accept browser- or model-provided identity as authorization context.
+- Never expose private runtime IDs in API responses or telemetry.
+- Never silently reroute an existing conversation to another agent.
+- Stop deployment if Terraform proposes deletion/replacement of the current
+  Foundry account or model deployments.
+
+## 6. Validation gates
+
+### Application
+
+- Backend unit suite passes.
+- Frontend TypeScript build passes.
+- Shared/backend/Hosted Python source compiles.
+- Prompt release module imports with pinned SDK versions.
+- Hosted image dependencies resolve at pinned versions.
+
+### Infrastructure
+
+- `terraform fmt -check` passes.
+- `terraform validate` passes.
+- The live plan has no changes or replacements.
+- Public/private endpoints, DNS, project connection, and role scopes match the
+  approved Basic Setup design.
+- Existing Foundry account and deployments are no-op.
+
+### Live acceptance
+
+- Backend invokes both agents through the public Entra/RBAC-only project endpoint.
+- Hosted Agent reaches the app-only gateway through the public frontend proxy,
+  which forwards to the internal backend.
+- Both agents retrieve from the same Foundry IQ KB and return citations.
+- Two users cannot access each other's application or Foundry state.
+- Delegated user tokens and wrong Hosted principals cannot call the gateway.
+- Persistence failures emit run errors before `RUN_FINISHED`.
+- Feature flags expose only runtimes that pass readiness.
+
+## 7. Rollback
+
+- Disable new conversations for the affected runtime.
+- Reactivate the prior Prompt or Hosted version.
+- Keep existing conversation metadata unchanged.
+- Do not delete an agent as routine rollback.
+- Keep the new account if it contains active conversations.
+- Delete the current Foundry generation only in a separate approved cleanup after
+  migration, soak, and rollback-window completion.

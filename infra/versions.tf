@@ -13,6 +13,10 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.13"
+    }
   }
 }
 
@@ -21,6 +25,9 @@ provider "azurerm" {
   features {
     cognitive_account {
       purge_soft_delete_on_destroy = true
+    }
+    storage {
+      data_plane_available = false
     }
   }
   # Resource providers are registered out-of-band via scripts/register_providers.sh

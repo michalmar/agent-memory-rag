@@ -2,6 +2,8 @@
 # ${BACKEND_URL}, ${AUTH_MODE}, ${ENTRA_*}, ${BUILD_ID} come from Container App env.
 # nginx runtime vars ($host, $uri, ...) are NOT in the environment, so envsubst leaves them intact.
 
+limit_req_zone $binary_remote_addr zone=agent_tools:10m rate=20r/s;
+
 server {
     listen 8080;
     server_name _;
@@ -14,6 +16,19 @@ server {
         default_type application/javascript;
         add_header Cache-Control "no-store";
         return 200 'window.__APP_CONFIG__ = { apiBaseUrl: "/api", authMode: "${AUTH_MODE}", entraTenantId: "${ENTRA_TENANT_ID}", entraClientId: "${ENTRA_CLIENT_ID}", entraApiScope: "${ENTRA_API_SCOPE}", buildId: "${BUILD_ID}" };';
+    }
+
+    # Public bridge used only by the app-role-protected Hosted Agent tool gateway.
+    location ^~ /api/internal/agent-tools/ {
+        limit_req zone=agent_tools burst=20 nodelay;
+        client_max_body_size 64k;
+        proxy_pass ${BACKEND_URL}/internal/agent-tools/;
+        proxy_http_version 1.1;
+        proxy_ssl_server_name on;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 45s;
     }
 
     # Reverse-proxy API calls to the backend (internal ACA FQDN). Trailing slash

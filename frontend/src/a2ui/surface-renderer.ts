@@ -1,4 +1,4 @@
-// <a2ui-surface> — recursive Lit renderer for the A2UI standard catalog (see PRD §B8).
+// Recursive Lit renderer for the internal A2UI tool-card subset.
 import { LitElement, html, css, type TemplateResult, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import type { BoundValue, ComponentDef } from './types.js';
@@ -11,27 +11,37 @@ export class A2UISurface extends LitElement {
   static styles = css`
     :host {
       display: block;
+      max-width: 560px;
+      color: var(--fg, #15223b);
+      font-family: var(--font-body, system-ui, sans-serif);
+    }
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
     }
     .a2-card {
-      background: var(--card, #fff);
-      border: 1px solid var(--border, #e3e6ea);
-      border-radius: 12px;
       padding: 14px 16px;
-      box-shadow: var(--shadow, 0 1px 3px rgba(0, 0, 0, 0.08));
+      border: 1px solid var(--border, #d7dde6);
+      border-radius: 8px;
+      background: var(--card, #fff);
     }
     .a2-col {
       display: flex;
+      min-width: 0;
       flex-direction: column;
     }
     .a2-row {
       display: flex;
+      min-width: 0;
       flex-direction: row;
+      flex-wrap: wrap;
     }
     .gap-small {
-      gap: 6px;
+      gap: 7px;
     }
     .gap-medium {
-      gap: 12px;
+      gap: 11px;
     }
     .align-center {
       align-items: center;
@@ -41,46 +51,55 @@ export class A2UISurface extends LitElement {
     }
     .a2-divider {
       border: none;
-      border-top: 1px solid var(--border, #e3e6ea);
-      margin: 4px 0;
       width: 100%;
+      margin: 6px 0;
+      border-top: 1px solid var(--border, #d7dde6);
+    }
+    .txt-h3,
+    .txt-h4,
+    .txt-h5 {
+      color: var(--fg, #15223b);
+      font-family: var(--font-display, system-ui, sans-serif);
+      letter-spacing: -0.018em;
+      line-height: 1.25;
     }
     .txt-h3 {
-      font-size: 1.05rem;
-      font-weight: 700;
+      font-size: 0.98rem;
+      font-weight: 600;
     }
     .txt-h4 {
-      font-size: 0.95rem;
+      font-size: 0.91rem;
       font-weight: 600;
     }
     .txt-h5 {
-      font-size: 0.9rem;
+      font-size: 0.89rem;
       font-weight: 600;
     }
     .txt-body {
-      font-size: 0.9rem;
+      color: var(--fg, #15223b);
+      font-size: 0.88rem;
+      line-height: 1.55;
+      overflow-wrap: anywhere;
     }
     .txt-caption {
-      font-size: 0.78rem;
-      color: var(--fg-muted, #6b7280);
+      color: var(--fg-muted, #657187);
+      font-family: var(--font-mono, ui-monospace, monospace);
+      font-size: 0.66rem;
+      line-height: 1.45;
     }
     .material-symbols-outlined {
+      flex: 0 0 auto;
+      color: var(--accent, #3c59c7);
       font-family: 'Material Symbols Outlined';
-      color: var(--accent, #2563eb);
+      font-size: 1.08rem;
     }
-    button.a2-btn {
-      cursor: pointer;
-      border: 1px solid var(--border, #e3e6ea);
-      border-radius: 8px;
-      padding: 6px 12px;
-      background: var(--bg-alt, #f5f6f8);
-      color: var(--fg, #1a1a1a);
-      font: inherit;
-    }
-    button.a2-btn.primary {
-      background: var(--accent, #2563eb);
-      color: var(--accent-fg, #fff);
-      border-color: var(--accent, #2563eb);
+    @media (max-width: 560px) {
+      .a2-card {
+        padding: 13px 14px;
+      }
+      .a2-row {
+        align-items: flex-start;
+      }
     }
   `;
 
@@ -127,30 +146,11 @@ export class A2UISurface extends LitElement {
       const name = this.resolveBoundValue(c.Icon.name, ctx);
       return html`<span class="material-symbols-outlined">${name}</span>`;
     }
-    if ('Image' in c) {
-      return html`<img src=${this.resolveBoundValue(c.Image.url, ctx)} alt="" />`;
-    }
     if ('Divider' in c) {
       return html`<hr class="a2-divider" />`;
     }
     if ('Card' in c) {
       return html`<div class="a2-card">${this.renderComponent(c.Card.child, ctx)}</div>`;
-    }
-    if ('Button' in c) {
-      const primary = c.Button.primary ? 'primary' : '';
-      return html`<button
-        class="a2-btn ${primary}"
-        @click=${() =>
-          this.dispatchEvent(
-            new CustomEvent('a2ui-action', {
-              bubbles: true,
-              composed: true,
-              detail: { name: c.Button.action?.name, context: ctx },
-            }),
-          )}
-      >
-        ${this.renderComponent(c.Button.child, ctx)}
-      </button>`;
     }
     if ('Column' in c) {
       const cls = `a2-col gap-${c.Column.gap ?? 'small'}`;
@@ -161,44 +161,14 @@ export class A2UISurface extends LitElement {
       const cls = `a2-row ${align} gap-${c.Row.gap ?? 'small'}`;
       return html`<div class=${cls}>${this.renderChildren(c.Row.children, ctx)}</div>`;
     }
-    if ('List' in c) {
-      const cls = `a2-col gap-small`;
-      return html`<div class=${cls}>${this.renderChildren(c.List.children, ctx)}</div>`;
-    }
     return nothing;
   }
 
   private renderChildren(
-    children:
-      | { explicitList: string[] }
-      | { template: { dataBinding: string; componentId: string } },
+    children: { explicitList: string[] },
     ctx: string | null,
   ): Array<TemplateResult | typeof nothing> {
-    if ('explicitList' in children) {
-      return children.explicitList.map((cid) => this.renderComponent(cid, ctx));
-    }
-    // template: iterate over the bound array or object-map.
-    const { dataBinding, componentId } = children.template;
-    const value = this.resolveRaw(dataBinding);
-    let items: unknown[] = [];
-    if (Array.isArray(value)) items = value;
-    else if (value && typeof value === 'object') items = Object.values(value);
-    return items.map((_item, index) =>
-      this.renderComponent(componentId, `${dataBinding}/${index}`),
-    );
-  }
-
-  private resolveRaw(path: string): unknown {
-    const parts = path.split('/').filter(Boolean);
-    let cursor: unknown = this.surface?.dataModel ?? {};
-    for (const part of parts) {
-      if (cursor && typeof cursor === 'object' && part in (cursor as object)) {
-        cursor = (cursor as Record<string, unknown>)[part];
-      } else {
-        return undefined;
-      }
-    }
-    return cursor;
+    return children.explicitList.map((id) => this.renderComponent(id, ctx));
   }
 
   render() {

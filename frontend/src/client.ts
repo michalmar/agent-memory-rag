@@ -13,36 +13,73 @@ export interface AGUIEvent {
   content?: string;
   message?: string;
   code?: string;
+  name?: string;
+  value?: unknown;
 }
 
 export interface ChatHandlers {
   onEvent: (ev: AGUIEvent) => void;
-  onSessionId?: (id: string) => void;
+  onConversationId?: (id: string) => void;
 }
 
 export interface ChatMessage {
-  role: string;
+  role: 'user' | 'assistant';
   content: string;
+  created_at?: string;
+  usage?: TokenUsage;
+  tools?: string[];
+  citations?: CitationSource[];
+}
+
+export type AgentType = 'foundry-prompt' | 'agent-framework';
+
+export interface TokenUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cached_tokens?: number;
+}
+
+export interface CitationSource {
+  ref_id: string;
+  source_name: string;
+  search_idx?: number | null;
+  url?: string | null;
+}
+
+export interface RuntimeMetadata {
+  agent_type?: AgentType;
+  agent_label?: string;
+  release_label?: string;
+  agent_version?: string;
 }
 
 export interface ConversationSummary {
   id: string;
-  user_id: string;
   title?: string;
   created_at?: string;
   updated_at?: string;
   message_count?: number;
+  metadata?: RuntimeMetadata;
 }
 
 export interface ConversationDoc extends ConversationSummary {
   messages: ChatMessage[];
-  metadata?: Record<string, unknown>;
+}
+
+export interface AgentOption {
+  agent_type: AgentType;
+  label: string;
+  available: boolean;
+}
+
+export interface AgentCapabilities {
+  retrieval: 'Foundry IQ';
+  agents: AgentOption[];
 }
 
 export interface MemoryRow {
   id: string;
   conversation_id: string;
-  user_id: string;
   summary: string;
   source_title?: string;
   message_count?: number;
@@ -52,7 +89,6 @@ export interface MemoryRow {
 }
 
 export interface ProfileDoc {
-  user_id: string;
   version: number;
   basic_info?: Record<string, unknown>;
   interests?: string[];
@@ -60,7 +96,6 @@ export interface ProfileDoc {
   preferences?: Record<string, unknown>;
   status?: Record<string, unknown>;
   facts?: string[];
-  source_conversations?: unknown[];
   updated_at?: string;
 }
 
@@ -68,9 +103,7 @@ export class AGUIClient {
   private base = getConfig().apiBaseUrl;
 
   async me(): Promise<Record<string, unknown>> {
-    const res = await fetch(`${this.base}/me`, { headers: await getAuthHeaders() });
-    if (!res.ok) throw new Error(`/me ${res.status}`);
-    return res.json();
+    return this.req('/me');
   }
 
   // ------------------------------------------------------------------ REST helpers
@@ -104,6 +137,10 @@ export class AGUIClient {
     return this.req(`/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
+  getAgentCapabilities(): Promise<AgentCapabilities> {
+    return this.req('/agents');
+  }
+
   // Conversation memory (pgvector)
   listMemories(): Promise<MemoryRow[]> {
     return this.req('/memories');
@@ -131,10 +168,10 @@ export class AGUIClient {
   putProfile(sections: Record<string, unknown>): Promise<ProfileDoc> {
     return this.req('/profile', { method: 'PUT', body: JSON.stringify({ sections }) });
   }
-  generateProfile(sessionId: string): Promise<{ updated: boolean; profile?: ProfileDoc }> {
+  generateProfile(conversationId: string): Promise<{ updated: boolean; profile?: ProfileDoc }> {
     return this.req('/profile/generate', {
       method: 'POST',
-      body: JSON.stringify({ session_id: sessionId }),
+      body: JSON.stringify({ conversation_id: conversationId }),
     });
   }
   deleteProfile(): Promise<unknown> {
@@ -143,9 +180,9 @@ export class AGUIClient {
 
   /** POST /chat and stream AG-UI events to the handler. */
   async chat(
-    messages: ChatMessage[],
-    threadId: string | null,
-    ragMode: string,
+    message: string,
+    conversationId: string | null,
+    agentType: AgentType,
     handlers: ChatHandlers,
     signal?: AbortSignal,
   ): Promise<void> {
@@ -157,14 +194,18 @@ export class AGUIClient {
     const res = await fetch(`${this.base}/chat`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ messages, thread_id: threadId, rag_mode: ragMode }),
+      body: JSON.stringify({
+        message,
+        conversation_id: conversationId,
+        agent_type: agentType,
+      }),
       signal,
     });
     if (!res.ok || !res.body) {
       throw new Error(`/chat ${res.status}`);
     }
-    const sid = res.headers.get('X-Session-ID');
-    if (sid && handlers.onSessionId) handlers.onSessionId(sid);
+    const id = res.headers.get('X-Conversation-ID');
+    if (id && handlers.onConversationId) handlers.onConversationId(id);
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();

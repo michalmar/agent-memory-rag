@@ -5,6 +5,7 @@
 #
 # Produces a single SPA app registration that:
 #   * exposes an `access_as_user` delegated scope  (backend audience = api://<appId>)
+#   * exposes an `AgentTools.Invoke` application role for Hosted Agent identities
 #   * issues v2 access tokens                       (iss = .../v2.0)
 #   * has a SPA redirect URI for MSAL               (the frontend public URL)
 #   * pre-authorizes the Azure CLI client           (so we can fetch a test token)
@@ -35,6 +36,7 @@ done
 
 TENANT_ID="$(az account show --query tenantId -o tsv)"
 SCOPE_ID="$(uuidgen | tr 'A-Z' 'a-z')"
+APP_ROLE_ID="$(uuidgen | tr 'A-Z' 'a-z')"
 
 # SPA redirect URIs (MSAL redirects back to the app origin).
 REDIRECTS="[\"${FRONTEND_URL}\", \"${FRONTEND_URL}/\"]"
@@ -55,12 +57,42 @@ OBJ_ID="$(az ad app show --id "$APP_ID" --query id -o tsv)"
 # Preserve an already-created scope id so the identifier stays stable across re-runs.
 EXISTING_SCOPE="$(az ad app show --id "$APP_ID" --query "api.oauth2PermissionScopes[?value=='access_as_user'].id | [0]" -o tsv)"
 [[ -n "$EXISTING_SCOPE" ]] && SCOPE_ID="$EXISTING_SCOPE"
-echo ">> appId=${APP_ID} objectId=${OBJ_ID} scopeId=${SCOPE_ID}"
+EXISTING_APP_ROLE="$(az ad app show --id "$APP_ID" --query "appRoles[?value=='AgentTools.Invoke'].id | [0]" -o tsv)"
+[[ -n "$EXISTING_APP_ROLE" ]] && APP_ROLE_ID="$EXISTING_APP_ROLE"
+EXISTING_APP_ROLES="$(az ad app show --id "$APP_ID" --query appRoles -o json)"
+APP_ROLES="$(
+  jq --arg id "$APP_ROLE_ID" '
+    if any(.[]; .value == "AgentTools.Invoke") then
+      map(
+        if .value == "AgentTools.Invoke" then
+          . + {
+            allowedMemberTypes: ["Application"],
+            description: "Allow a hosted agent to invoke the private application tool gateway.",
+            displayName: "Invoke agent tools",
+            isEnabled: true
+          }
+        else .
+        end
+      )
+    else
+      . + [{
+        allowedMemberTypes: ["Application"],
+        description: "Allow a hosted agent to invoke the private application tool gateway.",
+        displayName: "Invoke agent tools",
+        id: $id,
+        isEnabled: true,
+        value: "AgentTools.Invoke"
+      }]
+    end
+  ' <<<"$EXISTING_APP_ROLES"
+)"
+echo ">> appId=${APP_ID} objectId=${OBJ_ID} scopeId=${SCOPE_ID} appRoleId=${APP_ROLE_ID}"
 
 # --- PATCH 1: identifier URI, exposed scope, v2 tokens, SPA redirects.
 PATCH1=$(cat <<JSON
 {
   "identifierUris": ["api://${APP_ID}"],
+  "appRoles": ${APP_ROLES},
   "spa": { "redirectUris": ${REDIRECTS} },
   "api": {
     "requestedAccessTokenVersion": 2,

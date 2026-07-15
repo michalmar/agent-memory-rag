@@ -9,7 +9,7 @@ description: Capture IDEA messages into the project IDEAS.md file with readable 
 
 Use this skill when the user writes `IDEA: ...` and wants the idea saved in this repository.
 
-The goal is to keep a simple, append-only idea log in the root `IDEAS.md` file. The log should be readable in plain Markdown and easy to update when ideas are implemented.
+The goal is to keep a simple idea log in the root `IDEAS.md` file. Active ideas and implemented ideas are kept in distinct sections so the list remains easy to scan.
 
 ## Trigger
 
@@ -34,19 +34,17 @@ If the file does not exist, create it with this heading:
 ```markdown
 # Ideas
 
-Use this file to collect workshop and project ideas. New ideas are appended at the end so the list stays easy to scan.
+Use this file to collect workshop and project ideas. Active ideas stay here; implemented ideas are moved to the Archive section. New ideas are added first.
 ```
 
-Each idea must be a separate `##` section appended to the end of the file:
+Each idea must be a separate `##` section. Put its description first and its compact metadata on one line after the description:
 
 ```markdown
 ## Short idea title
 
-**Date:** YYYY-MM-DD  
-**Author:** @username  
-**Implemented:** No
-
 Idea text goes here.
+
+<sub>**Date:** YYYY-MM-DD · **Author:** @username · **Implemented:** No</sub>
 ```
 
 ## Capture procedure
@@ -56,17 +54,19 @@ Idea text goes here.
 3. Use the current date in `YYYY-MM-DD` format.
 4. Use the current user as the author when available; otherwise use `Unknown`.
 5. Set `Implemented` to `No` for new ideas.
-6. Append the new idea to the end of `IDEAS.md`; do not reorder or rewrite older ideas unless the user asks.
+6. Insert the new idea immediately after the `# Ideas` introduction, before all existing active ideas and the `# Archive` section.
 7. Keep the idea text concise and readable. Use plain paragraphs unless the user provides a list.
 
 ## Marking ideas implemented
 
 When the user asks to mark an idea as done or implemented:
 
-1. Find the matching `##` idea section.
-2. Change `**Implemented:** No` to `**Implemented:** Yes`.
-3. Preserve the original date, author, title, and idea text.
-4. If multiple ideas could match, ask which one to update.
+1. Find the matching active `##` idea section.
+2. Change `**Implemented:** No` to `**Implemented:** Yes` in the idea's compact metadata line.
+3. If the current date differs from the idea's `**Date:**`, add `· **Implemented date:** YYYY-MM-DD` to the same metadata line.
+4. Move the complete idea section to the end of a top-level `# Archive` section. Create that section if it does not exist.
+5. Preserve the original date, author, title, and idea text.
+6. If multiple ideas could match, ask which one to update.
 
 ## Example prompt
 

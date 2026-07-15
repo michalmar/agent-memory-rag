@@ -1,12 +1,13 @@
 # =========================================================== Cosmos DB (NoSQL)
 resource "azurerm_cosmosdb_account" "main" {
-  name                          = local.names.cosmos
-  location                      = azurerm_resource_group.main.location
-  resource_group_name           = azurerm_resource_group.main.name
-  offer_type                    = "Standard"
-  kind                          = "GlobalDocumentDB"
+  name                = local.names.cosmos
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  offer_type          = "Standard"
+  kind                = "GlobalDocumentDB"
+  # Application state stays reachable only through Private Link.
   public_network_access_enabled = false
-  local_authentication_disabled = true
+  local_authentication_enabled  = false
 
   capabilities {
     name = "EnableServerless"
@@ -77,16 +78,29 @@ resource "azurerm_postgresql_flexible_server" "main" {
   location                      = var.postgres_location
   resource_group_name           = azurerm_resource_group.main.name
   version                       = "16"
-  administrator_login           = var.postgres_admin_login
-  administrator_password        = var.postgres_admin_password
   storage_mb                    = 32768
   sku_name                      = "B_Standard_B1ms"
   public_network_access_enabled = false
   tags                          = var.tags
 
+  authentication {
+    active_directory_auth_enabled = true
+    password_auth_enabled         = false
+    tenant_id                     = data.azurerm_client_config.current.tenant_id
+  }
+
   lifecycle {
     ignore_changes = [zone]
   }
+}
+
+resource "azurerm_postgresql_flexible_server_active_directory_administrator" "bootstrap" {
+  server_name         = azurerm_postgresql_flexible_server.main.name
+  resource_group_name = azurerm_resource_group.main.name
+  tenant_id           = data.azurerm_client_config.current.tenant_id
+  object_id           = azurerm_user_assigned_identity.postgres_bootstrap.principal_id
+  principal_name      = azurerm_user_assigned_identity.postgres_bootstrap.name
+  principal_type      = "ServicePrincipal"
 }
 
 # Cross-region private endpoint in the eastus2 PE subnet targeting the Postgres server.
@@ -127,40 +141,19 @@ resource "azurerm_postgresql_flexible_server_database" "memory" {
 
 # =========================================================== Azure AI Search
 # Deployed in var.search_location (eastus2 is out of Search capacity on this
-# subscription). Public access disabled; reached from the eastus2 VNet via a
-# cross-region private endpoint.
+# subscription). All clients use the Entra-only public endpoint because a Search
+# private endpoint makes the MCP hostname unresolvable to non-injected agents.
 resource "azurerm_search_service" "main" {
   name                          = local.names.search
   location                      = var.search_location
   resource_group_name           = azurerm_resource_group.main.name
   sku                           = var.search_sku
-  local_authentication_enabled  = true
-  authentication_failure_mode   = "http403"
-  public_network_access_enabled = false
+  local_authentication_enabled  = false
+  public_network_access_enabled = true
   semantic_search_sku           = "free"
   tags                          = var.tags
 
   identity {
     type = "SystemAssigned"
-  }
-}
-
-resource "azurerm_private_endpoint" "search" {
-  name                = "pe-${local.names.search}"
-  location            = azurerm_resource_group.main.location
-  resource_group_name = azurerm_resource_group.main.name
-  subnet_id           = azurerm_subnet.pe.id
-  tags                = var.tags
-
-  private_service_connection {
-    name                           = "psc-search"
-    private_connection_resource_id = azurerm_search_service.main.id
-    subresource_names              = ["searchService"]
-    is_manual_connection           = false
-  }
-
-  private_dns_zone_group {
-    name                 = "search"
-    private_dns_zone_ids = [azurerm_private_dns_zone.zones["search"].id]
   }
 }

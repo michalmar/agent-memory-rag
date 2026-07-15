@@ -1,4 +1,4 @@
-// A2UIProcessor — buffers surface state from A2UI messages (see PRD §B8).
+// Buffers the internal A2UI subset emitted by tool-result converters.
 import type {
   A2UIMessage,
   ComponentDef,
@@ -52,31 +52,13 @@ export class A2UIProcessor {
       const s = this.ensure(msg.surfaceUpdate.surfaceId);
       for (const c of msg.surfaceUpdate.components) s.components.set(c.id, c);
     } else if ('dataModelUpdate' in msg) {
-      const { surfaceId, path, contents } = msg.dataModelUpdate;
+      const { surfaceId, contents } = msg.dataModelUpdate;
       const s = this.ensure(surfaceId);
-      const obj = entriesToObject(contents);
-      if (!path) {
-        s.dataModel = { ...s.dataModel, ...obj };
-      } else {
-        // Resolve nested path (split on '/') and merge there.
-        const parts = path.split('/').filter(Boolean);
-        let cursor: Record<string, unknown> = s.dataModel;
-        for (const p of parts) {
-          if (typeof cursor[p] !== 'object' || cursor[p] === null) cursor[p] = {};
-          cursor = cursor[p] as Record<string, unknown>;
-        }
-        Object.assign(cursor, obj);
-      }
+      s.dataModel = { ...s.dataModel, ...entriesToObject(contents) };
     } else if ('beginRendering' in msg) {
       const s = this.ensure(msg.beginRendering.surfaceId);
       s.rootId = msg.beginRendering.root;
       s.ready = true;
-    } else if ('deleteSurface' in msg) {
-      this.surfaces.delete(msg.deleteSurface.surfaceId);
     }
-  }
-
-  applyAll(messages: A2UIMessage[]): void {
-    for (const m of messages) this.apply(m);
   }
 }

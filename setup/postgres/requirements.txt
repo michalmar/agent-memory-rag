@@ -1,0 +1,2 @@
+asyncpg>=0.30.0
+azure-identity>=1.19.0

@@ -8,10 +8,11 @@ resource "azurerm_virtual_network" "main" {
 
 # ACA workload-profile environment infrastructure subnet (delegated).
 resource "azurerm_subnet" "aca" {
-  name                 = "snet-aca"
-  resource_group_name  = azurerm_resource_group.main.name
-  virtual_network_name = azurerm_virtual_network.main.name
-  address_prefixes     = [cidrsubnet(var.vnet_address_space, 7, 0)] # 10.42.0.0/23
+  name                            = "snet-aca"
+  resource_group_name             = azurerm_resource_group.main.name
+  virtual_network_name            = azurerm_virtual_network.main.name
+  address_prefixes                = [cidrsubnet(var.vnet_address_space, 7, 0)] # 10.42.0.0/23
+  default_outbound_access_enabled = false
 
   delegation {
     name = "aca"
@@ -28,36 +29,21 @@ resource "azurerm_subnet" "pe" {
   resource_group_name               = azurerm_resource_group.main.name
   virtual_network_name              = azurerm_virtual_network.main.name
   address_prefixes                  = [cidrsubnet(var.vnet_address_space, 8, 2)] # 10.42.2.0/24
+  default_outbound_access_enabled   = false
   private_endpoint_network_policies = "Disabled"
-}
-
-# Postgres Flexible Server VNet-injection subnet (delegated).
-resource "azurerm_subnet" "postgres" {
-  name                 = "snet-postgres"
-  resource_group_name  = azurerm_resource_group.main.name
-  virtual_network_name = azurerm_virtual_network.main.name
-  address_prefixes     = [cidrsubnet(var.vnet_address_space, 8, 3)] # 10.42.3.0/24
-
-  delegation {
-    name = "pg"
-    service_delegation {
-      name    = "Microsoft.DBforPostgreSQL/flexibleServers"
-      actions = ["Microsoft.Network/virtualNetworks/subnets/join/action"]
-    }
-  }
 }
 
 # --------------------------------------------------------------- private DNS
 locals {
   private_dns_zones = {
-    cosmos     = "privatelink.documents.azure.com"
-    postgres   = "privatelink.postgres.database.azure.com"
-    search     = "privatelink.search.windows.net"
-    acr        = "privatelink.azurecr.io"
-    openai     = "privatelink.openai.azure.com"
-    cognitive  = "privatelink.cognitiveservices.azure.com"
-    aiservices = "privatelink.services.ai.azure.com"
-    blob       = "privatelink.blob.core.windows.net"
+    cosmos   = "privatelink.documents.azure.com"
+    postgres = "privatelink.postgres.database.azure.com"
+    acr      = "privatelink.azurecr.io"
+    blob     = "privatelink.blob.core.windows.net"
+    monitor  = "privatelink.monitor.azure.com"
+    oms      = "privatelink.oms.opinsights.azure.com"
+    ods      = "privatelink.ods.opinsights.azure.com"
+    agentsvc = "privatelink.agentsvc.azure-automation.net"
   }
 }
 

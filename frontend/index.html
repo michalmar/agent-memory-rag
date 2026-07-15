@@ -3,10 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Agentic Memory — Support Chat</title>
+    <meta
+      name="description"
+      content="Memory Thread is a grounded support workspace with durable conversation context."
+    />
+    <meta name="theme-color" content="#F6F7F8" />
+    <title>Memory Thread — Grounded Support</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
     <link
@@ -15,33 +21,84 @@
     />
     <style>
       :root {
-        --bg: #ffffff;
-        --bg-alt: #f5f6f8;
-        --fg: #1a1a1a;
-        --fg-muted: #6b7280;
-        --border: #e3e6ea;
-        --accent: #2563eb;
+        color-scheme: light;
+        --font-display: 'Inter', system-ui, sans-serif;
+        --font-body: 'Inter', system-ui, sans-serif;
+        --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+        --bg: #f6f7f8;
+        --bg-alt: #ffffff;
+        --fg: #202126;
+        --fg-muted: #676b73;
+        --placeholder: #696e76;
+        --border: #dedfe3;
+        --border-strong: #c8cad0;
+        --accent: #4a57d8;
+        --accent-hover: #4653d6;
         --accent-fg: #ffffff;
+        --accent-soft: #eef0ff;
+        --accent-border: #aab1f6;
+        --accent-ring: rgba(74, 87, 216, 0.16);
+        --signal: #b44734;
+        --signal-soft: #fbe9e4;
+        --success: #2e725f;
+        --success-soft: #e7f3ee;
+        --success-border: #a7cfbf;
+        --success-ring: rgba(46, 114, 95, 0.14);
+        --danger: #ad4141;
+        --danger-soft: #f9e9e9;
+        --danger-border: #e2adad;
+        --focus-ring: rgba(74, 87, 216, 0.5);
         --card: #ffffff;
-        --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+        --surface-muted: #eff0f2;
+        --scrim: rgba(14, 15, 18, 0.45);
+        --shadow-sm: 0 1px 2px rgba(18, 19, 22, 0.06);
+        --shadow-button: 0 4px 12px rgba(89, 102, 232, 0.16);
+        --shadow-drawer: 0 20px 50px rgba(18, 19, 22, 0.2);
+        --shadow: var(--shadow-sm);
       }
       [data-theme='dark'] {
-        --bg: #0f1115;
-        --bg-alt: #171a21;
-        --fg: #e8eaed;
-        --fg-muted: #9aa0a6;
-        --border: #2a2f3a;
-        --accent: #3b82f6;
-        --accent-fg: #ffffff;
-        --card: #1b1f27;
-        --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+        color-scheme: dark;
+        --bg: #0e0f10;
+        --bg-alt: #111315;
+        --fg: #e7e8eb;
+        --fg-muted: #9599a2;
+        --placeholder: #737780;
+        --border: #292b2f;
+        --border-strong: #3a3d43;
+        --accent: #8b96ff;
+        --accent-hover: #a2abff;
+        --accent-fg: #0e0f10;
+        --accent-soft: #20243b;
+        --accent-border: #4e598f;
+        --accent-ring: rgba(139, 150, 255, 0.18);
+        --signal: #ff8b70;
+        --signal-soft: #452a2a;
+        --success: #79c6aa;
+        --success-soft: #173b35;
+        --success-border: #2f6758;
+        --success-ring: rgba(121, 198, 170, 0.16);
+        --danger: #ff9c9c;
+        --danger-soft: #44262c;
+        --danger-border: #71404a;
+        --focus-ring: rgba(139, 150, 255, 0.5);
+        --card: #111315;
+        --surface-muted: #191b1e;
+        --scrim: rgba(2, 7, 15, 0.7);
+        --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.28);
+        --shadow-button: 0 5px 16px rgba(0, 0, 0, 0.28);
+        --shadow-drawer: 0 24px 60px rgba(0, 0, 0, 0.48);
+        --shadow: var(--shadow-sm);
       }
       * { box-sizing: border-box; }
       html, body { margin: 0; height: 100%; }
       body {
-        font-family: 'Inter', system-ui, sans-serif;
+        min-width: 320px;
+        overflow: hidden;
+        font-family: var(--font-body);
         background: var(--bg);
         color: var(--fg);
+        text-rendering: optimizeLegibility;
+        -webkit-font-smoothing: antialiased;
       }
       .material-symbols-outlined {
         font-family: 'Material Symbols Outlined';

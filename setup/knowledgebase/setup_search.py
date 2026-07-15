@@ -1,186 +1,388 @@
-"""One-time Azure AI Search KB setup (PRD §F5, classic-RAG variant).
-
-Creates two indexes (orders, return-policy) with a 3072-dim vector field (HNSW +
-semantic config), embeds each seed chunk app-side with text-embedding-3-large, and
-uploads the documents. App-side embeddings keep AI Search fully private — no
-Search->OpenAI vectorizer link is required (the classic client sends the query vector).
-
-Run from within the VNet (ACA job / jump host) or with Search + OpenAI public access
-temporarily enabled. Requires `az login` (DefaultAzureCredential) or API keys via env.
-
-Env: SEARCH_ENDPOINT, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_EMBED_DEPLOYMENT,
-     AZURE_OPENAI_API_VERSION, SEARCH_ORDERS_INDEX, SEARCH_POLICY_INDEX.
-"""
+"""Idempotent async setup for Search indexes and the Foundry IQ knowledge base."""
 from __future__ import annotations
 
+import asyncio
 import glob
 import json
 import os
+from dataclasses import dataclass
+from typing import Any
 
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-from azure.search.documents import SearchClient
-from azure.search.documents.indexes import SearchIndexClient
-from azure.search.documents.indexes.models import (
-    HnswAlgorithmConfiguration,
-    HnswParameters,
-    SearchableField,
-    SearchField,
-    SearchFieldDataType,
-    SearchIndex,
-    SemanticConfiguration,
-    SemanticField,
-    SemanticPrioritizedFields,
-    SemanticSearch,
-    SimpleField,
-    VectorSearch,
-    VectorSearchProfile,
+import httpx
+from azure.identity.aio import (
+    DefaultAzureCredential,
+    get_bearer_token_provider,
 )
-from openai import AzureOpenAI
+from openai import AsyncAzureOpenAI
 
 EMBED_DIM = 3072
 HERE = os.path.dirname(__file__)
 
 SEARCH_ENDPOINT = os.environ["SEARCH_ENDPOINT"].rstrip("/")
 OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"].rstrip("/")
-EMBED_DEPLOYMENT = os.environ.get("AZURE_OPENAI_EMBED_DEPLOYMENT", "text-embedding-3-large")
-API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-10-21")
+OPENAI_RESOURCE_URI = os.environ.get(
+    "AZURE_OPENAI_RESOURCE_URI", OPENAI_ENDPOINT
+).rstrip("/")
+EMBED_DEPLOYMENT = os.environ.get(
+    "AZURE_OPENAI_EMBED_DEPLOYMENT", "text-embedding-3-large"
+)
+CHAT_DEPLOYMENT = os.environ.get("AZURE_OPENAI_CHAT_DEPLOYMENT", "gpt-4o-mini")
+CHAT_MODEL = os.environ.get("AZURE_OPENAI_CHAT_MODEL", CHAT_DEPLOYMENT)
+OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-10-21")
+SEARCH_API_VERSION = os.environ.get("SEARCH_API_VERSION", "2024-07-01")
+KNOWLEDGE_API_VERSION = os.environ.get(
+    "SEARCH_KNOWLEDGE_API_VERSION", "2026-05-01-preview"
+)
 ORDERS_INDEX = os.environ.get("SEARCH_ORDERS_INDEX", "orders")
 POLICY_INDEX = os.environ.get("SEARCH_POLICY_INDEX", "return-policy")
+ORDERS_SOURCE = os.environ.get("SEARCH_ORDERS_KNOWLEDGE_SOURCE", "orders-ks")
+POLICY_SOURCE = os.environ.get(
+    "SEARCH_POLICY_KNOWLEDGE_SOURCE", "return-policy-ks"
+)
+KNOWLEDGE_BASE = os.environ.get("SEARCH_KB", "customer-support-kb")
 
-_cred = DefaultAzureCredential()
+
+@dataclass(frozen=True)
+class SearchSource:
+    document_directory: str
+    index_name: str
+    knowledge_source_name: str
+    keyword_field: str
+    filterable_fields: tuple[str, ...]
+    retrieval_instruction: str
+
+    @property
+    def source_fields(self) -> tuple[str, ...]:
+        return ("id", *self.filterable_fields, "page_chunk")
 
 
-def _openai() -> AzureOpenAI:
-    api_key = os.environ.get("AZURE_OPENAI_API_KEY")
-    if api_key:
-        return AzureOpenAI(
-            azure_endpoint=OPENAI_ENDPOINT, api_key=api_key, api_version=API_VERSION
-        )
-    token_provider = get_bearer_token_provider(
-        _cred, "https://cognitiveservices.azure.com/.default"
+SEARCH_SOURCES = (
+    SearchSource(
+        document_directory="orders",
+        index_name=ORDERS_INDEX,
+        knowledge_source_name=ORDERS_SOURCE,
+        keyword_field="order_id",
+        filterable_fields=("order_id", "category"),
+        retrieval_instruction=(
+            "Use the orders source for order and shipping questions."
+        ),
+    ),
+    SearchSource(
+        document_directory="policies",
+        index_name=POLICY_INDEX,
+        knowledge_source_name=POLICY_SOURCE,
+        keyword_field="section",
+        filterable_fields=("section",),
+        retrieval_instruction=(
+            "Use the return-policy source for returns, refunds, and "
+            "eligibility questions."
+        ),
+    ),
+)
+
+
+def _credential() -> DefaultAzureCredential:
+    client_id = os.environ.get("AZURE_CLIENT_ID", "").strip()
+    return DefaultAzureCredential(
+        managed_identity_client_id=client_id or None,
     )
-    return AzureOpenAI(
+
+
+def _vector_search() -> dict[str, Any]:
+    return {
+        "algorithms": [
+            {
+                "name": "hnsw-config",
+                "kind": "hnsw",
+                "hnswParameters": {
+                    "m": 4,
+                    "efConstruction": 400,
+                    "efSearch": 500,
+                    "metric": "cosine",
+                },
+            }
+        ],
+        "profiles": [
+            {
+                "name": "vector-profile",
+                "algorithm": "hnsw-config",
+            }
+        ],
+    }
+
+
+def _semantic(keyword_field: str) -> dict[str, Any]:
+    return {
+        "configurations": [
+            {
+                "name": "semantic_config",
+                "prioritizedFields": {
+                    "prioritizedContentFields": [{"fieldName": "page_chunk"}],
+                    "prioritizedKeywordsFields": [{"fieldName": keyword_field}],
+                },
+            }
+        ]
+    }
+
+
+def _index_definition(source: SearchSource) -> dict[str, Any]:
+    return {
+        "name": source.index_name,
+        "fields": [
+            {
+                "name": "id",
+                "type": "Edm.String",
+                "key": True,
+            },
+            *[
+                {
+                    "name": field_name,
+                    "type": "Edm.String",
+                    "filterable": True,
+                }
+                for field_name in source.filterable_fields
+            ],
+            {
+                "name": "page_chunk",
+                "type": "Edm.String",
+                "searchable": True,
+            },
+            {
+                "name": "page_embedding",
+                "type": "Collection(Edm.Single)",
+                "searchable": True,
+                "dimensions": EMBED_DIM,
+                "vectorSearchProfile": "vector-profile",
+            },
+        ],
+        "vectorSearch": _vector_search(),
+        "semantic": _semantic(source.keyword_field),
+    }
+
+
+def _load_docs_sync(subdir: str) -> list[dict[str, Any]]:
+    documents: list[dict[str, Any]] = []
+    pattern = os.path.join(HERE, "documents", subdir, "*.json")
+    for path in sorted(glob.glob(pattern)):
+        with open(path, encoding="utf-8") as source:
+            documents.extend(json.load(source))
+    return documents
+
+
+async def _headers(credential: Any) -> dict[str, str]:
+    token = await credential.get_token("https://search.azure.com/.default")
+    return {
+        "Authorization": f"Bearer {token.token}",
+        "Content-Type": "application/json",
+    }
+
+
+async def _request(
+    client: httpx.AsyncClient,
+    credential: Any,
+    method: str,
+    path: str,
+    *,
+    api_version: str,
+    payload: dict[str, Any] | None = None,
+    allow_not_found: bool = False,
+) -> dict[str, Any]:
+    response = await client.request(
+        method,
+        f"{SEARCH_ENDPOINT}{path}",
+        params={"api-version": api_version},
+        headers=await _headers(credential),
+        json=payload,
+    )
+    if allow_not_found and response.status_code == 404:
+        return {}
+    if response.is_error:
+        raise RuntimeError(
+            f"{method} {path} failed with HTTP {response.status_code}: "
+            f"{response.text}"
+        )
+    return response.json() if response.content else {}
+
+
+async def _embed(
+    openai_client: AsyncAzureOpenAI, texts: list[str]
+) -> list[list[float]]:
+    response = await openai_client.embeddings.create(
+        model=EMBED_DEPLOYMENT, input=texts
+    )
+    return [item.embedding for item in response.data]
+
+
+async def _create_indexes(
+    client: httpx.AsyncClient, credential: Any
+) -> None:
+    for source in SEARCH_SOURCES:
+        index = _index_definition(source)
+        existing = await _request(
+            client,
+            credential,
+            "GET",
+            f"/indexes/{index['name']}",
+            api_version=SEARCH_API_VERSION,
+            allow_not_found=True,
+        )
+        if existing:
+            existing_fields = {
+                field["name"]: field for field in existing.get("fields", [])
+            }
+            index["fields"] = [
+                existing_fields.get(field["name"], field)
+                for field in index["fields"]
+            ]
+        await _request(
+            client,
+            credential,
+            "PUT",
+            f"/indexes/{index['name']}",
+            api_version=SEARCH_API_VERSION,
+            payload=index,
+        )
+        print(f"[setup] index ready: {index['name']}")
+
+
+async def _upload_documents(
+    client: httpx.AsyncClient,
+    credential: Any,
+    openai_client: AsyncAzureOpenAI,
+) -> None:
+    for source in SEARCH_SOURCES:
+        documents = await asyncio.to_thread(
+            _load_docs_sync, source.document_directory
+        )
+        if not documents:
+            raise RuntimeError(
+                f"No documents found for {source.document_directory}"
+            )
+
+        embeddings = await _embed(
+            openai_client, [document["page_chunk"] for document in documents]
+        )
+        actions = []
+        for document, embedding in zip(documents, embeddings, strict=True):
+            actions.append(
+                {
+                    **document,
+                    "page_embedding": embedding,
+                    "@search.action": "mergeOrUpload",
+                }
+            )
+        result = await _request(
+            client,
+            credential,
+            "POST",
+            f"/indexes/{source.index_name}/docs/index",
+            api_version=SEARCH_API_VERSION,
+            payload={"value": actions},
+        )
+        failures = [
+            item for item in result.get("value", []) if not item.get("status")
+        ]
+        if failures:
+            keys = ", ".join(str(item.get("key")) for item in failures)
+            raise RuntimeError(
+                f"Document upload failed for {source.index_name}: {keys}"
+            )
+        print(
+            f"[setup] uploaded {len(documents)} docs -> {source.index_name}"
+        )
+
+
+async def _create_knowledge_sources(
+    client: httpx.AsyncClient, credential: Any
+) -> None:
+    for source in SEARCH_SOURCES:
+        payload = {
+            "name": source.knowledge_source_name,
+            "kind": "searchIndex",
+            "description": (
+                f"Foundry IQ source for the {source.index_name} index."
+            ),
+            "searchIndexParameters": {
+                "searchIndexName": source.index_name,
+                "semanticConfigurationName": "semantic_config",
+                "sourceDataFields": [
+                    {"name": name} for name in source.source_fields
+                ],
+                "searchFields": [{"name": "page_chunk"}],
+            },
+        }
+        await _request(
+            client,
+            credential,
+            "PUT",
+            f"/knowledgesources/{source.knowledge_source_name}",
+            api_version=KNOWLEDGE_API_VERSION,
+            payload=payload,
+        )
+        print(
+            "[setup] knowledge source ready: "
+            f"{source.knowledge_source_name}"
+        )
+
+
+async def _create_knowledge_base(
+    client: httpx.AsyncClient, credential: Any
+) -> None:
+    payload = {
+        "name": KNOWLEDGE_BASE,
+        "description": "Customer-support orders and return-policy knowledge.",
+        "retrievalInstructions": " ".join(
+            source.retrieval_instruction for source in SEARCH_SOURCES
+        ),
+        "knowledgeSources": [
+            {"name": source.knowledge_source_name}
+            for source in SEARCH_SOURCES
+        ],
+        "models": [
+            {
+                "kind": "azureOpenAI",
+                "azureOpenAIParameters": {
+                    "resourceUri": OPENAI_RESOURCE_URI,
+                    "deploymentId": CHAT_DEPLOYMENT,
+                    "modelName": CHAT_MODEL,
+                },
+            }
+        ],
+        "retrievalReasoningEffort": {"kind": "low"},
+    }
+    await _request(
+        client,
+        credential,
+        "PUT",
+        f"/knowledgebases/{KNOWLEDGE_BASE}",
+        api_version=KNOWLEDGE_API_VERSION,
+        payload=payload,
+    )
+    print(f"[setup] knowledge base ready: {KNOWLEDGE_BASE}")
+
+
+async def main() -> None:
+    credential = _credential()
+    token_provider = get_bearer_token_provider(
+        credential, "https://cognitiveservices.azure.com/.default"
+    )
+    openai_client = AsyncAzureOpenAI(
         azure_endpoint=OPENAI_ENDPOINT,
         azure_ad_token_provider=token_provider,
-        api_version=API_VERSION,
+        api_version=OPENAI_API_VERSION,
     )
 
-
-def _search_cred():
-    key = os.environ.get("SEARCH_API_KEY")
-    if key:
-        from azure.core.credentials import AzureKeyCredential
-
-        return AzureKeyCredential(key)
-    return _cred
-
-
-def _vector_search() -> VectorSearch:
-    return VectorSearch(
-        algorithms=[
-            HnswAlgorithmConfiguration(
-                name="hnsw-config",
-                parameters=HnswParameters(m=4, ef_construction=400, ef_search=500),
-            )
-        ],
-        profiles=[VectorSearchProfile(name="vector-profile", algorithm_configuration_name="hnsw-config")],
-    )
-
-
-def _semantic(content_field: str, keyword_field: str) -> SemanticSearch:
-    return SemanticSearch(
-        configurations=[
-            SemanticConfiguration(
-                name="semantic_config",
-                prioritized_fields=SemanticPrioritizedFields(
-                    content_fields=[SemanticField(field_name=content_field)],
-                    keywords_fields=[SemanticField(field_name=keyword_field)],
-                ),
-            )
-        ]
-    )
-
-
-def _orders_index() -> SearchIndex:
-    fields = [
-        SimpleField(name="id", type=SearchFieldDataType.String, key=True),
-        SimpleField(name="order_id", type=SearchFieldDataType.String, filterable=True),
-        SimpleField(name="category", type=SearchFieldDataType.String, filterable=True),
-        SearchableField(name="page_chunk", type=SearchFieldDataType.String),
-        SearchField(
-            name="page_embedding",
-            type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
-            searchable=True,
-            vector_search_dimensions=EMBED_DIM,
-            vector_search_profile_name="vector-profile",
-        ),
-    ]
-    return SearchIndex(
-        name=ORDERS_INDEX,
-        fields=fields,
-        vector_search=_vector_search(),
-        semantic_search=_semantic("page_chunk", "order_id"),
-    )
-
-
-def _policy_index() -> SearchIndex:
-    fields = [
-        SimpleField(name="id", type=SearchFieldDataType.String, key=True),
-        SimpleField(name="section", type=SearchFieldDataType.String, filterable=True),
-        SearchableField(name="page_chunk", type=SearchFieldDataType.String),
-        SearchField(
-            name="page_embedding",
-            type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
-            searchable=True,
-            vector_search_dimensions=EMBED_DIM,
-            vector_search_profile_name="vector-profile",
-        ),
-    ]
-    return SearchIndex(
-        name=POLICY_INDEX,
-        fields=fields,
-        vector_search=_vector_search(),
-        semantic_search=_semantic("page_chunk", "section"),
-    )
-
-
-def _load_docs(subdir: str) -> list[dict]:
-    docs: list[dict] = []
-    for path in sorted(glob.glob(os.path.join(HERE, "documents", subdir, "*.json"))):
-        with open(path, "r", encoding="utf-8") as fh:
-            docs.extend(json.load(fh))
-    return docs
-
-
-def _embed(client: AzureOpenAI, texts: list[str]) -> list[list[float]]:
-    resp = client.embeddings.create(model=EMBED_DEPLOYMENT, input=texts)
-    return [d.embedding for d in resp.data]
-
-
-def main() -> None:
-    index_client = SearchIndexClient(endpoint=SEARCH_ENDPOINT, credential=_search_cred())
-    openai_client = _openai()
-
-    for index in (_orders_index(), _policy_index()):
-        index_client.create_or_update_index(index)
-        print(f"[setup] index ready: {index.name}")
-
-    for subdir, index_name in ((("orders"), ORDERS_INDEX), (("policies"), POLICY_INDEX)):
-        docs = _load_docs(subdir)
-        if not docs:
-            print(f"[setup] no docs for {subdir}")
-            continue
-        embeddings = _embed(openai_client, [d["page_chunk"] for d in docs])
-        for d, emb in zip(docs, embeddings):
-            d["page_embedding"] = emb
-        client = SearchClient(
-            endpoint=SEARCH_ENDPOINT, index_name=index_name, credential=_search_cred()
-        )
-        client.upload_documents(documents=docs)
-        print(f"[setup] uploaded {len(docs)} docs -> {index_name}")
-
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120)) as client:
+            await _create_indexes(client, credential)
+            await _upload_documents(client, credential, openai_client)
+            await _create_knowledge_sources(client, credential)
+            await _create_knowledge_base(client, credential)
+    finally:
+        await openai_client.close()
+        await credential.close()
     print("[setup] done")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

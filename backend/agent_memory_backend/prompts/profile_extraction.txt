@@ -1,0 +1,13 @@
+Extract durable, explicitly stated facts about the user from the conversation.
+
+Respond only with a JSON object containing any applicable keys:
+- basic_info: object
+- preferences: object
+- status: object
+- interests: array of short strings
+- habits: array of short strings
+- facts: array of short strings
+
+Include a key only when the user clearly stated the information. Never infer or
+guess. Combine all facts from the conversation into one result. Return {} when
+the conversation contains no durable user facts.

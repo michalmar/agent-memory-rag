@@ -1,0 +1,4295 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta
+    name="description"
+    content="Interactive architecture explorer for the Agentic AI Memory dual Foundry support application."
+  >
+  <title>Agentic AI Memory - Architecture Explorer</title>
+  <script>
+    (() => {
+      const param = new URLSearchParams(window.location.search).get("scoutTheme");
+      const theme =
+        param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      document.documentElement.setAttribute("data-theme", theme);
+    })();
+  </script>
+  <style>
+    :root {
+      color-scheme: light;
+      --cp-bg: #f7f4ef;
+      --cp-bg-elevated: #fcfbf8;
+      --cp-surface: #ffffff;
+      --cp-surface-soft: #f5f5f5;
+      --cp-border: #dedede;
+      --cp-border-strong: #919191;
+      --cp-text: #242424;
+      --cp-text-muted: #5c5c5c;
+      --cp-text-soft: #6f6f6f;
+      --cp-accent: #b11f4b;
+      --cp-accent-hover: #9a1a41;
+      --cp-accent-soft: rgba(177, 31, 75, 0.08);
+      --cp-accent-fg: #ffffff;
+      --cp-success: #16a34a;
+      --cp-danger: #dc2626;
+      --cp-warning: #f59e0b;
+      --cp-link: #0078d4;
+      --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12);
+      --cp-overlay: rgba(255, 255, 255, 0.8);
+      --cp-panel: rgba(255, 255, 255, 0.86);
+      --cp-panel-strong: rgba(255, 255, 255, 0.96);
+      --cp-sheen: rgba(255, 255, 255, 0.55);
+      --cp-highlight: rgba(177, 31, 75, 0.12);
+    }
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --cp-bg: #3d3b3a;
+      --cp-bg-elevated: #343231;
+      --cp-surface: #292929;
+      --cp-surface-soft: #2e2e2e;
+      --cp-border: #474747;
+      --cp-border-strong: #5f5f5f;
+      --cp-text: #dedede;
+      --cp-text-muted: #919191;
+      --cp-text-soft: #b0b0b0;
+      --cp-accent: #fd8ea1;
+      --cp-accent-hover: #fb7b91;
+      --cp-accent-soft: rgba(253, 142, 161, 0.14);
+      --cp-accent-fg: #1a1a1a;
+      --cp-success: #4ade80;
+      --cp-danger: #f87171;
+      --cp-warning: #fbbf24;
+      --cp-link: #4da6ff;
+      --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+      --cp-overlay: rgba(41, 41, 41, 0.88);
+      --cp-panel: rgba(41, 41, 41, 0.72);
+      --cp-panel-strong: rgba(41, 41, 41, 0.96);
+      --cp-sheen: rgba(255, 255, 255, 0.04);
+      --cp-highlight: rgba(253, 142, 161, 0.12);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+
+    html {
+      min-width: 320px;
+      background: var(--cp-bg);
+    }
+
+    body {
+      margin: 0;
+      background: var(--cp-bg);
+      color: var(--cp-text);
+      font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+      line-height: 1.5;
+    }
+
+    button,
+    input,
+    select {
+      color: inherit;
+      font: inherit;
+    }
+
+    button,
+    select,
+    input {
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-surface);
+    }
+
+    button {
+      min-height: 36px;
+      padding: 7px 11px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      border-color: var(--cp-border-strong);
+      background: var(--cp-surface-soft);
+    }
+
+    button:focus-visible,
+    input:focus-visible,
+    select:focus-visible,
+    [tabindex]:focus-visible {
+      outline: 3px solid var(--cp-accent);
+      outline-offset: 2px;
+    }
+
+    code,
+    .mono {
+      font-family: Consolas, "Courier New", Courier, monospace;
+    }
+
+    .app-shell {
+      width: min(100%, 2000px);
+      margin: 0 auto;
+      padding: 12px;
+    }
+
+    .hero {
+      display: flex;
+      gap: 20px;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 56px;
+      margin-bottom: 8px;
+      padding: 8px 12px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-bg-elevated);
+      box-shadow: 0 0 2px var(--cp-border), 0 1px 2px var(--cp-border);
+    }
+
+    .product-heading,
+    .header-context {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .header-context {
+      justify-content: flex-end;
+    }
+
+    .eyebrow {
+      margin: 0 0 2px;
+      color: var(--cp-accent);
+      font-size: 0.66rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin-top: 0;
+    }
+
+    h1 {
+      margin-bottom: 0;
+      font-size: 1.35rem;
+      line-height: 1.05;
+      letter-spacing: -0.025em;
+    }
+
+    .hero-copy {
+      margin: 0;
+      color: var(--cp-text-muted);
+      font-size: 0.8rem;
+      white-space: nowrap;
+    }
+
+    .meta-row,
+    .button-row,
+    .legend-items {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .meta-pill,
+    .status-pill,
+    .kind-pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 3px 8px;
+      border: 1px solid var(--cp-border);
+      border-radius: 999px;
+      background: var(--cp-surface);
+      color: var(--cp-text-muted);
+      font-size: 0.7rem;
+      font-weight: 600;
+    }
+
+    .status-pill {
+      border-color: var(--cp-success);
+      color: var(--cp-success);
+    }
+
+    .hero-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .primary-button {
+      border-color: var(--cp-accent);
+      background: var(--cp-accent);
+      color: var(--cp-accent-fg);
+      font-weight: 700;
+    }
+
+    .primary-button:hover {
+      border-color: var(--cp-accent-hover);
+      background: var(--cp-accent-hover);
+    }
+
+    .stats {
+      display: flex;
+      min-height: 52px;
+      margin-bottom: 8px;
+      overflow: hidden;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-surface);
+    }
+
+    .stat-card {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      flex: 1 1 0;
+      gap: 0 9px;
+      align-content: center;
+      min-width: 0;
+      padding: 7px 12px;
+      border-right: 1px solid var(--cp-border);
+    }
+
+    .stat-card:last-child {
+      border-right: 0;
+    }
+
+    .stat-value {
+      grid-row: 1 / span 2;
+      align-self: center;
+      color: var(--cp-accent);
+      font-size: 1.15rem;
+      font-weight: 750;
+      letter-spacing: -0.03em;
+    }
+
+    .stat-label {
+      overflow: hidden;
+      font-size: 0.76rem;
+      font-weight: 650;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .stat-note {
+      overflow: hidden;
+      color: var(--cp-text-muted);
+      font-size: 0.66rem;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .agent-ribbon {
+      display: grid;
+      grid-template-columns: minmax(220px, 1.2fr) minmax(190px, 0.8fr) 48px minmax(220px, 0.9fr);
+      gap: 8px;
+      align-items: stretch;
+      margin-bottom: 8px;
+    }
+
+    .ribbon-thesis,
+    .agent-profile {
+      min-width: 0;
+      padding: 10px 12px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-surface);
+    }
+
+    .ribbon-thesis,
+    .agent-profile > div {
+      display: grid;
+      align-content: center;
+    }
+
+    .ribbon-thesis {
+      border-left: 3px solid var(--cp-accent);
+      background: var(--cp-accent-soft);
+    }
+
+    .ribbon-thesis strong,
+    .agent-profile strong {
+      font-size: 0.9rem;
+      line-height: 1.2;
+    }
+
+    .ribbon-thesis > span:last-child,
+    .agent-profile > div > span:last-child {
+      overflow: hidden;
+      color: var(--cp-text-muted);
+      font-size: 0.72rem;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .ribbon-label {
+      color: var(--cp-accent);
+      font-size: 0.63rem;
+      font-weight: 750;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .agent-profile {
+      display: grid;
+      grid-template-columns: 32px minmax(0, 1fr);
+      gap: 10px;
+      align-items: center;
+    }
+
+    .agent-mark {
+      display: grid;
+      width: 32px;
+      height: 32px;
+      place-items: center;
+      border: 1px solid var(--cp-accent);
+      border-radius: 8px;
+      background: var(--cp-accent-soft);
+      color: var(--cp-accent);
+      font-weight: 800;
+    }
+
+    .agent-connector {
+      display: grid;
+      place-items: center;
+    }
+
+    .agent-connector span {
+      width: 100%;
+      border-top: 1px solid var(--cp-border-strong);
+    }
+
+    .agent-connector span::after {
+      display: block;
+      width: 7px;
+      height: 7px;
+      margin: -4px auto 0;
+      border: 1px solid var(--cp-border-strong);
+      border-radius: 999px;
+      background: var(--cp-bg);
+      content: "";
+    }
+
+    .notice {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      margin: 0;
+      padding: 10px 12px;
+      border-top: 1px solid var(--cp-border);
+      background: var(--cp-bg-elevated);
+      font-size: 0.72rem;
+    }
+
+    .notice-mark {
+      flex: 0 0 auto;
+      color: var(--cp-warning);
+      font-weight: 800;
+    }
+
+    .notice div,
+    .notice div span {
+      display: grid;
+    }
+
+    .notice div span {
+      color: var(--cp-text-muted);
+    }
+
+    .toolbar {
+      position: relative;
+      z-index: 20;
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+      margin-bottom: 8px;
+      padding: 8px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-panel-strong);
+      box-shadow: 0 0 2px var(--cp-border), 0 1px 2px var(--cp-border);
+    }
+
+    .field {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .field label,
+    .field-label {
+      color: var(--cp-text-muted);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .field input,
+    .field select {
+      width: 100%;
+      min-height: 36px;
+      padding: 6px 9px;
+    }
+
+    .search-field {
+      position: relative;
+      flex: 1 1 360px;
+    }
+
+    .trace-field {
+      flex: 0 1 150px;
+    }
+
+    .mobile-lens {
+      display: none;
+    }
+
+    .search-results {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      z-index: 50;
+      display: none;
+      width: min(420px, 90vw);
+      max-height: 360px;
+      overflow: auto;
+      padding: 6px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-panel-strong);
+      box-shadow: var(--cp-shadow);
+    }
+
+    .search-results.is-open {
+      display: grid;
+      gap: 4px;
+    }
+
+    .search-result {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      width: 100%;
+      text-align: left;
+    }
+
+    .search-result.is-active {
+      border-color: var(--cp-accent);
+      background: var(--cp-accent-soft);
+    }
+
+    .search-result small {
+      color: var(--cp-text-muted);
+    }
+
+    .check-control {
+      display: flex;
+      flex: 0 0 auto;
+      min-height: 36px;
+      gap: 8px;
+      align-items: center;
+      padding: 6px 10px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-surface);
+      font-size: 0.78rem;
+      white-space: nowrap;
+    }
+
+    .check-control input {
+      width: 18px;
+      height: 18px;
+      margin: 0;
+      accent-color: var(--cp-accent);
+    }
+
+    .toolbar-actions {
+      display: flex;
+      flex: 0 0 auto;
+      gap: 6px;
+    }
+
+    .filter-popover {
+      position: relative;
+      flex: 0 0 auto;
+    }
+
+    .filter-popover summary {
+      display: flex;
+      min-height: 36px;
+      gap: 7px;
+      align-items: center;
+      padding: 7px 11px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-surface);
+      cursor: pointer;
+      font-size: 0.78rem;
+      font-weight: 650;
+      list-style: none;
+    }
+
+    .filter-popover summary::-webkit-details-marker,
+    .notes-summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .filter-popover[open] summary {
+      border-color: var(--cp-accent);
+      background: var(--cp-accent-soft);
+    }
+
+    .filter-count {
+      display: grid;
+      min-width: 18px;
+      height: 18px;
+      place-items: center;
+      border-radius: 999px;
+      background: var(--cp-accent);
+      color: var(--cp-accent-fg);
+      font-size: 0.65rem;
+    }
+
+    .filter-panel {
+      position: absolute;
+      top: calc(100% + 6px);
+      right: 0;
+      z-index: 80;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(170px, 1fr));
+      width: min(460px, 90vw);
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-panel-strong);
+      box-shadow: var(--cp-shadow);
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: 216px minmax(0, 1fr) 336px;
+      height: clamp(700px, calc(100vh - 228px), 940px);
+      min-height: 700px;
+      gap: 8px;
+      align-items: stretch;
+    }
+
+    .stage {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      min-width: 0;
+      min-height: 0;
+    }
+
+    .lens-rail,
+    .canvas-card,
+    .inspector,
+    .notes-section {
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-surface);
+    }
+
+    .lens-rail {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .lens-header {
+      padding: 14px 12px 12px;
+      border-bottom: 1px solid var(--cp-border);
+    }
+
+    .lens-header h2 {
+      margin-bottom: 3px;
+      font-size: 1rem;
+    }
+
+    .lens-header p:last-child {
+      margin-bottom: 0;
+      color: var(--cp-text-muted);
+      font-size: 0.72rem;
+    }
+
+    .lens-nav {
+      display: grid;
+      align-content: start;
+      gap: 3px;
+      min-height: 0;
+      overflow: auto;
+      padding: 6px;
+    }
+
+    .lens-button {
+      display: grid;
+      grid-template-columns: 30px minmax(0, 1fr);
+      gap: 9px;
+      align-items: center;
+      width: 100%;
+      min-height: 48px;
+      padding: 6px 8px;
+      border-color: var(--cp-surface);
+      background: var(--cp-surface);
+      text-align: left;
+    }
+
+    .lens-button:hover {
+      border-color: var(--cp-border);
+    }
+
+    .lens-button.is-active {
+      border-color: var(--cp-accent);
+      background: var(--cp-accent-soft);
+    }
+
+    .lens-mark {
+      display: grid;
+      width: 30px;
+      height: 30px;
+      place-items: center;
+      border: 1px solid var(--cp-border);
+      border-radius: 8px;
+      background: var(--cp-bg-elevated);
+      color: var(--cp-text-muted);
+      font-size: 0.63rem;
+      font-weight: 800;
+      letter-spacing: 0.03em;
+    }
+
+    .lens-button.is-active .lens-mark {
+      border-color: var(--cp-accent);
+      color: var(--cp-accent);
+    }
+
+    .lens-copy {
+      display: grid;
+      min-width: 0;
+    }
+
+    .lens-copy strong {
+      overflow: hidden;
+      font-size: 0.78rem;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .lens-copy small {
+      color: var(--cp-text-muted);
+      font-size: 0.66rem;
+    }
+
+    .canvas-card {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      height: 100%;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .canvas-heading {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      min-height: 58px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--cp-border);
+    }
+
+    .canvas-heading h2 {
+      margin-bottom: 2px;
+      font-size: 1.05rem;
+    }
+
+    .canvas-heading p {
+      max-width: 880px;
+      margin-bottom: 0;
+      color: var(--cp-text-muted);
+      font-size: 0.88rem;
+    }
+
+    .canvas-meta {
+      display: grid;
+      flex: 0 0 auto;
+      color: var(--cp-text-muted);
+      font-size: 0.7rem;
+      text-align: right;
+    }
+
+    .canvas-meta span:first-child {
+      color: var(--cp-text);
+      font-weight: 650;
+    }
+
+    .diagram-wrap {
+      position: relative;
+      min-height: 0;
+      overflow: hidden;
+      background: var(--cp-bg-elevated);
+      background-image: radial-gradient(var(--cp-border) 0.7px, var(--cp-bg-elevated) 0.7px);
+      background-size: 18px 18px;
+    }
+
+    #diagram {
+      display: block;
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      cursor: grab;
+      touch-action: none;
+      user-select: none;
+    }
+
+    #diagram.is-dragging {
+      cursor: grabbing;
+    }
+
+    .zoom-controls {
+      position: absolute;
+      bottom: 10px;
+      right: 12px;
+      display: flex;
+      gap: 4px;
+    }
+
+    .zoom-controls button {
+      width: 34px;
+      min-height: 34px;
+      padding: 0;
+      background: var(--cp-panel-strong);
+      font-weight: 800;
+    }
+
+    .legend {
+      padding: 8px 12px;
+      border-top: 1px solid var(--cp-border);
+      background: var(--cp-surface);
+    }
+
+    .legend-title {
+      margin-right: 4px;
+      font-size: 0.78rem;
+      font-weight: 750;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      color: var(--cp-text-muted);
+      font-size: 0.76rem;
+    }
+
+    .legend-line {
+      width: 28px;
+      border-top: 3px solid var(--cp-link);
+    }
+
+    .legend-line.async {
+      border-color: var(--cp-accent);
+      border-top-style: dashed;
+    }
+
+    .legend-line.stream {
+      border-color: var(--cp-success);
+      border-top-style: double;
+    }
+
+    .legend-line.batch {
+      border-color: var(--cp-warning);
+      border-top-style: dotted;
+    }
+
+    .legend-node {
+      width: 20px;
+      height: 14px;
+      border: 2px solid var(--cp-border-strong);
+      border-radius: 4px;
+      background: var(--cp-surface);
+    }
+
+    .legend-node.selected {
+      border-color: var(--cp-accent);
+      background: var(--cp-accent-soft);
+    }
+
+    .inspector {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      height: 100%;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .inspector-tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px;
+      padding: 5px;
+      border-bottom: 1px solid var(--cp-border);
+      background: var(--cp-bg-elevated);
+    }
+
+    .inspector-tab {
+      min-height: 32px;
+      border-color: var(--cp-bg-elevated);
+      background: var(--cp-bg-elevated);
+      color: var(--cp-text-muted);
+      font-size: 0.76rem;
+      font-weight: 700;
+    }
+
+    .inspector-tab.is-active {
+      border-color: var(--cp-border);
+      background: var(--cp-surface);
+      color: var(--cp-text);
+    }
+
+    .detail-panel,
+    .navigator-panel {
+      grid-row: 2;
+      min-height: 0;
+      overflow: auto;
+      padding: 14px;
+    }
+
+    .navigator-panel {
+      background: var(--cp-surface);
+    }
+
+    .panel-kicker {
+      margin-bottom: 6px;
+      color: var(--cp-accent);
+      font-size: 0.7rem;
+      font-weight: 750;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .detail-panel h2,
+    .navigator-panel h2 {
+      margin-bottom: 8px;
+      font-size: 1.1rem;
+      line-height: 1.15;
+    }
+
+    .detail-summary {
+      color: var(--cp-text-muted);
+      font-size: 0.9rem;
+    }
+
+    .detail-section {
+      margin-top: 14px;
+    }
+
+    .detail-section h3 {
+      margin-bottom: 8px;
+      font-size: 0.8rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .detail-list,
+    .evidence-list,
+    .navigator-list,
+    .flow-list {
+      display: grid;
+      gap: 7px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .detail-list li {
+      padding-left: 14px;
+      position: relative;
+      color: var(--cp-text-soft);
+      font-size: 0.86rem;
+    }
+
+    .detail-list li::before {
+      position: absolute;
+      top: 0.56em;
+      left: 0;
+      width: 5px;
+      height: 5px;
+      border-radius: 999px;
+      background: var(--cp-accent);
+      content: "";
+    }
+
+    .evidence-item {
+      padding: 9px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-surface-soft);
+      font-size: 0.76rem;
+    }
+
+    .evidence-item code {
+      display: block;
+      overflow-wrap: anywhere;
+      color: var(--cp-link);
+      font-weight: 700;
+    }
+
+    .evidence-item span {
+      display: block;
+      margin-top: 3px;
+      color: var(--cp-text-muted);
+    }
+
+    .navigator-list button,
+    .flow-list button {
+      width: 100%;
+      min-height: 36px;
+      padding: 7px 9px;
+      text-align: left;
+    }
+
+    .navigator-list button.is-selected,
+    .flow-list button.is-selected {
+      border-color: var(--cp-accent);
+      background: var(--cp-accent-soft);
+    }
+
+    .navigator-empty,
+    .empty-state {
+      padding: 14px;
+      border: 1px dashed var(--cp-border-strong);
+      border-radius: 0.625rem;
+      color: var(--cp-text-muted);
+      font-size: 0.86rem;
+    }
+
+    .detail-grid {
+      display: grid;
+      grid-template-columns: 92px minmax(0, 1fr);
+      gap: 7px 10px;
+      margin: 0;
+      font-size: 0.84rem;
+    }
+
+    .detail-grid dt {
+      color: var(--cp-text-muted);
+      font-weight: 650;
+    }
+
+    .detail-grid dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .confidence-observed {
+      color: var(--cp-success);
+    }
+
+    .confidence-inferred,
+    .confidence-planned,
+    .confidence-unknown {
+      color: var(--cp-warning);
+    }
+
+    .notes-section {
+      margin-top: 8px;
+      overflow: hidden;
+    }
+
+    .notes-summary {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: center;
+      padding: 10px 12px;
+      cursor: pointer;
+      list-style: none;
+    }
+
+    .notes-summary strong {
+      display: block;
+      font-size: 0.86rem;
+    }
+
+    .notes-section[open] .notes-summary {
+      border-bottom: 1px solid var(--cp-border);
+      background: var(--cp-bg-elevated);
+    }
+
+    .notes-body {
+      padding: 12px;
+    }
+
+    .notes-body > header {
+      margin-bottom: 10px;
+    }
+
+    .notes-body header p {
+      max-width: 820px;
+      margin-bottom: 0;
+      color: var(--cp-text-muted);
+      font-size: 0.82rem;
+    }
+
+    .caveat-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .caveat-card {
+      padding: 12px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-bg-elevated);
+    }
+
+    .caveat-card h3 {
+      margin-bottom: 6px;
+      font-size: 0.96rem;
+    }
+
+    .caveat-card p {
+      margin-bottom: 10px;
+      color: var(--cp-text-muted);
+      font-size: 0.84rem;
+    }
+
+    .caveat-card code {
+      color: var(--cp-link);
+      font-size: 0.72rem;
+      overflow-wrap: anywhere;
+    }
+
+    .source-footer {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid var(--cp-border);
+      color: var(--cp-text-muted);
+      font-size: 0.78rem;
+    }
+
+    .lane {
+      fill: var(--cp-surface-soft);
+      stroke: var(--cp-border);
+      stroke-width: 1.5;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .lane-network {
+      stroke: var(--cp-link);
+      stroke-dasharray: 7 5;
+    }
+
+    .lane-trust {
+      stroke: var(--cp-accent);
+      stroke-dasharray: 3 4;
+    }
+
+    .lane-data {
+      stroke: var(--cp-warning);
+    }
+
+    .lane-title {
+      fill: var(--cp-text);
+      font-size: 15px;
+      font-weight: 750;
+    }
+
+    .lane-subtitle {
+      fill: var(--cp-text-muted);
+      font-size: 11px;
+    }
+
+    .node-card {
+      fill: var(--cp-surface);
+      stroke: var(--cp-border-strong);
+      stroke-width: 1.5;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .node-strip {
+      fill: var(--cp-accent);
+    }
+
+    .node-kind-box {
+      fill: var(--cp-surface-soft);
+      stroke: var(--cp-border);
+      vector-effect: non-scaling-stroke;
+    }
+
+    .node-kind-text {
+      fill: var(--cp-text-muted);
+      font-size: 9px;
+      font-weight: 750;
+      letter-spacing: 0.06em;
+    }
+
+    .node-title {
+      fill: var(--cp-text);
+      font-size: 14px;
+      font-weight: 750;
+    }
+
+    .node-summary {
+      fill: var(--cp-text-muted);
+      font-size: 10.5px;
+    }
+
+    .node-confidence {
+      fill: var(--cp-success);
+    }
+
+    .node.is-selected .node-card {
+      fill: var(--cp-accent-soft);
+      stroke: var(--cp-accent);
+      stroke-width: 3;
+    }
+
+    .node.is-related .node-card {
+      stroke: var(--cp-link);
+      stroke-width: 2.5;
+    }
+
+    .node.is-selected.is-related .node-card {
+      fill: var(--cp-accent-soft);
+      stroke: var(--cp-accent);
+      stroke-width: 3;
+    }
+
+    .node.is-dimmed,
+    .flow.is-dimmed {
+      opacity: 0.18;
+    }
+
+    .node:hover .node-card {
+      stroke: var(--cp-accent);
+      stroke-width: 2.5;
+    }
+
+    .flow-path {
+      fill: none;
+      stroke-width: 2.5;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .flow-hit {
+      fill: none;
+      stroke: var(--cp-bg);
+      stroke-width: 18;
+      opacity: 0;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .flow-mode-sync {
+      stroke: var(--cp-link);
+    }
+
+    .flow-mode-async {
+      stroke: var(--cp-accent);
+      stroke-dasharray: 9 6;
+    }
+
+    .flow-mode-stream {
+      stroke: var(--cp-success);
+      stroke-dasharray: 14 4 3 4;
+    }
+
+    .flow-mode-batch {
+      stroke: var(--cp-warning);
+      stroke-dasharray: 3 6;
+    }
+
+    .flow-label-bg {
+      fill: var(--cp-panel-strong);
+      stroke: var(--cp-border);
+      vector-effect: non-scaling-stroke;
+    }
+
+    .flow-label {
+      fill: var(--cp-text);
+      font-size: 9.5px;
+      font-weight: 650;
+    }
+
+    .flow.is-selected .flow-path,
+    .flow.is-related .flow-path {
+      stroke: var(--cp-accent);
+      stroke-width: 4;
+    }
+
+    .flow:hover .flow-path {
+      stroke-width: 4;
+    }
+
+    .arrow-sync {
+      fill: var(--cp-link);
+    }
+
+    .arrow-async {
+      fill: var(--cp-accent);
+    }
+
+    .arrow-stream {
+      fill: var(--cp-success);
+    }
+
+    .arrow-batch {
+      fill: var(--cp-warning);
+    }
+
+    .empty-diagram-text {
+      fill: var(--cp-text-muted);
+      font-size: 18px;
+      font-weight: 650;
+    }
+
+    @media (max-width: 1280px) {
+      .workspace {
+        grid-template-columns: 190px minmax(0, 1fr) 300px;
+      }
+
+      .stat-note {
+        display: none;
+      }
+
+      .stat-value {
+        grid-row: auto;
+      }
+
+      .stat-card {
+        grid-template-columns: auto minmax(0, 1fr);
+      }
+
+      .hero-copy {
+        display: none;
+      }
+    }
+
+    @media (max-width: 900px) {
+      .app-shell {
+        padding: 8px;
+      }
+
+      .hero {
+        align-items: flex-start;
+      }
+
+      .header-context {
+        align-items: flex-end;
+        flex-direction: column;
+        gap: 5px;
+      }
+
+      .agent-ribbon {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .ribbon-thesis {
+        grid-column: 1 / -1;
+      }
+
+      .agent-connector {
+        display: none;
+      }
+
+      .workspace {
+        grid-template-columns: 1fr;
+        height: auto;
+        min-height: 0;
+      }
+
+      .lens-rail {
+        display: none;
+      }
+
+      .mobile-lens {
+        display: grid;
+        flex: 1 1 220px;
+      }
+
+      .toolbar {
+        flex-wrap: wrap;
+      }
+
+      .search-field {
+        flex-basis: 100%;
+        order: -2;
+      }
+
+      .canvas-card {
+        grid-template-rows: auto 620px auto;
+        height: auto;
+      }
+
+      .inspector {
+        height: 480px;
+      }
+
+      .detail-panel,
+      .navigator-panel {
+        max-height: none;
+      }
+
+      .caveat-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 600px) {
+      .hero {
+        gap: 8px;
+        padding: 8px;
+      }
+
+      .product-heading {
+        display: block;
+      }
+
+      .meta-row {
+        justify-content: flex-end;
+      }
+
+      .header-context {
+        align-items: center;
+        flex-direction: row;
+      }
+
+      .status-pill,
+      .meta-pill.mono {
+        display: none;
+      }
+
+      #hero-fit {
+        display: none;
+      }
+
+      .hero-actions button {
+        white-space: nowrap;
+      }
+
+      .agent-ribbon {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .ribbon-thesis {
+        grid-column: 1 / -1;
+        min-height: 58px;
+      }
+
+      .agent-profile {
+        grid-template-columns: 26px minmax(0, 1fr);
+        min-height: 64px;
+        gap: 7px;
+        padding: 8px;
+      }
+
+      .agent-mark {
+        width: 26px;
+        height: 26px;
+      }
+
+      .stats {
+        display: flex;
+        min-height: 48px;
+        overflow-x: auto;
+        scroll-snap-type: x proximity;
+      }
+
+      .stat-card {
+        flex: 0 0 142px;
+        min-height: 46px;
+        border-right: 1px solid var(--cp-border);
+        border-bottom: 0;
+        scroll-snap-align: start;
+      }
+
+      .stat-card:last-child {
+        border-right: 0;
+      }
+
+      .caveat-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .canvas-heading,
+      .notes-summary {
+        display: block;
+      }
+
+      .canvas-heading {
+        min-height: 52px;
+      }
+
+      #view-description,
+      .canvas-meta span:last-child {
+        display: none;
+      }
+
+      .canvas-meta {
+        margin-top: 3px;
+        text-align: left;
+      }
+
+      .toolbar-actions {
+        margin-left: auto;
+      }
+
+      .trace-field {
+        flex: 1 1 130px;
+      }
+
+      .check-control {
+        flex: 1 1 auto;
+      }
+
+      .filter-panel {
+        position: fixed;
+        top: auto;
+        right: 12px;
+        bottom: 12px;
+        left: 12px;
+        grid-template-columns: 1fr;
+        width: auto;
+      }
+
+      .canvas-card {
+        grid-template-rows: auto 540px auto;
+      }
+
+      .legend-title,
+      .legend-item:nth-last-child(-n + 2) {
+        display: none;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto;
+        transition: none;
+        animation: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="hero">
+      <div class="product-heading">
+        <div>
+          <p class="eyebrow">Architecture explorer</p>
+          <h1>Agentic AI Memory</h1>
+        </div>
+        <p class="hero-copy">
+          Dual Foundry support with one FastAPI policy boundary
+        </p>
+      </div>
+      <div class="header-context">
+        <div class="meta-row">
+          <span class="status-pill">Implemented and accepted</span>
+          <span class="meta-pill mono">snapshot c1f56e30c0fa + working tree</span>
+        </div>
+        <div class="hero-actions">
+          <button id="theme-toggle" type="button">Toggle theme</button>
+          <button id="hero-fit" class="primary-button" type="button">Fit canvas</button>
+        </div>
+      </div>
+    </header>
+
+    <section class="agent-ribbon" aria-label="Agent capability comparison">
+      <div class="ribbon-thesis">
+        <span class="ribbon-label">Shared policy plane</span>
+        <strong>FastAPI owns trust</strong>
+        <span>Auth, routing, persistence, tools, and AG-UI</span>
+      </div>
+      <article class="agent-profile">
+        <span class="agent-mark">P</span>
+        <div>
+          <span class="ribbon-label">Native Foundry</span>
+          <strong>Prompt Agent</strong>
+          <span>Foundry IQ only</span>
+        </div>
+      </article>
+      <div class="agent-connector" aria-hidden="true">
+        <span></span>
+      </div>
+      <article class="agent-profile">
+        <span class="agent-mark">H</span>
+        <div>
+          <span class="ribbon-label">Foundry Hosted</span>
+          <strong>Hosted MAF</strong>
+          <span>Foundry IQ + 4 protected tools</span>
+        </div>
+      </article>
+    </section>
+
+    <section class="stats" id="stats" aria-label="Architecture summary"></section>
+
+    <main class="workspace">
+      <aside class="lens-rail" aria-label="Architecture lenses">
+        <header class="lens-header">
+          <p class="panel-kicker">Explore by lens</p>
+          <h2>Architecture views</h2>
+          <p>Each view keeps one concern readable.</p>
+        </header>
+        <nav id="lens-nav" class="lens-nav"></nav>
+        <aside class="notice" aria-label="Important architecture constraint">
+          <span class="notice-mark">!</span>
+          <div>
+            <strong>Single replica</strong>
+            <span>Conversation locks are in-process; Redis is absent.</span>
+          </div>
+        </aside>
+      </aside>
+
+      <section class="stage">
+        <section class="toolbar" aria-label="Architecture controls">
+          <div class="field mobile-lens">
+            <label for="view-select">Architecture lens</label>
+            <select id="view-select"></select>
+          </div>
+          <div class="field search-field">
+            <label for="search-input">Find in architecture</label>
+            <input
+              id="search-input"
+              type="search"
+              role="combobox"
+              autocomplete="off"
+              placeholder="Component, technology, source path..."
+              aria-controls="search-results"
+              aria-expanded="false"
+              aria-autocomplete="list"
+              aria-haspopup="listbox"
+            >
+            <div
+              id="search-results"
+              class="search-results"
+              role="listbox"
+              aria-label="Architecture search results"
+            ></div>
+          </div>
+          <div class="field trace-field">
+            <label for="trace-select">Trace</label>
+            <select id="trace-select">
+              <option value="off">Off</option>
+              <option value="downstream">Downstream</option>
+              <option value="upstream">Upstream</option>
+              <option value="both">Both directions</option>
+            </select>
+          </div>
+          <label class="check-control">
+            <input id="secondary-toggle" type="checkbox">
+            Secondary flows
+          </label>
+          <details id="filter-popover" class="filter-popover">
+            <summary>
+              Filters
+              <span id="filter-count" class="filter-count" hidden>0</span>
+            </summary>
+            <div class="filter-panel">
+              <div class="field">
+                <label for="group-filter">Layer / concern</label>
+                <select id="group-filter"></select>
+              </div>
+              <div class="field">
+                <label for="kind-filter">Component kind</label>
+                <select id="kind-filter"></select>
+              </div>
+              <div class="field">
+                <label for="mode-filter">Flow mode</label>
+                <select id="mode-filter">
+                  <option value="all">All flow modes</option>
+                  <option value="sync">Synchronous</option>
+                  <option value="async">Asynchronous</option>
+                  <option value="stream">Streaming</option>
+                  <option value="batch">Batch / release</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="confidence-filter">Confidence</label>
+                <select id="confidence-filter">
+                  <option value="all">All confidence</option>
+                  <option value="observed">Observed</option>
+                  <option value="inferred">Inferred</option>
+                  <option value="planned">Planned</option>
+                  <option value="unknown">Unknown</option>
+                </select>
+              </div>
+            </div>
+          </details>
+          <div class="toolbar-actions">
+            <button id="fit-button" type="button">Fit</button>
+            <button id="reset-button" type="button">Reset</button>
+          </div>
+        </section>
+
+        <section class="canvas-card" aria-labelledby="view-title">
+          <header class="canvas-heading">
+            <div>
+              <h2 id="view-title"></h2>
+              <p id="view-description"></p>
+            </div>
+            <div class="canvas-meta">
+              <span id="visible-count"></span>
+              <span>Select a node or flow for evidence</span>
+            </div>
+          </header>
+          <div class="diagram-wrap" id="diagram-wrap">
+            <svg
+              id="diagram"
+              role="img"
+              tabindex="0"
+              aria-labelledby="view-title view-description"
+            >
+              <defs>
+                <marker id="arrow-sync" markerWidth="5" markerHeight="5" refX="4.5" refY="2.5" orient="auto">
+                  <path class="arrow-sync" d="M 0 0 L 5 2.5 L 0 5 z"></path>
+                </marker>
+                <marker id="arrow-async" markerWidth="5" markerHeight="5" refX="4.5" refY="2.5" orient="auto">
+                  <path class="arrow-async" d="M 0 0 L 5 2.5 L 0 5 z"></path>
+                </marker>
+                <marker id="arrow-stream" markerWidth="5" markerHeight="5" refX="4.5" refY="2.5" orient="auto">
+                  <path class="arrow-stream" d="M 0 0 L 5 2.5 L 0 5 z"></path>
+                </marker>
+                <marker id="arrow-batch" markerWidth="5" markerHeight="5" refX="4.5" refY="2.5" orient="auto">
+                  <path class="arrow-batch" d="M 0 0 L 5 2.5 L 0 5 z"></path>
+                </marker>
+              </defs>
+              <g id="viewport">
+                <g id="lane-layer"></g>
+                <g id="flow-layer"></g>
+                <g id="node-layer"></g>
+              </g>
+            </svg>
+            <div class="zoom-controls" aria-label="Zoom controls">
+              <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+              <button id="zoom-out" type="button" aria-label="Zoom out">-</button>
+              <button id="zoom-fit" type="button" aria-label="Fit diagram">F</button>
+            </div>
+          </div>
+          <footer class="legend" aria-label="Diagram legend">
+            <div class="legend-items">
+              <span class="legend-title">Legend</span>
+              <span class="legend-item"><span class="legend-node"></span>component</span>
+              <span class="legend-item"><span class="legend-node selected"></span>selected</span>
+              <span class="legend-item"><span class="legend-line"></span>sync</span>
+              <span class="legend-item"><span class="legend-line async"></span>async</span>
+              <span class="legend-item"><span class="legend-line stream"></span>stream</span>
+              <span class="legend-item"><span class="legend-line batch"></span>batch / release</span>
+            </div>
+          </footer>
+        </section>
+      </section>
+
+      <aside class="inspector" aria-label="Architecture inspector">
+        <div class="inspector-tabs" role="tablist" aria-label="Inspector content">
+          <button
+            id="details-tab"
+            class="inspector-tab is-active"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            aria-controls="detail-panel"
+          >Details</button>
+          <button
+            id="components-tab"
+            class="inspector-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="navigator-panel"
+          >Components</button>
+        </div>
+        <section
+          id="detail-panel"
+          class="detail-panel"
+          role="tabpanel"
+          aria-labelledby="details-tab"
+          aria-live="polite"
+        ></section>
+        <section
+          id="navigator-panel"
+          class="navigator-panel"
+          role="tabpanel"
+          aria-labelledby="components-tab"
+          hidden
+        >
+          <p class="panel-kicker">Keyboard-safe navigator</p>
+          <h2>Components in this lens</h2>
+          <div id="navigator-list" class="navigator-list"></div>
+        </section>
+      </aside>
+    </main>
+
+    <details class="notes-section">
+      <summary class="notes-summary">
+        <span>
+          <span class="eyebrow">Implementation truth and caveats</span>
+          <strong id="notes-title">Open observed constraints and design debt</strong>
+        </span>
+        <span class="meta-pill" id="evidence-count"></span>
+      </summary>
+      <div class="notes-body" aria-labelledby="notes-title">
+        <header>
+          <div>
+            <p>
+              These notes are observed constraints or implementation drift, not generic Azure
+              recommendations. Evidence paths reflect the current working tree.
+            </p>
+          </div>
+        </header>
+        <div id="caveat-grid" class="caveat-grid"></div>
+        <footer class="source-footer">
+          <span>
+            Source priority: runtime and Terraform, then setup scripts and current reference docs.
+          </span>
+          <span class="mono">docs/architecture.html</span>
+        </footer>
+      </div>
+    </details>
+  </div>
+
+  <script>
+    "use strict";
+
+    const evidence = (path, lines, note) => ({ path, lines, note });
+
+    const component = (id, name, kind, groupIds, summary, options = {}) => ({
+      id,
+      name,
+      kind,
+      groupIds,
+      summary,
+      responsibilities: [],
+      technologies: [],
+      interfaces: [],
+      dataOwned: [],
+      deployment: [],
+      security: [],
+      operations: [],
+      confidence: "observed",
+      evidence: [],
+      ...options
+    });
+
+    const flow = (id, from, to, label, mode, viewIds, options = {}) => ({
+      id,
+      from,
+      to,
+      label,
+      mode,
+      viewIds,
+      importance: "primary",
+      purpose: "",
+      protocol: "",
+      port: null,
+      data: [],
+      trigger: "",
+      authentication: "",
+      encryption: "",
+      boundaryCrossings: [],
+      failureBehavior: "",
+      confidence: "observed",
+      evidence: [],
+      ...options
+    });
+
+    const architecture = {
+      meta: {
+        project: "Agentic AI Memory - Dual Foundry Support Chat",
+        summary:
+          "A secure support SPA with two selectable Foundry agents, one FastAPI policy boundary, five memory layers, and Foundry IQ grounding.",
+        generatedAt: "2026-07-13T19:05:23+02:00",
+        commit: "c1f56e30c0fa",
+        scope: "Current working tree after orchestration, frontend, Search setup, and backend package simplification",
+        repositoryUrl: "https://github.com/michalmar/agent-memory-rag",
+        caveats: []
+      },
+      headlineStats: [
+        { value: "2", label: "Selectable agents", note: "Native Prompt and Hosted MAF" },
+        { value: "5", label: "Memory layers", note: "Session through enterprise knowledge" },
+        { value: "4", label: "Protected app tools", note: "Hosted Agent only" },
+        { value: "3", label: "Azure regions", note: "East US 2, North Central US, West Europe" },
+        { value: "1", label: "Backend replica", note: "In-process conversation coordination" }
+      ],
+      groups: [
+        { id: "experience", name: "Experience", kind: "layer", description: "User-facing SPA and interaction surfaces." },
+        { id: "edge", name: "Public edge", kind: "network-zone", description: "Internet-facing ingress and reverse proxy." },
+        { id: "application", name: "Application policy", kind: "trust-boundary", description: "FastAPI authorization, persistence, routing, and tool policy." },
+        { id: "agent-runtime", name: "Agent runtime", kind: "runtime", description: "Foundry agent adapters, definitions, and hosted execution." },
+        { id: "knowledge", name: "Knowledge and models", kind: "layer", description: "Foundry IQ, Search, chat models, and embeddings." },
+        { id: "memory", name: "Application memory", kind: "ownership", description: "Session, history, semantic memory, and user profile stores." },
+        { id: "identity", name: "Identity and authorization", kind: "trust-boundary", description: "Entra tokens, managed identities, and app roles." },
+        { id: "operations", name: "Operations", kind: "layer", description: "Health, telemetry, deployment, and rollback controls." },
+        { id: "delivery", name: "Bootstrap and release", kind: "runtime", description: "Terraform, ACR builds, the PostgreSQL setup job, and the direct Foundry release script." }
+      ],
+      components: [
+        component("user", "Support user", "actor", ["experience"], "Chooses an agent and owns all application-visible state.", {
+          responsibilities: ["Select an agent before a new conversation", "Initiate chat, profile, and memory operations"],
+          interfaces: ["Browser interaction"],
+          security: ["Production identity is established by Microsoft Entra ID"],
+          evidence: [
+            evidence("docs/PRD-Solution-Challenges-1-5.md", "10-22", "Product goal and immutable agent selection"),
+            evidence("frontend/src/app.ts", "47-203", "Root application state and interaction orchestration")
+          ]
+        }),
+        component("browser-spa", "Lit browser SPA", "client", ["experience"], "Componentized Vite and Lit single-page application with MSAL, AG-UI streaming, Markdown, citations, and constrained A2UI tool cards.", {
+          technologies: ["TypeScript", "Vite 6", "Lit 3", "MSAL Browser", "marked", "DOMPurify"],
+          interfaces: ["HTTPS /api/*", "AG-UI Server-Sent Events", "window.__APP_CONFIG__"],
+          responsibilities: ["Acquire delegated tokens", "Lock agent choice per conversation", "Render text, tools, and citations"],
+          security: ["Clears user-scoped state on identity change", "Sanitizes rendered Markdown"],
+          evidence: [
+            evidence("frontend/package.json", "12-17", "Frontend dependencies"),
+            evidence("frontend/src/auth.ts", "62-110", "MSAL token acquisition"),
+            evidence("frontend/src/client.ts", "181-225", "Conversation request and SSE frame parsing"),
+            evidence("frontend/src/converters.ts", "1-124", "Citation parsing and constrained A2UI tool-card conversion"),
+            evidence("frontend/src/components/chat-transcript.ts", "25-160", "Markdown, citation, and tool-card rendering")
+          ]
+        }),
+        component("entra-id", "Microsoft Entra ID", "identity", ["identity"], "Issues delegated user tokens and app-only Hosted Agent tokens.", {
+          interfaces: ["OIDC/OAuth 2.0", "JWKS", "access_as_user", "AgentTools.Invoke"],
+          responsibilities: ["Authenticate browser users", "Authorize the Hosted Agent service principal"],
+          security: ["Single tenant", "v2 access tokens", "Application-only role for the tool gateway"],
+          evidence: [
+            evidence("scripts/create_entra_app.sh", "54-136", "SPA/API scope, application role, and token settings"),
+            evidence("backend/agent_memory_backend/auth.py", "88-177", "User JWT validation"),
+            evidence("backend/agent_memory_backend/auth.py", "200-262", "Agent app-token validation")
+          ]
+        }),
+        component("frontend-ca", "Frontend Container App", "edge", ["edge", "experience"], "Public nginx edge serving the SPA and proxying user and Hosted Agent API traffic.", {
+          technologies: ["nginx:alpine", "Container Apps"],
+          interfaces: ["Public HTTPS", "Internal ACA HTTPS", "Port 8080"],
+          responsibilities: ["Serve static SPA", "Inject runtime MSAL configuration", "Proxy unbuffered SSE", "Rate-limit Hosted tool calls"],
+          deployment: ["External Container Apps ingress", "1-2 replicas", "0.25 vCPU / 0.5 GiB"],
+          security: ["Agent tool route limited to 20 requests/second with 64 KiB body limit"],
+          evidence: [
+            evidence("frontend/Dockerfile", "10-24", "nginx runtime image and port"),
+            evidence("frontend/nginx.conf.template", "15-57", "Runtime config, API proxies, SSE, and SPA fallback"),
+            evidence("infra/compute.tf", "221-254", "Container App identity, ingress, scaling, and backend URL")
+          ]
+        }),
+        component("frontend-uami", "Frontend UAMI", "identity", ["identity"], "User-assigned managed identity dedicated to private ACR image pulls.", {
+          responsibilities: ["Authenticate frontend image pulls"],
+          security: ["AcrPull only"],
+          evidence: [
+            evidence("infra/main.tf", "53-58", "Frontend managed identity"),
+            evidence("infra/compute.tf", "25-29", "AcrPull assignment")
+          ]
+        }),
+        component("aca-environment", "Container Apps environment", "platform", ["edge", "operations"], "VNet-integrated Azure Container Apps environment hosting apps and manual setup jobs.", {
+          technologies: ["Azure Container Apps", "Consumption workload profile"],
+          deployment: ["East US 2", "snet-aca 10.42.0.0/23", "Log Analytics connected"],
+          security: ["Default outbound access disabled on delegated subnet"],
+          evidence: [
+            evidence("infra/compute.tf", "54-65", "Environment, subnet, workload profile, and log sink"),
+            evidence("infra/network.tf", "10-24", "ACA subnet delegation and outbound policy")
+          ]
+        }),
+        component("fastapi-backend", "FastAPI backend", "service", ["application"], "Internal policy-enforcement point for auth, routing, persistence, AG-UI, and application tools.", {
+          technologies: ["Python 3.11", "FastAPI", "uvicorn", "Pydantic", "async Azure SDKs"],
+          interfaces: ["Internal HTTPS", "Port 8000", "REST", "AG-UI SSE"],
+          responsibilities: ["Validate callers", "Create remote agent state", "Enforce immutable routing", "Persist owner-scoped state", "Emit normalized AG-UI"],
+          deployment: ["Internal Container Apps ingress", "Exactly one replica", "0.5 vCPU / 1 GiB"],
+          security: ["Derives owner key as tid:oid", "Never exposes private runtime IDs", "Rejects production mock auth"],
+          operations: ["Liveness and bounded readiness", "Privacy-allowlisted OpenTelemetry"],
+          evidence: [
+            evidence("backend/agent_memory_backend/server.py", "99-191", "Lifespan, application assembly, middleware, and request contract"),
+            evidence("backend/agent_memory_backend/server.py", "196-584", "Authenticated API surface"),
+            evidence("backend/Dockerfile", "1-19", "Python runtime and uvicorn entry point"),
+            evidence("infra/compute.tf", "126-208", "Internal ingress, identity, probes, and single replica")
+          ]
+        }),
+        component("app-uami", "Application UAMI", "identity", ["identity"], "Backend user-assigned identity for Foundry, data, model, registry, and telemetry access.", {
+          responsibilities: ["Authenticate backend Azure data-plane calls"],
+          security: ["Least-privilege RBAC", "No application secrets required"],
+          dataOwned: ["Cosmos data contributor", "PostgreSQL Entra principal"],
+          evidence: [
+            evidence("infra/main.tf", "46-51", "Application managed identity"),
+            evidence("infra/identity.tf", "4-66", "Foundry, Search, Monitor, Cosmos, and deployer roles"),
+            evidence("infra/foundry_agents.tf", "158-184", "Custom Foundry consumer role")
+          ]
+        }),
+        component("conversation-orchestration", "Conversation orchestration", "module", ["application", "memory"], "Coordinates durable and remote state with bounded live runtime mappings, turn accumulation, and per-conversation locks.", {
+          technologies: ["Python dataclasses", "asyncio.Lock"],
+          dataOwned: ["Live runtime mappings", "Per-conversation locks", "Per-turn normalized output"],
+          responsibilities: ["Create or restore remote state", "Reject overlapping turns", "Assemble durable message records", "Clean up failed initial state", "LRU-evict beyond 1,000 live mappings"],
+          operations: ["Durable Cosmos metadata restores mappings after restart", "Requires one backend replica"],
+          evidence: [
+            evidence("backend/agent_memory_backend/conversation_coordinator.py", "24-181", "Conversation creation, restoration, deletion, and failed-state cleanup"),
+            evidence("backend/agent_memory_backend/conversation_registry.py", "15-122", "Bounded live mappings, ownership checks, and locks"),
+            evidence("backend/agent_memory_backend/turn_accumulator.py", "23-95", "Normalized event and durable message accumulation")
+          ]
+        }),
+        component("agui-adapter", "AG-UI adapter", "module", ["application"], "Converts normalized runtime events into one public AG-UI event contract.", {
+          responsibilities: ["Map text deltas, tool events, citations, usage, completion, and errors"],
+          interfaces: ["ag-ui-protocol 0.1.19+"],
+          evidence: [
+            evidence("backend/agent_memory_backend/agui_adapter.py", "28-79", "Normalized event to AG-UI conversion"),
+            evidence("backend/agent_memory_backend/server.py", "227-329", "SSE streaming lifecycle")
+          ]
+        }),
+        component("shared-contracts", "Shared agent contracts", "contract", ["application", "agent-runtime"], "Versioned prompts, strict tool schemas, runtime state, citations, and normalized events.", {
+          technologies: ["Python package", "Pydantic v2", "SHA-256 prompt versions"],
+          responsibilities: ["Keep backend and Hosted Agent schemas aligned", "Exclude identity fields from model-visible arguments"],
+          evidence: [
+            evidence("agent_contracts/models.py", "10-113", "Agent types, runtime state, and normalized events"),
+            evidence("agent_contracts/tools.py", "11-71", "Four strict Hosted application tools"),
+            evidence("agent_contracts/prompts.py", "1-22", "Deterministic prompt versions")
+          ]
+        }),
+        component("prompt-runtime", "Prompt runtime adapter", "module", ["application", "agent-runtime"], "Backend adapter for native Prompt Agent conversations and Responses API streams.", {
+          technologies: ["AIProjectClient", "OpenAI Responses API"],
+          responsibilities: ["Create Foundry conversation", "Send trusted user identity", "Normalize stream output"],
+          interfaces: ["agent_reference", "x-ms-user-identity"],
+          evidence: [
+            evidence("backend/agent_memory_backend/foundry_prompt_runtime.py", "36-99", "Client initialization, state creation, and streamed invocation"),
+            evidence("backend/agent_memory_backend/foundry_runtime_base.py", "97-163", "Shared response, tool, citation, and usage parsing")
+          ]
+        }),
+        component("hosted-runtime", "Hosted MAF runtime adapter", "module", ["application", "agent-runtime"], "Backend adapter coordinating Hosted Agent sessions and Responses API conversations.", {
+          technologies: ["AIProjectClient preview", "HostedAgents=V1Preview"],
+          responsibilities: ["Create Hosted session and Foundry conversation", "Clean up partial creation", "Persist returned session ID"],
+          interfaces: ["Responses API", "agent_session_id"],
+          evidence: [
+            evidence("backend/agent_memory_backend/foundry_hosted_maf_runtime.py", "40-130", "Hosted client, two-part state, invocation, and cleanup")
+          ]
+        }),
+        component("prompt-agent", "Native Prompt Agent", "agent", ["agent-runtime"], "Versioned Foundry Prompt Agent restricted to Foundry IQ retrieval.", {
+          technologies: ["PromptAgentDefinition", "MCPTool", "gpt-4o-mini"],
+          interfaces: ["knowledge_base_retrieve only"],
+          responsibilities: ["Answer grounded knowledge questions", "Emit inline citations"],
+          security: ["No order, profile, or semantic-memory application tools"],
+          deployment: ["Logical name customer-support-prompt", "Immutable versions with prompt, tool, and release hashes"],
+          evidence: [
+            evidence("setup/agents/release_prompt_agent.py", "26-105", "Tool definition and three-key idempotent release"),
+            evidence("agent_contracts/foundry_prompt.txt", "1-18", "Knowledge-only behavioral contract"),
+            evidence("docs/PRD-Solution-Challenges-1-5.md", "98-110", "Current Prompt Agent architecture")
+          ]
+        }),
+        component("hosted-maf", "Hosted MAF Agent", "agent", ["agent-runtime"], "Foundry Hosted Microsoft Agent Framework runtime with IQ and four protected application tools. Remains container-based today; source-code (non-container) Hosted deployment is a preview capability planned for the future, not yet used.", {
+          technologies: ["Python 3.13", "Microsoft Agent Framework", "FoundryChatClient", "ResponsesHostServer"],
+          interfaces: ["Hosted Responses protocol 2.0.0", "Foundry IQ MCP", "App-only HTTPS tool gateway"],
+          responsibilities: ["Ground answers", "Read trusted request context", "Call application tools through FastAPI"],
+          security: ["Receives no direct Cosmos, PostgreSQL, or application data roles", "Five function-invocation iterations"],
+          deployment: ["Foundry Hosted Agent", "Container image built and pushed to ACR", "Port 8088 in image", "Planned/preview only: source-code (non-container) Hosted deployment is not used today"],
+          evidence: [
+            evidence("agents/customer-support-maf/src/customer-support-maf/main.py", "1-56", "Agent, MCP, tools, and host server"),
+            evidence("agents/customer-support-maf/src/customer-support-maf/gateway_tools.py", "15-87", "Trusted context and app-token tool wrappers"),
+            evidence("agents/customer-support-maf/azure.yaml", "8-40", "Foundry host and Responses protocol deployment"),
+            evidence("README.md", "236-238", "Hosted Agent source-code deployment documented as preview/future")
+          ]
+        }),
+        component("hosted-sp", "Hosted Agent service principal", "identity", ["identity", "agent-runtime"], "Foundry-created runtime principal allowed to request AgentTools.Invoke only.", {
+          responsibilities: ["Acquire app-only gateway token"],
+          security: ["Application role only", "Object ID allowlisted by backend", "No delegated scopes accepted"],
+          evidence: [
+            evidence("scripts/assign_hosted_agent_access.sh", "1-61", "Idempotent application-role assignment"),
+            evidence("backend/agent_memory_backend/auth.py", "200-262", "Role, token type, audience, and principal validation")
+          ]
+        }),
+        component("foundry-project", "Foundry agent account and project", "managed-ai", ["agent-runtime", "knowledge"], "The single public Basic Setup Foundry account and project (agmem5df652aif2 / agmem-agents) hosting both logical agents, the chat/embedding deployments, the Foundry IQ connection, and the project Application Insights connection.", {
+          technologies: ["Microsoft Foundry", "AIServices", "Basic Setup", "azapi provider"],
+          interfaces: ["Project endpoint", "Responses API", "Hosted Agent control plane"],
+          responsibilities: ["Host agent definitions and runtime", "Own the project Foundry IQ MCP connection", "Own the project App Insights connection", "Manage platform agent state"],
+          deployment: ["East US 2", "Public network access enabled", "No private endpoint", "allowProjectManagement enabled"],
+          security: ["Local auth disabled (disableLocalAuth)", "Entra/RBAC-only public platform path", "Single account/project with no Foundry private endpoint"],
+          evidence: [
+            evidence("infra/foundry_agents.tf", "12-45", "Single AIServices account, public access, and disabled local auth"),
+            evidence("infra/foundry_agents.tf", "81-104", "Basic Setup project resource"),
+            evidence("infra/foundry_agents.tf", "106-124", "Foundry IQ project connection"),
+            evidence("infra/monitoring.tf", "15-36", "Project Application Insights connection"),
+            evidence("docs/PRD-Solution-Challenges-1-5.md", "24-42", "Governing topology decisions")
+          ]
+        }),
+        component("project-mi", "Foundry project system identity", "identity", ["identity", "agent-runtime"], "System-assigned identity on the Foundry project used for the IQ connection, ACR pulls, and log reads on the shared account.", {
+          responsibilities: ["Authenticate the ProjectManagedIdentity Foundry IQ connection", "Read Search indexes", "Pull the Hosted MAF image", "Read Log Analytics"],
+          security: ["Search Index Data Reader", "Foundry User (account scope)", "AcrPull", "Log Analytics Reader"],
+          evidence: [
+            evidence("infra/foundry_agents.tf", "81-104, 126-156", "Project system identity and its RBAC")
+          ]
+        }),
+        component("foundry-conversations", "Foundry conversation state", "managed-ai", ["agent-runtime", "memory"], "Platform-managed remote conversation state for Prompt and Hosted runtimes.", {
+          dataOwned: ["Foundry conversation IDs", "Hosted session IDs", "response state"],
+          responsibilities: ["Maintain agent runtime continuity"],
+          security: ["Private identifiers persist only in backend-owned Cosmos metadata"],
+          evidence: [
+            evidence("backend/agent_memory_backend/foundry_prompt_runtime.py", "59-78", "Prompt conversation creation"),
+            evidence("backend/agent_memory_backend/foundry_hosted_maf_runtime.py", "73-91", "Hosted session and conversation creation"),
+            evidence("backend/agent_memory_backend/conversation_history.py", "24-38", "Private runtime metadata schema")
+          ]
+        }),
+        component("foundry-iq", "Foundry IQ knowledge base", "managed-ai", ["knowledge"], "Grounded retrieval surface combining order and return-policy knowledge sources.", {
+          technologies: ["Azure AI Search knowledge base", "MCP", "2026-05-01-preview"],
+          interfaces: ["knowledge_base_retrieve", "MCP endpoint"],
+          dataOwned: ["orders-ks", "return-policy-ks", "citations"],
+          responsibilities: ["Plan retrieval", "Return grounded activities and citations"],
+          security: ["ProjectManagedIdentity connection", "Search audience"],
+          evidence: [
+            evidence("setup/knowledgebase/setup_search.py", "284-353", "Knowledge sources and knowledge base creation"),
+            evidence("infra/foundry_agents.tf", "106-124", "Project Foundry IQ connection"),
+            evidence("docs/PRD-Solution-Challenges-1-5.md", "148-159", "Foundry IQ retrieval contract")
+          ]
+        }),
+        component("ai-search", "Azure AI Search", "managed-ai", ["knowledge"], "Public Entra-only Search service hosting indexes, knowledge sources, and the IQ MCP endpoint.", {
+          technologies: ["Azure AI Search Basic", "HNSW vector search", "Semantic search"],
+          interfaces: ["Search REST 2024-07-01", "Knowledge REST 2026-05-01-preview", "MCP"],
+          dataOwned: ["orders index", "return-policy index", "customer-support-kb"],
+          deployment: ["West Europe", "Public endpoint only"],
+          security: ["Local auth disabled", "Project identity reads indexes"],
+          evidence: [
+            evidence("infra/data.tf", "142-159", "Public keyless Search resource and rationale"),
+            evidence("setup/knowledgebase/setup_search.py", "52-155", "Vector and semantic index definitions"),
+            evidence("infra/foundry_agents.tf", "9", "IQ MCP endpoint URL construction")
+          ]
+        }),
+        component("search-mi", "Search system identity", "identity", ["identity", "knowledge"], "Search-owned identity used to call the shared Foundry account's chat model during IQ query planning.", {
+          responsibilities: ["Authenticate Search to the single Foundry account's active model deployment"],
+          security: ["Cognitive Services User on the shared public Foundry account (no separate account)"],
+          evidence: [
+            evidence("infra/data.tf", "146-159", "Search system identity"),
+            evidence("infra/identity.tf", "43-48", "Cognitive Services User assignment on the Foundry account")
+          ]
+        }),
+        component("foundry-models", "Foundry chat and embedding models", "managed-ai", ["knowledge"], "gpt-4o-mini chat and text-embedding-3-large embedding deployments inside the single public Foundry agents account (no separate application AI account remains).", {
+          technologies: ["Azure OpenAI on Foundry", "gpt-4o-mini", "text-embedding-3-large"],
+          interfaces: ["Azure OpenAI Chat Completions / Responses", "Public Entra/RBAC endpoint"],
+          responsibilities: ["Summarize conversations", "Extract profiles", "Embed semantic memory and knowledge documents", "Serve Foundry IQ query planning"],
+          deployment: ["East US 2", "Same account as the agent plane", "Public network access enabled", "Local auth disabled"],
+          security: ["Cognitive Services OpenAI User for the backend UAMI", "Cognitive Services User for the Search system identity", "No private endpoint"],
+          evidence: [
+            evidence("infra/foundry_agents.tf", "47-79", "Chat and embedding deployments on the shared account"),
+            evidence("infra/identity.tf", "4-9, 43-48", "Backend and Search RBAC on the shared account"),
+            evidence("backend/agent_memory_backend/azure_clients.py", "30-57", "Single Azure OpenAI client and managed identity"),
+            evidence("backend/agent_memory_backend/memory_agent.py", "39-55", "Summary and embedding path"),
+            evidence("backend/agent_memory_backend/profile_agent.py", "17-38", "Profile extraction")
+          ]
+        }),
+        component("app-tool-gateway", "App-only tool gateway", "service", ["application", "identity"], "Protected FastAPI route validating Hosted Agent identity and stored user/session binding.", {
+          interfaces: ["/internal/agent-tools/{tool_name}"],
+          responsibilities: ["Validate app-only caller", "Resolve owner and Hosted session", "Set trusted user context", "Dispatch allowlisted tools"],
+          security: ["Rejects delegated scp", "Requires AgentTools.Invoke", "Principal allowlist", "Stored session binding"],
+          evidence: [
+            evidence("backend/agent_memory_backend/server.py", "446-455", "Agent-only route"),
+            evidence("backend/agent_memory_backend/agent_tool_gateway.py", "25-49", "Session binding and trusted dispatch"),
+            evidence("backend/agent_memory_backend/auth.py", "219-262", "Agent token policy")
+          ]
+        }),
+        component("app-tools", "Application tool handlers", "module", ["application"], "Strict async handlers for user context, mock order lookup, memory recall, and profile update.", {
+          interfaces: ["get_user_context", "get_order_status", "check_memory", "update_user_profile"],
+          responsibilities: ["Validate arguments with Pydantic", "Return typed ToolResultEnvelope"],
+          security: ["Identity omitted from model-visible arguments", "User context comes from backend ContextVar"],
+          evidence: [
+            evidence("backend/agent_memory_backend/agent_tools.py", "55-158", "Tool handlers, validation, telemetry, and envelopes"),
+            evidence("agent_contracts/tools.py", "11-71", "Strict shared definitions")
+          ]
+        }),
+        component("mock-orders", "Mock order records", "dataset", ["application"], "Three in-code demo orders used by get_order_status.", {
+          dataOwned: ["ORD-001", "ORD-002", "ORD-003"],
+          operations: ["Demo-only; no production order database"],
+          evidence: [
+            evidence("backend/agent_memory_backend/agent_tools.py", "14-30", "Hard-coded order records")
+          ]
+        }),
+        component("cosmos-history", "Cosmos conversation history", "database", ["memory"], "Durable owner-partitioned transcripts and private remote runtime mapping.", {
+          technologies: ["Azure Cosmos DB NoSQL", "Async SDK", "ETag optimistic concurrency"],
+          interfaces: ["support/history", "Partition key /user_id"],
+          dataOwned: ["Conversation schema v3", "Agent type", "Private runtime IDs", "Messages"],
+          deployment: ["East US 2", "Serverless", "Single region", "Private endpoint"],
+          security: ["Local auth disabled", "Application UAMI", "Public DTO allowlists"],
+          evidence: [
+            evidence("infra/data.tf", "6-70", "Cosmos account, database, history container, and private endpoint"),
+            evidence("backend/agent_memory_backend/conversation_history.py", "24-38", "Conversation schema"),
+            evidence("backend/agent_memory_backend/conversation_history.py", "154-245", "Isolation, ETags, and immutable agent type")
+          ]
+        }),
+        component("cosmos-profiles", "Cosmos user profiles", "database", ["memory"], "Durable owner-partitioned profile documents with merge-patch updates.", {
+          technologies: ["Azure Cosmos DB NoSQL", "RFC 7396 merge patch"],
+          interfaces: ["support/profiles", "Partition key /user_id"],
+          dataOwned: ["Basic info", "Interests", "Habits", "Preferences", "Status", "Facts"],
+          deployment: ["Same private Cosmos account as history"],
+          security: ["Application UAMI", "ETag retries", "Owner-scoped APIs"],
+          evidence: [
+            evidence("infra/data.tf", "42-50", "Profiles container"),
+            evidence("backend/agent_memory_backend/user_profile_memory.py", "15-181", "Profile schema, isolation, merge patch, and retries")
+          ]
+        }),
+        component("postgres-memory", "PostgreSQL semantic memory", "database", ["memory"], "One pgvector summary row per conversation and user, searched by cosine similarity.", {
+          technologies: ["Azure PostgreSQL Flexible Server 16", "pgvector", "asyncpg"],
+          interfaces: ["memory.conversation_memory", "Port 5432", "Entra token"],
+          dataOwned: ["Conversation summary", "vector(3072)", "source title", "message count"],
+          deployment: ["North Central US", "Private endpoint", "B_Standard_B1ms", "32 GiB"],
+          security: ["Password auth disabled", "Application managed identity", "Parameterized owner-scoped queries"],
+          operations: ["Pool min 2 / max 10", "No ANN vector index in bootstrap"],
+          evidence: [
+            evidence("infra/data.tf", "73-140", "PostgreSQL resource, Entra auth, vector extension, and private endpoint"),
+            evidence("setup/postgres/bootstrap.py", "13-111", "Schema, principal, and grants"),
+            evidence("backend/agent_memory_backend/conversation_memory.py", "176-244", "Upsert and vector search")
+          ]
+        }),
+        component("memory-agent", "Memory Agent", "module", ["application", "memory"], "User-triggered summarization and embedding pipeline for semantic conversation memory.", {
+          responsibilities: ["Summarize transcript", "Embed summary", "Upsert one row per conversation/user"],
+          interfaces: ["POST /memories"],
+          evidence: [
+            evidence("backend/agent_memory_backend/server.py", "523-584", "Manual memory APIs"),
+            evidence("backend/agent_memory_backend/memory_agent.py", "39-55", "Summary and embedding workflow")
+          ]
+        }),
+        component("profile-agent", "Profile Agent", "module", ["application", "memory"], "User-triggered JSON profile extraction from an existing conversation.", {
+          responsibilities: ["Extract structured profile with low-temperature JSON mode", "Upsert profile"],
+          interfaces: ["POST /profile/generate"],
+          evidence: [
+            evidence("backend/agent_memory_backend/server.py", "494-520", "Manual profile generation API"),
+            evidence("backend/agent_memory_backend/profile_agent.py", "17-38", "Profile extraction")
+          ]
+        }),
+        component("health-readiness", "Health and readiness", "module", ["operations"], "Liveness plus bounded dependency and runtime checks with sanitized results.", {
+          interfaces: ["/health/live", "/health/ready"],
+          responsibilities: ["Report process liveness", "Run configured dependency checks concurrently", "Cache IQ readiness briefly"],
+          operations: ["Default five-second check timeout", "503 when not ready"],
+          evidence: [
+            evidence("backend/agent_memory_backend/server.py", "332-399", "Health endpoints and registered checks"),
+            evidence("backend/agent_memory_backend/health.py", "14-39", "Bounded dependency execution")
+          ]
+        }),
+        component("app-insights", "Application Insights", "observability", ["operations"], "Single workspace-based Application Insights boundary receiving backend UAMI/AMPLS telemetry, Prompt platform spans, Hosted MAF traces, and Foundry diagnostics.", {
+          technologies: ["Azure Monitor OpenTelemetry", "Azure AI Foundry tracing"],
+          dataOwned: ["Backend allowlisted dimensions", "Foundry platform traces, which may include user/model/retrieval/tool content"],
+          deployment: ["Internet ingestion and query enabled (documented exception for the Foundry project connection)", "30-day retention"],
+          security: ["Local (API key) auth enabled only for the Foundry project connection", "Backend UAMI restricted to Monitoring Metrics Publisher (write-only)", "Access RBAC restricted"],
+          evidence: [
+            evidence("infra/monitoring.tf", "1-13", "Public ingestion/query and local auth left enabled for Foundry"),
+            evidence("infra/monitoring.tf", "15-36", "Foundry project App Insights connection (ApiKey auth)"),
+            evidence("infra/main.tf", "34-40", "30-day workspace retention"),
+            evidence("infra/identity.tf", "49-53", "Backend UAMI restricted to Monitoring Metrics Publisher"),
+            evidence("backend/agent_memory_backend/telemetry.py", "13-76", "Allowlisted attributes and Azure Monitor setup")
+          ]
+        }),
+        component("log-analytics", "Log Analytics workspace", "observability", ["operations"], "Container Apps and Application Insights operational log store.", {
+          deployment: ["East US 2", "30-day retention", "Private query through AMPLS"],
+          evidence: [
+            evidence("infra/main.tf", "37-44", "Workspace and retention"),
+            evidence("infra/monitoring.tf", "21-33", "AMPLS scoped service")
+          ]
+        }),
+        component("ampls", "Azure Monitor Private Link Scope", "platform", ["operations"], "Open-mode ingestion/query scope that keeps ACA backend telemetry on the private endpoint while still permitting Foundry's public platform telemetry path.", {
+          deployment: ["Private endpoint in snet-pe"],
+          security: ["Ingestion access mode Open", "Query access mode Open (required so Foundry's public SDK can still emit platform traces)"],
+          evidence: [
+            evidence("infra/monitoring.tf", "64-112", "AMPLS Open access mode, scoped services, and private endpoint")
+          ]
+        }),
+        component("acr", "Azure Container Registry", "registry", ["delivery"], "Premium registry with four active build repositories plus customer-support-maf retained only for Hosted Agent rollback.", {
+          interfaces: ["Private endpoint for ACA", "Public Entra/RBAC endpoint for Hosted runtime"],
+          deployment: ["Premium SKU", "Public plus private access"],
+          dataOwned: ["backend", "frontend", "pg-bootstrap", "customer-support-maf-hosted", "customer-support-maf (rollback only)"],
+          security: ["Admin and anonymous pull disabled", "Azure AD ARM authentication", "No knowledge or Prompt setup repositories"],
+          evidence: [
+            evidence("infra/compute.tf", "4-49", "Registry, controls, RBAC, and private endpoint"),
+            evidence("infra/foundry_agents.tf", "186-199", "ARM authentication enforcement"),
+            evidence("scripts/deploy_images.sh", "44-53", "Four active ACR builds"),
+            evidence("README.md", "242-244", "customer-support-maf-hosted active; customer-support-maf retained only for Hosted rollback"),
+            evidence("docs/PRD-Solution-Challenges-1-5.md", "401-402", "Prior repository retained only as a Hosted Agent rollback artifact")
+          ]
+        }),
+        component("pg-bootstrap-uami", "PostgreSQL bootstrap UAMI", "identity", ["identity", "delivery"], "Dedicated administrative identity used by the retained PostgreSQL bootstrap job to create the application database principal and grants.", {
+          security: ["PostgreSQL Entra administrator", "AcrPull"],
+          evidence: [
+            evidence("infra/main.tf", "56-61", "Bootstrap identity"),
+            evidence("infra/data.tf", "97-104", "Entra administrator"),
+            evidence("infra/jobs.tf", "13-17", "AcrPull assignment")
+          ]
+        }),
+        component("pg-setup-job", "PostgreSQL bootstrap job", "job", ["delivery", "memory"], "The only retained Container Apps Job: creates the Entra principal, pgvector schema, and least-privilege grants inside the VNet.", {
+          technologies: ["Python 3.11", "Container Apps Job"],
+          operations: ["One replica", "900-second timeout", "Retry limit 1"],
+          evidence: [
+            evidence("setup/postgres/bootstrap.py", "62-134", "Principal and transactional schema setup"),
+            evidence("infra/jobs.tf", "19-70", "Job identity, resources, and dependency"),
+            evidence("README.md", "60-61", "Only retained Container Apps Job")
+          ]
+        }),
+        component("release-foundry-assets", "Direct Foundry release script", "pipeline", ["delivery", "knowledge", "agent-runtime"], "Idempotent script that configures Search/Foundry IQ and publishes the native Prompt Agent directly, with no setup container, image, or shared managed identity.", {
+          technologies: ["Bash", "Python 3.11/3.13 venv", "azure-ai-projects"],
+          interfaces: ["setup/knowledgebase/setup_search.py", "setup/agents/release_prompt_agent.py"],
+          responsibilities: ["Create/merge Search schemas and the IQ knowledge base", "Publish an immutable Prompt Agent version only when the prompt, tool, or release hash changes"],
+          operations: ["Run on demand by the operator", "Reads Terraform outputs for endpoints and names", "Runs without a setup container or Container Apps Job"],
+          security: ["Uses the operator's own Entra identity", "Relies on deployer RBAC granted directly by Terraform, not a shared setup UAMI"],
+          evidence: [
+            evidence("scripts/release_foundry_assets.sh", "1-62", "Direct knowledge and Prompt release orchestration"),
+            evidence("setup/knowledgebase/setup_search.py", "46-81, 216-362", "Data-driven Search sources and four-step IQ setup"),
+            evidence("setup/agents/release_prompt_agent.py", "56-112", "Hash-compared idempotent Prompt Agent publication"),
+            evidence("infra/identity.tf", "17-41", "Deployer RBAC used instead of a setup identity")
+          ]
+        }),
+        component("terraform", "Terraform infrastructure", "pipeline", ["delivery", "operations"], "Provisions Azure networking, compute, the single Foundry account/project, data, monitoring, identities, and RBAC, including deployer roles used by the direct release script.", {
+          technologies: ["Terraform 1.6+", "azurerm", "azapi"],
+          responsibilities: ["Create resource graph", "Protect image drift", "Grant deployer RBAC for direct Foundry/Search release", "Expose safe outputs"],
+          security: ["Entra app registration intentionally remains manual", "No setup UAMI, knowledge job, or Prompt job resources remain"],
+          evidence: [
+            evidence("infra/versions.tf", "1-33", "Provider and Terraform versions"),
+            evidence("infra/identity.tf", "17-41", "Deployer RBAC replacing the former setup identity"),
+            evidence("docs/PRD-Solution-Challenges-1-5.md", "359-377", "Infrastructure and release requirements")
+          ]
+        }),
+        component("deploy-images", "Image deployment helper", "pipeline", ["delivery"], "Builds four images with ACR Tasks (backend, frontend, PostgreSQL bootstrap, Hosted MAF) and rolls Container Apps plus the PostgreSQL job.", {
+          interfaces: ["az acr build", "az containerapp update", "az containerapp job update"],
+          responsibilities: ["Build without local Docker", "Tag application and Hosted Agent releases"],
+          operations: ["Hosted image is pulled by Foundry rather than rolled as a Container App"],
+          evidence: [
+            evidence("scripts/deploy_images.sh", "44-62", "Four builds and three rolling updates")
+          ]
+        }),
+        component("repo-corpus", "Demo knowledge corpus", "dataset", ["delivery", "knowledge"], "Thirteen local order and return-policy chunks embedded into Search.", {
+          dataOwned: ["Nine order chunks", "Four policy chunks"],
+          confidence: "observed",
+          evidence: [
+            evidence("setup/knowledgebase/setup_search.py", "158-164", "Document loading"),
+            evidence("setup/knowledgebase/documents", "orders/* and policies/*", "Current demo corpus")
+          ]
+        }),
+        component("operator", "Platform operator", "actor", ["delivery", "operations"], "Runs Terraform, the direct Foundry release script, image builds, the PostgreSQL bootstrap job, and Hosted role assignment.", {
+          responsibilities: ["Apply infrastructure", "Run scripts/release_foundry_assets.sh", "Build and roll images", "Trigger the PostgreSQL bootstrap job", "Assign the Hosted AgentTools.Invoke role"],
+          security: ["Holds deployer RBAC on the Foundry account, project, and Search granted directly by Terraform"],
+          evidence: [
+            evidence("README.md", "205-224", "Deployment sequence"),
+            evidence("scripts/release_foundry_assets.sh", "1-62", "Direct Foundry IQ and Prompt Agent release"),
+            evidence("scripts/assign_hosted_agent_access.sh", "1-61", "Idempotent Hosted role assignment")
+          ]
+        })
+      ],
+      flows: [
+        flow("use-app", "user", "browser-spa", "Uses support chat", "sync", ["overview"], {
+          purpose: "Start and continue owner-scoped support conversations.",
+          evidence: [evidence("frontend/src/app.ts", "33-210", "Root user experience")]
+        }),
+        flow("sign-in", "browser-spa", "entra-id", "Sign in and acquire token", "sync", ["overview", "security"], {
+          protocol: "OIDC / OAuth 2.0",
+          data: ["Delegated access token"],
+          authentication: "Single-tenant MSAL",
+          encryption: "TLS",
+          evidence: [evidence("frontend/src/auth.ts", "62-110", "MSAL flow")]
+        }),
+        flow("browser-api", "browser-spa", "frontend-ca", "HTTPS /api/*", "sync", ["overview", "runtime", "network", "security"], {
+          protocol: "HTTPS",
+          data: ["Chat requests", "REST DTOs", "Delegated token"],
+          boundaryCrossings: ["Browser to public application edge"],
+          evidence: [evidence("frontend/nginx.conf.template", "36-51", "Public API reverse proxy")]
+        }),
+        flow("frontend-backend", "frontend-ca", "fastapi-backend", "Internal ACA proxy", "sync", ["overview", "runtime", "network", "security"], {
+          protocol: "HTTPS",
+          data: ["Authenticated API requests"],
+          boundaryCrossings: ["Public frontend to internal backend"],
+          evidence: [
+            evidence("frontend/nginx.conf.template", "36-51", "Backend proxy"),
+            evidence("infra/compute.tf", "141-148", "Backend internal ingress")
+          ]
+        }),
+        flow("backend-sse", "fastapi-backend", "frontend-ca", "AG-UI SSE", "stream", ["overview", "runtime"], {
+          protocol: "text/event-stream",
+          data: ["Text deltas", "Tool events", "Citations", "Usage", "Run status"],
+          failureBehavior: "Sanitized RunErrorEvent; no cross-agent failover",
+          evidence: [evidence("backend/agent_memory_backend/server.py", "227-329", "AG-UI streaming response")]
+        }),
+        flow("frontend-sse", "frontend-ca", "browser-spa", "Unbuffered event stream", "stream", ["runtime"], {
+          protocol: "SSE",
+          data: ["AG-UI frames", "X-Conversation-ID"],
+          evidence: [
+            evidence("frontend/nginx.conf.template", "44-49", "SSE proxy settings"),
+            evidence("frontend/src/client.ts", "181-225", "Conversation request and browser stream parsing")
+          ]
+        }),
+        flow("jwks-validation", "fastapi-backend", "entra-id", "JWKS token validation", "sync", ["security"], {
+          importance: "secondary",
+          protocol: "HTTPS",
+          data: ["Signing keys", "Issuer metadata"],
+          evidence: [evidence("backend/agent_memory_backend/auth.py", "88-177", "JWT and JWKS validation")]
+        }),
+        flow("app-identity", "app-uami", "fastapi-backend", "Assigned runtime identity", "sync", ["security", "network"], {
+          importance: "secondary",
+          purpose: "Provide keyless Azure data-plane credentials.",
+          evidence: [evidence("infra/compute.tf", "126-139", "Backend UAMI and registry authentication")]
+        }),
+        flow("frontend-identity", "frontend-uami", "frontend-ca", "Assigned pull identity", "sync", ["security"], {
+          importance: "secondary",
+          evidence: [evidence("infra/compute.tf", "221-224", "Frontend UAMI")]
+        }),
+        flow("conversation-coordination", "fastapi-backend", "conversation-orchestration", "Prepare state, lock turn, accumulate output", "sync", ["overview", "runtime", "memory", "operations"], {
+          data: ["RuntimeState", "Agent type", "Normalized events", "Durable message records"],
+          failureBehavior: "409 CONVERSATION_BUSY for overlapping turns",
+          evidence: [
+            evidence("backend/agent_memory_backend/conversation_coordinator.py", "46-128", "State preparation and deletion"),
+            evidence("backend/agent_memory_backend/conversation_registry.py", "102-122", "Locking and bounded eviction"),
+            evidence("backend/agent_memory_backend/turn_accumulator.py", "35-71", "Turn accumulation")
+          ]
+        }),
+        flow("normalize-events", "fastapi-backend", "agui-adapter", "Normalize runtime events", "stream", ["runtime"], {
+          data: ["NormalizedAgentEvent"],
+          evidence: [evidence("backend/agent_memory_backend/agui_adapter.py", "28-79", "AG-UI conversion")]
+        }),
+        flow("agui-output", "agui-adapter", "frontend-ca", "Emit public AG-UI", "stream", ["runtime"], {
+          data: ["AG-UI events"],
+          evidence: [evidence("backend/agent_memory_backend/server.py", "253-286", "Event encoding and yield")]
+        }),
+        flow("contracts-backend", "shared-contracts", "fastapi-backend", "Shared schemas and prompts", "batch", ["runtime"], {
+          importance: "secondary",
+          protocol: "Python package dependency",
+          evidence: [evidence("backend/Dockerfile", "9-13", "Contracts installed in backend image")]
+        }),
+        flow("contracts-hosted", "shared-contracts", "hosted-maf", "Shared tools and prompt", "batch", ["runtime", "hosted-tools"], {
+          importance: "secondary",
+          protocol: "Python package dependency",
+          evidence: [evidence("agents/customer-support-maf/src/customer-support-maf/Dockerfile", "9-13", "Contracts installed in Hosted image")]
+        }),
+        flow("select-prompt", "fastapi-backend", "prompt-runtime", "Route foundry-prompt", "sync", ["runtime"], {
+          data: ["TurnContext", "User message"],
+          evidence: [evidence("backend/agent_memory_backend/server.py", "227-329", "Runtime selection and streamed turn")]
+        }),
+        flow("prompt-invoke", "prompt-runtime", "prompt-agent", "Responses API agent_reference", "stream", ["overview", "runtime"], {
+          protocol: "Foundry Responses API",
+          data: ["User message", "Foundry conversation ID"],
+          authentication: "Application UAMI and trusted x-ms-user-identity",
+          boundaryCrossings: ["Internal ACA backend to public Foundry endpoint"],
+          failureBehavior: "Remote failure becomes RunErrorEvent",
+          evidence: [evidence("backend/agent_memory_backend/foundry_prompt_runtime.py", "88-99", "Native agent streamed invocation")]
+        }),
+        flow("select-hosted", "fastapi-backend", "hosted-runtime", "Route agent-framework", "sync", ["runtime"], {
+          data: ["TurnContext", "User message"],
+          evidence: [evidence("backend/agent_memory_backend/server.py", "227-329", "Runtime selection")]
+        }),
+        flow("hosted-invoke", "hosted-runtime", "hosted-maf", "Responses API plus Hosted session", "stream", ["overview", "runtime"], {
+          protocol: "Hosted Responses 2.0.0",
+          data: ["User message", "Foundry conversation ID", "Hosted session ID"],
+          authentication: "Application UAMI and trusted x-ms-user-identity",
+          boundaryCrossings: ["Internal ACA backend to public Foundry endpoint"],
+          evidence: [evidence("backend/agent_memory_backend/foundry_hosted_maf_runtime.py", "112-130", "Hosted streamed invocation")]
+        }),
+        flow("prompt-state", "prompt-runtime", "foundry-conversations", "Create and continue conversation", "async", ["runtime", "memory"], {
+          data: ["Conversation items", "Response state"],
+          evidence: [evidence("backend/agent_memory_backend/foundry_prompt_runtime.py", "59-78", "Prompt state creation")]
+        }),
+        flow("hosted-state", "hosted-runtime", "foundry-conversations", "Create Hosted and conversation state", "async", ["runtime", "memory"], {
+          data: ["Hosted session ID", "Conversation ID"],
+          evidence: [evidence("backend/agent_memory_backend/foundry_hosted_maf_runtime.py", "73-91", "Two-part Hosted state creation")]
+        }),
+        flow("prompt-iq", "prompt-agent", "foundry-iq", "knowledge_base_retrieve", "sync", ["overview", "runtime", "memory"], {
+          protocol: "MCP",
+          data: ["Grounding query", "Citations"],
+          authentication: "ProjectManagedIdentity",
+          evidence: [evidence("setup/agents/release_prompt_agent.py", "41-52", "Single MCP tool")]
+        }),
+        flow("hosted-iq", "hosted-maf", "foundry-iq", "knowledge_base_retrieve", "sync", ["overview", "runtime", "hosted-tools", "memory"], {
+          protocol: "MCP",
+          data: ["Grounding query", "Citations"],
+          authentication: "Foundry project connection",
+          evidence: [evidence("agents/customer-support-maf/src/customer-support-maf/main.py", "26-50", "Hosted IQ tool registration")]
+        }),
+        flow("iq-search", "foundry-iq", "ai-search", "Query knowledge sources", "sync", ["overview", "memory", "network", "bootstrap"], {
+          protocol: "Search knowledge APIs",
+          data: ["Orders and return-policy chunks"],
+          evidence: [evidence("setup/knowledgebase/setup_search.py", "284-353", "Knowledge sources and base")]
+        }),
+        flow("iq-model", "ai-search", "foundry-models", "Query planning model", "sync", ["overview", "memory", "network"], {
+          protocol: "Public Entra/RBAC endpoint on the shared Foundry account",
+          authentication: "Search system identity",
+          evidence: [
+            evidence("setup/knowledgebase/setup_search.py", "333-342", "Knowledge base model reference"),
+            evidence("infra/identity.tf", "43-48", "Cognitive Services User assignment on the shared account")
+          ]
+        }),
+        flow("history-store", "fastapi-backend", "cosmos-history", "Persist owner-scoped history", "async", ["overview", "runtime", "memory"], {
+          protocol: "Cosmos DB NoSQL async SDK",
+          data: ["Messages", "Routing metadata", "Private runtime IDs"],
+          authentication: "Application UAMI",
+          evidence: [evidence("backend/agent_memory_backend/conversation_history.py", "170-245", "Create, ETag update, and immutable routing")]
+        }),
+        flow("profile-store", "fastapi-backend", "cosmos-profiles", "Read and patch profile", "async", ["overview", "memory"], {
+          protocol: "Cosmos DB NoSQL async SDK",
+          data: ["Owner profile"],
+          authentication: "Application UAMI",
+          evidence: [evidence("backend/agent_memory_backend/user_profile_memory.py", "132-181", "Owner-scoped merge patch")]
+        }),
+        flow("semantic-store", "fastapi-backend", "postgres-memory", "Manage semantic memory", "async", ["overview", "memory"], {
+          protocol: "PostgreSQL over TLS",
+          port: 5432,
+          data: ["Summaries", "Embeddings", "Similarity results"],
+          authentication: "Application UAMI Entra token",
+          evidence: [evidence("backend/agent_memory_backend/conversation_memory.py", "93-143, 176-244", "Managed identity pool, upsert, and search")]
+        }),
+        flow("memory-orchestration", "fastapi-backend", "memory-agent", "User-triggered memory creation", "async", ["memory"], {
+          trigger: "POST /memories",
+          data: ["Conversation transcript", "Title"],
+          evidence: [evidence("backend/agent_memory_backend/server.py", "534-557", "Explicit memory creation")]
+        }),
+        flow("memory-model", "memory-agent", "foundry-models", "Summarize and embed", "async", ["memory"], {
+          data: ["Transcript", "Summary", "3072-dimension embedding"],
+          authentication: "Application UAMI",
+          evidence: [evidence("backend/agent_memory_backend/memory_agent.py", "39-55", "Summary and embedding")]
+        }),
+        flow("memory-upsert", "memory-agent", "postgres-memory", "Upsert conversation memory", "async", ["memory"], {
+          data: ["One summary row per conversation and user"],
+          evidence: [evidence("backend/agent_memory_backend/conversation_memory.py", "176-196", "Upsert schema and conflict key")]
+        }),
+        flow("profile-orchestration", "fastapi-backend", "profile-agent", "User-triggered profile generation", "async", ["memory"], {
+          trigger: "POST /profile/generate",
+          data: ["Conversation transcript"],
+          evidence: [evidence("backend/agent_memory_backend/server.py", "494-520", "Explicit profile generation")]
+        }),
+        flow("profile-model", "profile-agent", "foundry-models", "Extract profile JSON", "async", ["memory"], {
+          data: ["Transcript", "Structured profile"],
+          authentication: "Application UAMI",
+          evidence: [evidence("backend/agent_memory_backend/profile_agent.py", "17-38", "JSON-mode extraction")]
+        }),
+        flow("profile-upsert", "profile-agent", "cosmos-profiles", "Upsert owner profile", "async", ["memory"], {
+          data: ["Profile document", "Source conversation"],
+          evidence: [evidence("backend/agent_memory_backend/server.py", "508-520", "Profile persistence")]
+        }),
+        flow("hosted-token", "hosted-maf", "entra-id", "Request app-only token", "sync", ["hosted-tools", "security"], {
+          protocol: "OAuth 2.0 client credential through managed identity",
+          data: ["AgentTools.Invoke role token"],
+          authentication: "Foundry-created service principal",
+          evidence: [evidence("agents/customer-support-maf/src/customer-support-maf/gateway_tools.py", "19-22", "Gateway token acquisition")]
+        }),
+        flow("hosted-gateway", "hosted-maf", "frontend-ca", "POST protected tool route", "sync", ["overview", "hosted-tools", "network", "security"], {
+          protocol: "Public HTTPS",
+          data: ["Trusted user, session, call ID", "Strict tool arguments"],
+          authentication: "App-only Bearer token",
+          boundaryCrossings: ["Foundry Hosted runtime to public frontend"],
+          failureBehavior: "Typed tool error envelope",
+          evidence: [evidence("agents/customer-support-maf/src/customer-support-maf/gateway_tools.py", "15-40", "Gateway request")]
+        }),
+        flow("gateway-proxy", "frontend-ca", "app-tool-gateway", "Rate-limited internal proxy", "sync", ["hosted-tools", "network", "security"], {
+          protocol: "HTTPS",
+          data: ["Tool request envelope"],
+          boundaryCrossings: ["Public edge to internal FastAPI"],
+          evidence: [evidence("frontend/nginx.conf.template", "22-32", "Restricted proxy")]
+        }),
+        flow("gateway-dispatch", "app-tool-gateway", "app-tools", "Validate and dispatch", "async", ["hosted-tools", "security"], {
+          data: ["Trusted owner context", "Validated arguments"],
+          evidence: [evidence("backend/agent_memory_backend/agent_tool_gateway.py", "25-49", "Session binding and dispatch")]
+        }),
+        flow("tool-orders", "app-tools", "mock-orders", "get_order_status", "sync", ["hosted-tools"], {
+          data: ["Order ID", "Mock status"],
+          evidence: [evidence("backend/agent_memory_backend/agent_tools.py", "14-30, 72-81, 110-127", "Mock order lookup")]
+        }),
+        flow("tool-profile", "app-tools", "cosmos-profiles", "Profile read or patch", "async", ["hosted-tools"], {
+          data: ["Minimal user context", "Durable facts"],
+          authentication: "Trusted backend owner context",
+          evidence: [evidence("backend/agent_memory_backend/agent_tools.py", "64-73, 115-143", "Profile tool handlers")]
+        }),
+        flow("tool-memory", "app-tools", "postgres-memory", "check_memory", "async", ["hosted-tools"], {
+          data: ["Semantic query", "Top three owner-scoped matches"],
+          authentication: "Trusted backend owner context",
+          evidence: [evidence("backend/agent_memory_backend/agent_tools.py", "97-112", "Memory recall tool")]
+        }),
+        flow("tool-embedding", "app-tools", "foundry-models", "Embed recall query", "async", ["hosted-tools"], {
+          importance: "secondary",
+          data: ["Query embedding"],
+          evidence: [evidence("backend/agent_memory_backend/agent_tools.py", "97-112", "Embedding before pgvector search")]
+        }),
+        flow("project-identity", "project-mi", "foundry-project", "Project runtime identity", "sync", ["security"], {
+          importance: "secondary",
+          evidence: [evidence("infra/foundry_agents.tf", "121-126", "Project system identity")]
+        }),
+        flow("project-search", "project-mi", "ai-search", "Read Search indexes", "sync", ["security", "network"], {
+          authentication: "Search Index Data Reader",
+          evidence: [evidence("infra/foundry_agents.tf", "151-157", "Project Search role")]
+        }),
+        flow("hosted-identity", "hosted-sp", "hosted-maf", "Hosted runtime identity", "sync", ["security"], {
+          importance: "secondary",
+          evidence: [evidence("docs/PRD-Solution-Challenges-1-5.md", "174-205", "Hosted identity boundary")]
+        }),
+        flow("operator-release", "operator", "release-foundry-assets", "Run direct Foundry release script", "sync", ["security", "bootstrap"], {
+          importance: "secondary",
+          evidence: [evidence("scripts/release_foundry_assets.sh", "1-62", "Operator-invoked release")]
+        }),
+        flow("pg-job-identity", "pg-bootstrap-uami", "pg-setup-job", "Assigned admin identity", "sync", ["security", "bootstrap"], {
+          importance: "secondary",
+          evidence: [evidence("infra/jobs.tf", "19-70", "PostgreSQL job identity")]
+        }),
+        flow("search-identity", "search-mi", "ai-search", "Search service identity", "sync", ["security"], {
+          importance: "secondary",
+          evidence: [evidence("infra/data.tf", "146-159", "Search identity")]
+        }),
+        flow("search-model-auth", "search-mi", "foundry-models", "Invoke KB planning model", "sync", ["security", "network"], {
+          authentication: "Cognitive Services User",
+          evidence: [evidence("infra/identity.tf", "43-48", "Search to shared Foundry model role")]
+        }),
+        flow("backend-ai", "fastapi-backend", "foundry-models", "Chat and embeddings", "async", ["overview", "network"], {
+          importance: "secondary",
+          protocol: "Azure OpenAI",
+          authentication: "Application UAMI",
+          evidence: [evidence("backend/agent_memory_backend/azure_clients.py", "30-57", "Async OpenAI client")]
+        }),
+        flow("monitor-private", "fastapi-backend", "ampls", "Private telemetry ingestion", "async", ["network", "operations"], {
+          importance: "secondary",
+          data: ["Privacy-allowlisted spans"],
+          authentication: "Application UAMI",
+          evidence: [
+            evidence("backend/agent_memory_backend/telemetry.py", "47-76", "Azure Monitor setup"),
+            evidence("infra/monitoring.tf", "13-59", "Private-only AMPLS")
+          ]
+        }),
+        flow("ampls-insights", "ampls", "app-insights", "Route private telemetry", "async", ["network", "operations"], {
+          importance: "secondary",
+          evidence: [evidence("infra/monitoring.tf", "21-59", "Scoped service and endpoint")]
+        }),
+        flow("insights-logs", "app-insights", "log-analytics", "Workspace-backed telemetry", "async", ["network", "operations"], {
+          importance: "secondary",
+          evidence: [evidence("infra/monitoring.tf", "1-10", "Workspace-based Application Insights")]
+        }),
+        flow("backend-health", "fastapi-backend", "health-readiness", "Run health checks", "async", ["operations"], {
+          protocol: "Internal application calls",
+          evidence: [evidence("backend/agent_memory_backend/server.py", "332-399", "Health endpoints")]
+        }),
+        flow("health-cosmos", "health-readiness", "cosmos-history", "Read container metadata", "async", ["operations"], {
+          importance: "secondary",
+          evidence: [evidence("backend/agent_memory_backend/server.py", "350-395", "Cosmos readiness registration")]
+        }),
+        flow("health-postgres", "health-readiness", "postgres-memory", "SELECT 1", "async", ["operations"], {
+          importance: "secondary",
+          evidence: [evidence("backend/agent_memory_backend/server.py", "350-395", "PostgreSQL readiness registration")]
+        }),
+        flow("health-iq", "health-readiness", "foundry-iq", "Minimal semantic search", "async", ["operations"], {
+          importance: "secondary",
+          evidence: [evidence("backend/agent_memory_backend/server.py", "350-395", "Foundry IQ readiness registration")]
+        }),
+        flow("health-agents", "health-readiness", "foundry-project", "Validate configured runtimes", "async", ["operations"], {
+          importance: "secondary",
+          evidence: [evidence("backend/agent_memory_backend/server.py", "350-395", "Agent readiness registration")]
+        }),
+        flow("operator-terraform", "operator", "terraform", "terraform apply", "batch", ["bootstrap"], {
+          purpose: "Provision the approved Azure resource graph and RBAC.",
+          evidence: [evidence("README.md", "205-217", "Deployment model")]
+        }),
+        flow("terraform-aca", "terraform", "aca-environment", "Provision compute and network", "batch", ["bootstrap", "operations"], {
+          evidence: [evidence("infra/compute.tf", "54-65", "Container Apps environment")]
+        }),
+        flow("terraform-foundry", "terraform", "foundry-project", "Provision agent plane", "batch", ["bootstrap"], {
+          evidence: [evidence("infra/foundry_agents.tf", "10-149", "Foundry account, project, and connection")]
+        }),
+        flow("terraform-ai", "terraform", "foundry-models", "Provision chat/embedding deployments", "batch", ["bootstrap"], {
+          evidence: [evidence("infra/foundry_agents.tf", "47-79", "Model deployments on the shared account")]
+        }),
+        flow("terraform-search", "terraform", "ai-search", "Provision Search and RBAC", "batch", ["bootstrap"], {
+          evidence: [evidence("infra/data.tf", "146-159", "Search service")]
+        }),
+        flow("terraform-postgres", "terraform", "postgres-memory", "Provision database and PE", "batch", ["bootstrap"], {
+          evidence: [evidence("infra/data.tf", "73-140", "PostgreSQL and private endpoint")]
+        }),
+        flow("terraform-cosmos", "terraform", "cosmos-history", "Provision Cosmos data plane", "batch", ["bootstrap"], {
+          evidence: [evidence("infra/data.tf", "6-70", "Cosmos account and containers")]
+        }),
+        flow("operator-deploy", "operator", "deploy-images", "Run image release", "batch", ["bootstrap", "operations"], {
+          evidence: [evidence("scripts/deploy_images.sh", "1-64", "Image deployment helper")]
+        }),
+        flow("build-acr", "deploy-images", "acr", "Server-side ACR builds", "batch", ["bootstrap", "operations"], {
+          data: ["Backend", "Frontend", "PostgreSQL bootstrap", "Hosted MAF image"],
+          evidence: [evidence("scripts/deploy_images.sh", "44-53", "Four ACR builds")]
+        }),
+        flow("acr-frontend", "acr", "frontend-ca", "Pull frontend image", "batch", ["network", "bootstrap", "operations"], {
+          importance: "secondary",
+          authentication: "Frontend UAMI AcrPull",
+          evidence: [evidence("infra/compute.tf", "221-224", "Frontend registry identity")]
+        }),
+        flow("acr-backend", "acr", "fastapi-backend", "Pull backend image", "batch", ["network", "bootstrap", "operations"], {
+          importance: "secondary",
+          authentication: "Application UAMI AcrPull",
+          evidence: [evidence("infra/compute.tf", "126-134", "Backend registry identity")]
+        }),
+        flow("acr-hosted", "acr", "hosted-maf", "Foundry pulls Hosted image", "batch", ["network", "bootstrap", "operations"], {
+          authentication: "Foundry project identity through public Entra-only registry",
+          boundaryCrossings: ["Foundry Hosted runtime to public ACR"],
+          evidence: [evidence("agents/customer-support-maf/azure.yaml", "11-16", "Hosted image reference")]
+        }),
+        flow("acr-pg-job", "acr", "pg-setup-job", "Pull bootstrap image", "batch", ["bootstrap"], {
+          importance: "secondary",
+          evidence: [evidence("scripts/deploy_images.sh", "50, 62", "PostgreSQL image and job update")]
+        }),
+        flow("corpus-job", "repo-corpus", "release-foundry-assets", "Load local JSON corpus", "batch", ["bootstrap"], {
+          data: ["Order chunks", "Return-policy chunks"],
+          evidence: [evidence("setup/knowledgebase/setup_search.py", "158-164", "Document loading")]
+        }),
+        flow("kb-embeddings", "release-foundry-assets", "foundry-models", "Generate document embeddings", "batch", ["bootstrap"], {
+          data: ["page_chunk", "3072-dimension vectors"],
+          authentication: "Operator's deployer identity",
+          evidence: [evidence("setup/knowledgebase/setup_search.py", "242-265", "Embedding and mergeOrUpload")]
+        }),
+        flow("kb-indexes", "release-foundry-assets", "ai-search", "Create indexes and upload", "batch", ["bootstrap"], {
+          data: ["orders", "return-policy"],
+          authentication: "Operator's deployer identity",
+          evidence: [evidence("setup/knowledgebase/setup_search.py", "211-281", "Index and document setup")]
+        }),
+        flow("kb-definition", "release-foundry-assets", "foundry-iq", "Upsert IQ sources and base", "batch", ["bootstrap"], {
+          data: ["orders-ks", "return-policy-ks", "customer-support-kb"],
+          evidence: [evidence("setup/knowledgebase/setup_search.py", "284-353", "IQ definitions")]
+        }),
+        flow("pg-bootstrap", "pg-setup-job", "postgres-memory", "Create principal and schema", "batch", ["bootstrap"], {
+          protocol: "PostgreSQL TLS",
+          port: 5432,
+          authentication: "PostgreSQL bootstrap UAMI",
+          evidence: [evidence("setup/postgres/bootstrap.py", "62-111", "Principal, schema, and grants")]
+        }),
+        flow("prompt-publish", "release-foundry-assets", "prompt-agent", "Create immutable version", "batch", ["bootstrap"], {
+          data: ["Prompt hash", "Tool hash", "Release ID"],
+          authentication: "Operator's deployer identity",
+          evidence: [evidence("setup/agents/release_prompt_agent.py", "56-108", "Prompt release")]
+        }),
+        flow("aca-frontend", "aca-environment", "frontend-ca", "Host public app", "sync", ["network"], {
+          importance: "secondary",
+          evidence: [evidence("infra/compute.tf", "211-258", "Frontend Container App")]
+        }),
+        flow("aca-backend", "aca-environment", "fastapi-backend", "Host internal app", "sync", ["network"], {
+          importance: "secondary",
+          evidence: [evidence("infra/compute.tf", "116-210", "Backend Container App")]
+        }),
+        flow("aca-logs", "aca-environment", "log-analytics", "Platform logs", "async", ["network", "operations"], {
+          importance: "secondary",
+          evidence: [evidence("infra/compute.tf", "54-56", "Environment log sink")]
+        })
+      ],
+      views: [
+        {
+          id: "overview",
+          name: "System context",
+          description: "The one-minute picture: public experience, internal policy boundary, two Foundry agents, common grounding, private application memory, and telemetry.",
+          lanes: [
+            { id: "people", title: "Experience and identity", subtitle: "End-user and public edge", kind: "trust", nodeIds: ["user", "browser-spa", "entra-id", "frontend-ca"] },
+            { id: "policy", title: "FastAPI trust boundary", subtitle: "Internal ACA ingress", kind: "trust", nodeIds: ["fastapi-backend", "conversation-orchestration"] },
+            { id: "agents", title: "Foundry agent plane", subtitle: "One project, two logical agents", kind: "network", nodeIds: ["prompt-agent", "hosted-maf"] },
+            { id: "grounding", title: "Knowledge and models", subtitle: "Grounding plus shared Foundry models", kind: "network", nodeIds: ["foundry-iq", "ai-search", "foundry-models"] },
+            { id: "data", title: "Memory and operations", subtitle: "Private stores and telemetry", kind: "data", nodeIds: ["cosmos-history", "cosmos-profiles", "postgres-memory", "app-insights"] }
+          ]
+        },
+        {
+          id: "runtime",
+          name: "Chat runtime and AG-UI",
+          description: "A turn enters through nginx, binds to one immutable runtime, streams normalized AG-UI, and persists transcript plus private remote state.",
+          lanes: [
+            { id: "runtime-client", title: "Browser and public edge", subtitle: "AG-UI consumer; SSE unbuffered", kind: "network", nodeIds: ["browser-spa", "frontend-ca"] },
+            { id: "runtime-backend", title: "FastAPI orchestration", subtitle: "Owner and concurrency checks", kind: "trust", nodeIds: ["fastapi-backend", "conversation-orchestration", "agui-adapter", "shared-contracts"] },
+            { id: "runtime-adapters", title: "Runtime adapters", subtitle: "Same application protocol", kind: "layer", nodeIds: ["prompt-runtime", "hosted-runtime"] },
+            { id: "runtime-foundry", title: "Foundry execution", subtitle: "Remote runtime state", kind: "network", nodeIds: ["prompt-agent", "hosted-maf", "foundry-conversations"] },
+            { id: "runtime-data", title: "Grounding and persistence", subtitle: "Durable after each turn", kind: "data", nodeIds: ["foundry-iq", "cosmos-history"] }
+          ]
+        },
+        {
+          id: "hosted-tools",
+          name: "Hosted Agent tool loop",
+          description: "The Hosted Agent can reach application data only through an app-role-protected public route that terminates at the internal FastAPI policy boundary.",
+          lanes: [
+            { id: "tool-foundry", title: "Hosted runtime and identity", subtitle: "App-only token; no direct data roles", kind: "trust", nodeIds: ["hosted-maf", "hosted-sp", "shared-contracts", "entra-id"] },
+            { id: "tool-edge", title: "Public frontend route", subtitle: "Rate and body limits", kind: "network", nodeIds: ["frontend-ca"] },
+            { id: "tool-policy", title: "FastAPI policy boundary", subtitle: "Token plus stored session binding", kind: "trust", nodeIds: ["app-tool-gateway", "app-tools"] },
+            { id: "tool-data", title: "Owner-scoped application data", subtitle: "Gateway handlers only", kind: "data", nodeIds: ["mock-orders", "cosmos-profiles", "postgres-memory", "foundry-models"] },
+            { id: "tool-iq", title: "Independent grounding", subtitle: "Project MCP connection", kind: "network", nodeIds: ["foundry-iq"] }
+          ]
+        },
+        {
+          id: "memory",
+          name: "Five memory layers",
+          description: "Live runtime mappings, durable history, semantic summaries, user profile, and enterprise knowledge have different owners, lifecycles, and authorization paths.",
+          lanes: [
+            { id: "memory-client", title: "User actions", subtitle: "Chat plus explicit memory/profile APIs", kind: "layer", nodeIds: ["browser-spa"] },
+            { id: "memory-policy", title: "Application orchestration", subtitle: "FastAPI and in-process state", kind: "trust", nodeIds: ["fastapi-backend", "conversation-orchestration", "memory-agent", "profile-agent"] },
+            { id: "memory-remote", title: "F1 remote session state", subtitle: "Platform-managed", kind: "network", nodeIds: ["prompt-runtime", "hosted-runtime", "foundry-conversations"] },
+            { id: "memory-owned", title: "F2-F4 application memory", subtitle: "Owner-partitioned private stores", kind: "data", nodeIds: ["cosmos-history", "postgres-memory", "cosmos-profiles"] },
+            { id: "memory-knowledge", title: "F5 knowledge and models", subtitle: "Retrieval plus summary, profile, embedding, and IQ planning", kind: "network", nodeIds: ["prompt-agent", "hosted-maf", "foundry-iq", "ai-search", "foundry-models"] }
+          ]
+        },
+        {
+          id: "network",
+          name: "Deployment and networking",
+          description: "Public access exists only where Entra/RBAC-only Foundry, Search, ACR, and frontend endpoints require it; application data, backend ingress, and telemetry ingestion remain private through VNet integration and private endpoints.",
+          lanes: [
+            { id: "net-callers", title: "Public callers", subtitle: "Internet and Foundry platform", kind: "network", nodeIds: ["browser-spa", "hosted-maf"] },
+            { id: "net-public", title: "Public Entra-only endpoints", subtitle: "No local, admin, or anonymous auth", kind: "network", nodeIds: ["frontend-ca", "foundry-project", "foundry-models", "ai-search", "acr"] },
+            { id: "net-aca", title: "ACA VNet - East US 2", subtitle: "snet-aca; default outbound disabled", kind: "trust", nodeIds: ["aca-environment", "fastapi-backend", "pg-setup-job", "app-uami"] },
+            { id: "net-private", title: "Private endpoint data plane", subtitle: "snet-pe in East US 2", kind: "data", nodeIds: ["cosmos-history", "cosmos-profiles", "postgres-memory", "ampls"] },
+            { id: "net-observe", title: "Service identities and telemetry", subtitle: "Project, Search, ingestion, and query", kind: "data", nodeIds: ["project-mi", "search-mi", "app-insights", "log-analytics"] }
+          ]
+        },
+        {
+          id: "security",
+          name: "Identity and trust boundaries",
+          description: "Delegated users and the Hosted service principal enter through separate validators; managed identities carry narrowly scoped Azure permissions.",
+          lanes: [
+            { id: "sec-callers", title: "Callers and Entra ID", subtitle: "Delegated and app-only token classes", kind: "trust", nodeIds: ["user", "browser-spa", "hosted-maf", "entra-id"] },
+            { id: "sec-edge", title: "Public application edge", subtitle: "Delegated and app-only routes", kind: "network", nodeIds: ["frontend-ca"] },
+            { id: "sec-policy", title: "Policy enforcement", subtitle: "Never trust caller-supplied owner IDs", kind: "trust", nodeIds: ["fastapi-backend", "app-tool-gateway", "app-tools"] },
+            { id: "sec-identities", title: "Managed identities", subtitle: "Runtime identities plus the one remaining PostgreSQL setup identity", kind: "trust", nodeIds: ["app-uami", "frontend-uami", "hosted-sp", "project-mi", "pg-bootstrap-uami", "search-mi"] },
+            { id: "sec-public-resources", title: "Public protected resources", subtitle: "Entra and RBAC only", kind: "network", nodeIds: ["foundry-project", "foundry-models", "ai-search", "acr"] },
+            { id: "sec-private-resources", title: "Private protected resources", subtitle: "Owner-partitioned application data", kind: "data", nodeIds: ["cosmos-history", "cosmos-profiles", "postgres-memory"] }
+          ]
+        },
+        {
+          id: "bootstrap",
+          name: "Bootstrap and release",
+          description: "Terraform creates the platform and RBAC, ACR Tasks build four images, the only remaining Container Apps Job bootstraps PostgreSQL inside the VNet, and a direct operator-run script configures Search/Foundry IQ and publishes the Prompt Agent with no setup container or shared identity.",
+          lanes: [
+            { id: "boot-inputs", title: "Operator and control plane", subtitle: "Source, Terraform, and image release", kind: "trust", nodeIds: ["operator", "repo-corpus", "terraform", "deploy-images"] },
+            { id: "boot-registry", title: "Container registry", subtitle: "Private ACA and public Foundry pulls", kind: "network", nodeIds: ["acr"] },
+            { id: "boot-jobs", title: "VNet-integrated setup job", subtitle: "Manual, one replica, retry limit 1", kind: "trust", nodeIds: ["pg-bootstrap-uami", "pg-setup-job"] },
+            { id: "boot-release", title: "Direct Foundry release", subtitle: "Deployer RBAC; initializes knowledge and agent definitions", kind: "network", nodeIds: ["release-foundry-assets", "foundry-models", "ai-search", "foundry-iq", "postgres-memory", "prompt-agent"] },
+            { id: "boot-runtime", title: "Runtime images", subtitle: "Rolled apps and Foundry-hosted image", kind: "network", nodeIds: ["aca-environment", "frontend-ca", "fastapi-backend", "hosted-maf", "foundry-project"] }
+          ]
+        },
+        {
+          id: "operations",
+          name: "Operations and readiness",
+          description: "Liveness is dependency-free; readiness checks configured stores and runtimes with timeouts, while private telemetry records only allowlisted dimensions.",
+          lanes: [
+            { id: "ops-runtime", title: "Runtime and health plane", subtitle: "Single replica; bounded and sanitized checks", kind: "trust", nodeIds: ["frontend-ca", "fastapi-backend", "conversation-orchestration", "health-readiness"] },
+            { id: "ops-deps", title: "Checked dependencies", subtitle: "Only configured services", kind: "data", nodeIds: ["foundry-project", "foundry-iq", "cosmos-history", "postgres-memory"] },
+            { id: "ops-telemetry", title: "Private telemetry path", subtitle: "AAD-authenticated", kind: "network", nodeIds: ["ampls", "app-insights", "log-analytics"] },
+            { id: "ops-release", title: "Release and rollback", subtitle: "Feature flags and retained versions", kind: "layer", nodeIds: ["operator", "terraform", "deploy-images", "acr"] },
+            { id: "ops-images", title: "Runtime image consumers", subtitle: "ACA and Foundry", kind: "network", nodeIds: ["aca-environment", "hosted-maf"] }
+          ]
+        }
+      ],
+      caveats: [
+        {
+          title: "One backend replica is a hard constraint",
+          detail: "Live runtime mappings and locks live in one process. Durable metadata restores mappings after restart, but Redis is intentionally absent, so scale-out would break coordination.",
+          confidence: "observed",
+          evidence: evidence("backend/agent_memory_backend/conversation_registry.py", "40-49", "Process-local mappings and locks")
+        },
+        {
+          title: "Semantic vectors have no ANN index",
+          detail: "The bootstrap creates vector(3072) but no HNSW or IVFFlat index, so similarity search is a sequential scan as the table grows.",
+          confidence: "observed",
+          evidence: evidence("setup/postgres/bootstrap.py", "13-27", "Current schema SQL")
+        },
+        {
+          title: "Public does not mean key-based",
+          detail: "Agents Foundry, Search, and ACR retain public endpoints for Hosted runtime resolution and image pulls, but local, admin, and anonymous authentication is disabled.",
+          confidence: "observed",
+          evidence: evidence("docs/PRD-Solution-Challenges-1-5.md", "207-223", "Approved network posture")
+        },
+        {
+          title: "The data plane spans three regions",
+          detail: "Container Apps and Foundry run in East US 2, PostgreSQL in North Central US, and Search in West Europe. PostgreSQL is reached through a cross-region private endpoint.",
+          confidence: "observed",
+          evidence: evidence("infra/variables.tf", "7-21", "Region defaults and constraints")
+        },
+        {
+          title: "Foundry release runs outside Terraform, by design",
+          detail: "scripts/release_foundry_assets.sh configures Search/Foundry IQ and publishes the Prompt Agent directly with the operator's own deployer RBAC. This path uses no setup container, image, or shared setup managed identity.",
+          confidence: "observed",
+          evidence: evidence("scripts/release_foundry_assets.sh", "1-62", "Direct release script")
+        },
+        {
+          title: "App Insights has a documented public-ingestion exception",
+          detail: "Local (API key) authentication and internet ingestion/query stay enabled only because the Foundry project's App Insights connection requires them; AMPLS access mode is Open (not PrivateOnly) so the backend's private path keeps working alongside it. Retention is 30 days and RBAC on the resource is restricted to a narrow write-only role for the backend identity. Full Foundry traces routed this way may contain user, model, retrieval, and tool content.",
+          confidence: "observed",
+          evidence: evidence("infra/monitoring.tf", "1-13, 64-71", "Enabled local auth/ingestion and Open AMPLS access mode")
+        },
+        {
+          title: "Hosted source-code deployment is planned, not deployed",
+          detail: "Hosted MAF remains container-based end to end today. Source-code (non-container) Hosted deployment is explicitly called out as a preview capability the team may adopt after general availability.",
+          confidence: "planned",
+          evidence: evidence("README.md", "236-238", "Preview/future source-code deployment note")
+        },
+        {
+          title: "Memory enrichment is user-triggered",
+          detail: "Conversation summaries and generated profiles are explicit APIs, not automatic post-turn hooks.",
+          confidence: "observed",
+          evidence: evidence("backend/agent_memory_backend/server.py", "458-584", "Profile and memory endpoints")
+        },
+        {
+          title: "Order lookup is demo data",
+          detail: "The protected order tool reads three hard-coded records; no production order system is implemented.",
+          confidence: "observed",
+          evidence: evidence("backend/agent_memory_backend/agent_tools.py", "14-30", "Mock order table")
+        },
+        {
+          title: "Snapshot includes working-tree changes",
+          detail: "Evidence was collected from the current local working tree, not only commit c1f56e30c0fa, so immutable GitHub line links would be misleading.",
+          confidence: "observed",
+          evidence: evidence("docs/architecture.html", "1816-1825", "Snapshot metadata records the working-tree scope")
+        }
+      ]
+    };
+
+    const componentById = new Map(architecture.components.map((item) => [item.id, item]));
+    const flowById = new Map(architecture.flows.map((item) => [item.id, item]));
+    const viewById = new Map(architecture.views.map((item) => [item.id, item]));
+    const groupById = new Map(architecture.groups.map((item) => [item.id, item]));
+
+    const state = {
+      viewId: "overview",
+      selectedType: null,
+      selectedId: null,
+      group: "all",
+      kind: "all",
+      mode: "all",
+      confidence: "all",
+      showSecondary: false,
+      trace: "off",
+      inspectorTab: "details",
+      searchIndex: -1,
+      scale: 1,
+      translateX: 0,
+      translateY: 0,
+      worldWidth: 1,
+      worldHeight: 1,
+      positions: new Map(),
+      visibleComponents: [],
+      visibleFlows: [],
+      hasFitted: false
+    };
+
+    const elements = {
+      stats: document.getElementById("stats"),
+      viewSelect: document.getElementById("view-select"),
+      lensNav: document.getElementById("lens-nav"),
+      searchInput: document.getElementById("search-input"),
+      searchResults: document.getElementById("search-results"),
+      groupFilter: document.getElementById("group-filter"),
+      kindFilter: document.getElementById("kind-filter"),
+      modeFilter: document.getElementById("mode-filter"),
+      confidenceFilter: document.getElementById("confidence-filter"),
+      traceSelect: document.getElementById("trace-select"),
+      secondaryToggle: document.getElementById("secondary-toggle"),
+      filterPopover: document.getElementById("filter-popover"),
+      filterCount: document.getElementById("filter-count"),
+      fitButton: document.getElementById("fit-button"),
+      resetButton: document.getElementById("reset-button"),
+      heroFit: document.getElementById("hero-fit"),
+      themeToggle: document.getElementById("theme-toggle"),
+      viewTitle: document.getElementById("view-title"),
+      viewDescription: document.getElementById("view-description"),
+      visibleCount: document.getElementById("visible-count"),
+      diagramWrap: document.getElementById("diagram-wrap"),
+      diagram: document.getElementById("diagram"),
+      viewport: document.getElementById("viewport"),
+      laneLayer: document.getElementById("lane-layer"),
+      flowLayer: document.getElementById("flow-layer"),
+      nodeLayer: document.getElementById("node-layer"),
+      detailPanel: document.getElementById("detail-panel"),
+      navigatorPanel: document.getElementById("navigator-panel"),
+      detailsTab: document.getElementById("details-tab"),
+      componentsTab: document.getElementById("components-tab"),
+      navigatorList: document.getElementById("navigator-list"),
+      caveatGrid: document.getElementById("caveat-grid"),
+      evidenceCount: document.getElementById("evidence-count"),
+      zoomIn: document.getElementById("zoom-in"),
+      zoomOut: document.getElementById("zoom-out"),
+      zoomFit: document.getElementById("zoom-fit")
+    };
+
+    const SVG_NS = "http://www.w3.org/2000/svg";
+
+    const createSvg = (name, attributes = {}) => {
+      const node = document.createElementNS(SVG_NS, name);
+      for (const [key, value] of Object.entries(attributes)) {
+        node.setAttribute(key, String(value));
+      }
+      return node;
+    };
+
+    const createElement = (name, className, text) => {
+      const node = document.createElement(name);
+      if (className) {
+        node.className = className;
+      }
+      if (text !== undefined && text !== null) {
+        node.textContent = String(text);
+      }
+      return node;
+    };
+
+    const appendTextLines = (parent, text, x, y, options = {}) => {
+      const {
+        className = "",
+        maxChars = 28,
+        maxLines = 2,
+        lineHeight = 14
+      } = options;
+      const words = String(text).trim().split(/\s+/).filter(Boolean);
+      const lines = [];
+      let current = "";
+      for (const word of words) {
+        const candidate = current ? `${current} ${word}` : word;
+        if (candidate.length <= maxChars || current.length === 0) {
+          current = candidate;
+        } else {
+          lines.push(current);
+          current = word;
+        }
+      }
+      if (current) {
+        lines.push(current);
+      }
+      const visible = lines.slice(0, maxLines);
+      if (lines.length > maxLines) {
+        const lastIndex = visible.length - 1;
+        const last = visible[lastIndex] || "";
+        visible[lastIndex] = `${last.slice(0, Math.max(1, maxChars - 3))}...`;
+      }
+      const textNode = createSvg("text", { x, y, class: className });
+      visible.forEach((line, index) => {
+        const span = createSvg("tspan", { x, dy: index === 0 ? 0 : lineHeight });
+        span.textContent = line;
+        textNode.appendChild(span);
+      });
+      parent.appendChild(textNode);
+      return textNode;
+    };
+
+    const formatEvidenceLocation = (item) => {
+      if (!item.lines) {
+        return item.path;
+      }
+      const prefix = /^\d/.test(String(item.lines)) ? "L" : "";
+      return `${item.path}:${prefix}${item.lines}`;
+    };
+
+    const renderStats = () => {
+      const fragment = document.createDocumentFragment();
+      architecture.headlineStats.forEach((stat) => {
+        const card = createElement("article", "stat-card");
+        card.append(
+          createElement("span", "stat-value", stat.value),
+          createElement("span", "stat-label", stat.label),
+          createElement("span", "stat-note", stat.note)
+        );
+        fragment.appendChild(card);
+      });
+      elements.stats.replaceChildren(fragment);
+    };
+
+    const renderControls = () => {
+      const lensMarks = {
+        overview: "CT",
+        runtime: "RT",
+        "hosted-tools": "TL",
+        memory: "M5",
+        network: "NW",
+        security: "ID",
+        bootstrap: "RL",
+        operations: "OP"
+      };
+      const lensFragment = document.createDocumentFragment();
+      architecture.views.forEach((view) => {
+        const option = createElement("option", "", view.name);
+        option.value = view.id;
+        elements.viewSelect.appendChild(option);
+
+        const componentCount = new Set(
+          view.lanes.flatMap((lane) => lane.nodeIds)
+        ).size;
+        const button = createElement("button", "lens-button");
+        button.type = "button";
+        button.dataset.viewId = view.id;
+        button.setAttribute("aria-pressed", "false");
+        const copy = createElement("span", "lens-copy");
+        copy.append(
+          createElement("strong", "", view.name),
+          createElement("small", "", `${componentCount} components`)
+        );
+        button.append(
+          createElement("span", "lens-mark", lensMarks[view.id] || "AR"),
+          copy
+        );
+        lensFragment.appendChild(button);
+      });
+      elements.lensNav.appendChild(lensFragment);
+
+      const allGroup = createElement("option", "", "All layers / concerns");
+      allGroup.value = "all";
+      elements.groupFilter.appendChild(allGroup);
+      architecture.groups.forEach((group) => {
+        const option = createElement("option", "", group.name);
+        option.value = group.id;
+        elements.groupFilter.appendChild(option);
+      });
+
+      const allKind = createElement("option", "", "All component kinds");
+      allKind.value = "all";
+      elements.kindFilter.appendChild(allKind);
+      [...new Set(architecture.components.map((item) => item.kind))]
+        .sort()
+        .forEach((kind) => {
+          const option = createElement("option", "", kind);
+          option.value = kind;
+          elements.kindFilter.appendChild(option);
+        });
+    };
+
+    const syncActiveLens = () => {
+      elements.lensNav.querySelectorAll("[data-view-id]").forEach((button) => {
+        const isActive = button.dataset.viewId === state.viewId;
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-pressed", String(isActive));
+        if (isActive) {
+          button.setAttribute("aria-current", "page");
+        } else {
+          button.removeAttribute("aria-current");
+        }
+      });
+    };
+
+    const updateFilterCount = () => {
+      const count = [
+        state.group !== "all",
+        state.kind !== "all",
+        state.mode !== "all",
+        state.confidence !== "all"
+      ].filter(Boolean).length;
+      elements.filterCount.textContent = String(count);
+      elements.filterCount.hidden = count === 0;
+    };
+
+    const renderCaveats = () => {
+      const fragment = document.createDocumentFragment();
+      architecture.caveats.forEach((item) => {
+        const card = createElement("article", "caveat-card");
+        const confidence = createElement(
+          "span",
+          `meta-pill confidence-${item.confidence}`,
+          item.confidence
+        );
+        const title = createElement("h3", "", item.title);
+        const detail = createElement("p", "", item.detail);
+        const source = createElement("code", "", formatEvidenceLocation(item.evidence));
+        card.append(confidence, title, detail, source);
+        fragment.appendChild(card);
+      });
+      elements.caveatGrid.replaceChildren(fragment);
+      const evidenceTotal =
+        architecture.components.reduce((sum, item) => sum + item.evidence.length, 0) +
+        architecture.flows.reduce((sum, item) => sum + item.evidence.length, 0) +
+        architecture.caveats.length;
+      elements.evidenceCount.textContent = `${evidenceTotal} evidence references`;
+    };
+
+    const currentView = () => viewById.get(state.viewId);
+
+    const componentMatchesFilters = (item) => {
+      if (state.group !== "all" && !item.groupIds.includes(state.group)) {
+        return false;
+      }
+      if (state.kind !== "all" && item.kind !== state.kind) {
+        return false;
+      }
+      if (state.confidence !== "all" && item.confidence !== state.confidence) {
+        return false;
+      }
+      return true;
+    };
+
+    const calculateLayout = () => {
+      const view = currentView();
+      const laneWidth = 246;
+      const laneGap = 20;
+      const outerMargin = 28;
+      const laneHeader = 66;
+      const lanePadding = 12;
+      const cardWidth = 210;
+      const cardHeight = 102;
+      const cardGap = 16;
+      const laneNodes = new Map();
+
+      view.lanes.forEach((lane) => {
+        laneNodes.set(
+          lane.id,
+          lane.nodeIds
+            .map((id) => componentById.get(id))
+            .filter(Boolean)
+            .filter(componentMatchesFilters)
+        );
+      });
+
+      const maxNodes = Math.max(1, ...[...laneNodes.values()].map((items) => items.length));
+      state.worldWidth =
+        outerMargin * 2 + view.lanes.length * laneWidth + (view.lanes.length - 1) * laneGap;
+      state.worldHeight =
+        laneHeader + lanePadding * 2 + maxNodes * cardHeight + Math.max(0, maxNodes - 1) * cardGap + 28;
+      state.positions = new Map();
+
+      view.lanes.forEach((lane, laneIndex) => {
+        const laneX = outerMargin + laneIndex * (laneWidth + laneGap);
+        const items = laneNodes.get(lane.id);
+        items.forEach((item, itemIndex) => {
+          const x = laneX + (laneWidth - cardWidth) / 2;
+          const y = laneHeader + lanePadding + itemIndex * (cardHeight + cardGap);
+          state.positions.set(item.id, {
+            x,
+            y,
+            width: cardWidth,
+            height: cardHeight,
+            laneId: lane.id,
+            laneIndex
+          });
+        });
+      });
+
+      state.visibleComponents = [...state.positions.keys()]
+        .map((id) => componentById.get(id))
+        .filter(Boolean);
+      state.visibleFlows = architecture.flows.filter((item) => {
+        if (!item.viewIds.includes(view.id)) {
+          return false;
+        }
+        if (!state.positions.has(item.from) || !state.positions.has(item.to)) {
+          return false;
+        }
+        if (state.mode !== "all" && item.mode !== state.mode) {
+          return false;
+        }
+        if (state.confidence !== "all" && item.confidence !== state.confidence) {
+          return false;
+        }
+        if (!state.showSecondary && item.importance === "secondary") {
+          return false;
+        }
+        return true;
+      });
+    };
+
+    const traceSet = () => {
+      if (
+        state.trace === "off" ||
+        state.selectedType !== "component" ||
+        !state.positions.has(state.selectedId)
+      ) {
+        return null;
+      }
+      const visited = new Set([state.selectedId]);
+      const queue = [state.selectedId];
+      while (queue.length) {
+        const current = queue.shift();
+        state.visibleFlows.forEach((item) => {
+          if ((state.trace === "downstream" || state.trace === "both") && item.from === current) {
+            if (!visited.has(item.to)) {
+              visited.add(item.to);
+              queue.push(item.to);
+            }
+          }
+          if ((state.trace === "upstream" || state.trace === "both") && item.to === current) {
+            if (!visited.has(item.from)) {
+              visited.add(item.from);
+              queue.push(item.from);
+            }
+          }
+        });
+      }
+      return visited;
+    };
+
+    const renderLanes = () => {
+      const view = currentView();
+      const fragment = document.createDocumentFragment();
+      const laneWidth = 246;
+      const laneGap = 20;
+      const outerMargin = 28;
+
+      view.lanes.forEach((lane, index) => {
+        const x = outerMargin + index * (laneWidth + laneGap);
+        const group = createSvg("g");
+        const rect = createSvg("rect", {
+          x,
+          y: 18,
+          width: laneWidth,
+          height: state.worldHeight - 36,
+          rx: 12,
+          class: `lane lane-${lane.kind || "layer"}`
+        });
+        group.appendChild(rect);
+        appendTextLines(group, lane.title, x + 16, 44, {
+          className: "lane-title",
+          maxChars: 28,
+          maxLines: 1
+        });
+        appendTextLines(group, lane.subtitle, x + 16, 63, {
+          className: "lane-subtitle",
+          maxChars: 34,
+          maxLines: 1
+        });
+        fragment.appendChild(group);
+      });
+      elements.laneLayer.replaceChildren(fragment);
+    };
+
+    const flowGeometry = (fromPosition, toPosition, index) => {
+      const fromCenterX = fromPosition.x + fromPosition.width / 2;
+      const fromCenterY = fromPosition.y + fromPosition.height / 2;
+      const toCenterX = toPosition.x + toPosition.width / 2;
+      const toCenterY = toPosition.y + toPosition.height / 2;
+      const sameLane = fromPosition.laneIndex === toPosition.laneIndex;
+
+      if (sameLane) {
+        const direction = toCenterY >= fromCenterY ? 1 : -1;
+        const startX = fromPosition.x + fromPosition.width;
+        const startY = fromCenterY + direction * 10;
+        const endX = toPosition.x + toPosition.width;
+        const endY = toCenterY - direction * 10;
+        const loopX = startX + 30 + (index % 4) * 12;
+        return {
+          path: `M ${startX} ${startY} C ${loopX} ${startY}, ${loopX} ${endY}, ${endX} ${endY}`,
+          labelX: loopX,
+          labelY: (startY + endY) / 2
+        };
+      }
+
+      const leftToRight = toCenterX >= fromCenterX;
+      const startX = leftToRight ? fromPosition.x + fromPosition.width : fromPosition.x;
+      const endX = leftToRight ? toPosition.x : toPosition.x + toPosition.width;
+      const startY = fromCenterY;
+      const endY = toCenterY;
+      const direction = leftToRight ? 1 : -1;
+      const bend = Math.max(44, Math.abs(endX - startX) * 0.42);
+      const offset = ((index % 5) - 2) * 7;
+      return {
+        path:
+          `M ${startX} ${startY} ` +
+          `C ${startX + direction * bend} ${startY + offset}, ` +
+          `${endX - direction * bend} ${endY + offset}, ${endX} ${endY}`,
+        labelX: (startX + endX) / 2,
+        labelY: (startY + endY) / 2 + offset
+      };
+    };
+
+    const clippedLabel = (text, limit = 26) =>
+      text.length <= limit ? text : `${text.slice(0, limit - 3)}...`;
+
+    const renderFlows = (related) => {
+      const fragment = document.createDocumentFragment();
+      state.visibleFlows.forEach((item, index) => {
+        const fromPosition = state.positions.get(item.from);
+        const toPosition = state.positions.get(item.to);
+        const geometry = flowGeometry(fromPosition, toPosition, index);
+        const group = createSvg("g", {
+          class: "flow",
+          tabindex: "0",
+          role: "button",
+          "aria-label": `${componentById.get(item.from).name} to ${componentById.get(item.to).name}: ${item.label}`,
+          "data-flow-id": item.id
+        });
+        if (state.selectedType === "flow" && state.selectedId === item.id) {
+          group.classList.add("is-selected");
+        }
+        if (related && related.has(item.from) && related.has(item.to)) {
+          group.classList.add("is-related");
+        } else if (related) {
+          group.classList.add("is-dimmed");
+        }
+
+        const hit = createSvg("path", {
+          d: geometry.path,
+          class: "flow-hit"
+        });
+        const path = createSvg("path", {
+          d: geometry.path,
+          class: `flow-path flow-mode-${item.mode}`,
+          "marker-end": `url(#arrow-${item.mode})`
+        });
+        const labelText = clippedLabel(item.label);
+        const labelWidth = Math.min(190, Math.max(62, labelText.length * 6.2 + 16));
+        const labelGroup = createSvg("g");
+        const labelRect = createSvg("rect", {
+          x: geometry.labelX - labelWidth / 2,
+          y: geometry.labelY - 11,
+          width: labelWidth,
+          height: 22,
+          rx: 7,
+          class: "flow-label-bg"
+        });
+        const label = createSvg("text", {
+          x: geometry.labelX,
+          y: geometry.labelY + 3.5,
+          class: "flow-label",
+          "text-anchor": "middle"
+        });
+        label.textContent = labelText;
+        labelGroup.append(labelRect, label);
+        group.append(hit, path, labelGroup);
+        fragment.appendChild(group);
+      });
+      elements.flowLayer.replaceChildren(fragment);
+    };
+
+    const renderNodes = (related) => {
+      const fragment = document.createDocumentFragment();
+      state.visibleComponents.forEach((item) => {
+        const position = state.positions.get(item.id);
+        const group = createSvg("g", {
+          class: "node",
+          tabindex: "0",
+          role: "button",
+          "aria-label": `${item.name}, ${item.kind}: ${item.summary}`,
+          "data-component-id": item.id,
+          transform: `translate(${position.x} ${position.y})`
+        });
+        if (state.selectedType === "component" && state.selectedId === item.id) {
+          group.classList.add("is-selected");
+        }
+        if (related && related.has(item.id)) {
+          group.classList.add("is-related");
+        } else if (related) {
+          group.classList.add("is-dimmed");
+        }
+
+        const card = createSvg("rect", {
+          x: 0,
+          y: 0,
+          width: position.width,
+          height: position.height,
+          rx: 12,
+          class: "node-card"
+        });
+        const strip = createSvg("rect", {
+          x: 0,
+          y: 0,
+          width: 6,
+          height: position.height,
+          rx: 3,
+          class: "node-strip"
+        });
+        const kindWidth = Math.min(92, Math.max(48, item.kind.length * 6.5 + 14));
+        const kindBox = createSvg("rect", {
+          x: position.width - kindWidth - 10,
+          y: 10,
+          width: kindWidth,
+          height: 20,
+          rx: 7,
+          class: "node-kind-box"
+        });
+        const kindText = createSvg("text", {
+          x: position.width - kindWidth / 2 - 10,
+          y: 23.5,
+          class: "node-kind-text",
+          "text-anchor": "middle"
+        });
+        kindText.textContent = item.kind.toUpperCase();
+        const confidence = createSvg("circle", {
+          cx: 17,
+          cy: 18,
+          r: 4,
+          class: "node-confidence"
+        });
+
+        group.append(card, strip, kindBox, kindText, confidence);
+        appendTextLines(group, item.name, 16, 48, {
+          className: "node-title",
+          maxChars: 23,
+          maxLines: 2,
+          lineHeight: 16
+        });
+        appendTextLines(group, item.summary, 16, 82, {
+          className: "node-summary",
+          maxChars: 34,
+          maxLines: 2,
+          lineHeight: 13
+        });
+        fragment.appendChild(group);
+      });
+      elements.nodeLayer.replaceChildren(fragment);
+    };
+
+    const renderEmptyDiagram = () => {
+      const message = createSvg("text", {
+        x: state.worldWidth / 2,
+        y: state.worldHeight / 2,
+        "text-anchor": "middle",
+        class: "empty-diagram-text"
+      });
+      message.textContent = "No components match the active filters";
+      elements.nodeLayer.replaceChildren(message);
+      elements.flowLayer.replaceChildren();
+    };
+
+    const renderDiagram = ({ fit = false } = {}) => {
+      calculateLayout();
+      const related = traceSet();
+      renderLanes();
+      if (state.visibleComponents.length === 0) {
+        renderEmptyDiagram();
+      } else {
+        renderFlows(related);
+        renderNodes(related);
+      }
+      const view = currentView();
+      elements.viewTitle.textContent = view.name;
+      elements.viewDescription.textContent = view.description;
+      elements.visibleCount.textContent =
+        `${state.visibleComponents.length} components / ${state.visibleFlows.length} flows`;
+      syncActiveLens();
+      updateFilterCount();
+      renderNavigator();
+      renderDetails();
+      syncSvgViewport();
+      if (fit || !state.hasFitted) {
+        fitDiagram();
+      } else {
+        applyTransform();
+      }
+    };
+
+    const addDetailList = (parent, title, values) => {
+      if (!values || values.length === 0) {
+        return;
+      }
+      const section = createElement("section", "detail-section");
+      section.appendChild(createElement("h3", "", title));
+      const list = createElement("ul", "detail-list");
+      values.forEach((value) => list.appendChild(createElement("li", "", value)));
+      section.appendChild(list);
+      parent.appendChild(section);
+    };
+
+    const addEvidenceList = (parent, items) => {
+      const section = createElement("section", "detail-section");
+      section.appendChild(createElement("h3", "", "Repository evidence"));
+      const list = createElement("ul", "evidence-list");
+      items.forEach((item) => {
+        const row = createElement("li", "evidence-item");
+        row.append(
+          createElement("code", "", formatEvidenceLocation(item)),
+          createElement("span", "", item.note)
+        );
+        list.appendChild(row);
+      });
+      section.appendChild(list);
+      parent.appendChild(section);
+    };
+
+    const addConnectedFlows = (parent, componentId) => {
+      const connected = state.visibleFlows.filter(
+        (item) => item.from === componentId || item.to === componentId
+      );
+      if (!connected.length) {
+        return;
+      }
+      const section = createElement("section", "detail-section");
+      section.appendChild(createElement("h3", "", "Flows in this lens"));
+      const list = createElement("div", "flow-list");
+      connected.forEach((item) => {
+        const direction = item.from === componentId ? "to" : "from";
+        const peerId = item.from === componentId ? item.to : item.from;
+        const button = createElement(
+          "button",
+          "",
+          `${item.label} - ${direction} ${componentById.get(peerId).name}`
+        );
+        button.type = "button";
+        button.dataset.inspectFlow = item.id;
+        list.appendChild(button);
+      });
+      section.appendChild(list);
+      parent.appendChild(section);
+    };
+
+    const renderComponentDetails = (item) => {
+      const fragment = document.createDocumentFragment();
+      fragment.append(
+        createElement("p", "panel-kicker", "Selected component"),
+        createElement("h2", "", item.name)
+      );
+      const meta = createElement("div", "meta-row");
+      meta.append(
+        createElement("span", "kind-pill", item.kind),
+        createElement(
+          "span",
+          `kind-pill confidence-${item.confidence}`,
+          item.confidence
+        )
+      );
+      fragment.append(meta, createElement("p", "detail-summary", item.summary));
+      addDetailList(fragment, "Responsibilities", item.responsibilities);
+      addDetailList(fragment, "Technologies", item.technologies);
+      addDetailList(fragment, "Interfaces", item.interfaces);
+      addDetailList(fragment, "Data owned", item.dataOwned);
+      addDetailList(fragment, "Deployment", item.deployment);
+      addDetailList(fragment, "Security", item.security);
+      addDetailList(fragment, "Operations", item.operations);
+      addConnectedFlows(fragment, item.id);
+      addEvidenceList(fragment, item.evidence);
+      return fragment;
+    };
+
+    const renderFlowDetails = (item) => {
+      const fragment = document.createDocumentFragment();
+      fragment.append(
+        createElement("p", "panel-kicker", "Selected data flow"),
+        createElement("h2", "", item.label),
+        createElement(
+          "p",
+          "detail-summary",
+          `${componentById.get(item.from).name} to ${componentById.get(item.to).name}`
+        )
+      );
+      const meta = createElement("div", "meta-row");
+      meta.append(
+        createElement("span", "kind-pill", item.mode),
+        createElement(
+          "span",
+          `kind-pill confidence-${item.confidence}`,
+          item.confidence
+        )
+      );
+      fragment.appendChild(meta);
+      const grid = createElement("dl", "detail-grid");
+      const rows = [
+        ["Purpose", item.purpose],
+        ["Protocol", item.protocol],
+        ["Port", item.port],
+        ["Trigger", item.trigger],
+        ["Authentication", item.authentication],
+        ["Encryption", item.encryption],
+        ["Failure behavior", item.failureBehavior]
+      ].filter((row) => row[1] !== "" && row[1] !== null && row[1] !== undefined);
+      rows.forEach(([label, value]) => {
+        grid.append(createElement("dt", "", label), createElement("dd", "", value));
+      });
+      if (rows.length) {
+        const section = createElement("section", "detail-section");
+        section.append(createElement("h3", "", "Flow contract"), grid);
+        fragment.appendChild(section);
+      }
+      addDetailList(fragment, "Data", item.data);
+      addDetailList(fragment, "Boundary crossings", item.boundaryCrossings);
+      addEvidenceList(fragment, item.evidence);
+      return fragment;
+    };
+
+    const renderDefaultDetails = () => {
+      const view = currentView();
+      const fragment = document.createDocumentFragment();
+      fragment.append(
+        createElement("p", "panel-kicker", "Architecture lens"),
+        createElement("h2", "", view.name),
+        createElement("p", "detail-summary", view.description)
+      );
+      const hint = createElement(
+        "div",
+        "empty-state",
+        "Select a component or labeled flow to inspect responsibilities, protocols, security controls, and repository evidence. Choose a trace direction to highlight transitive dependencies."
+      );
+      fragment.appendChild(hint);
+      const section = createElement("section", "detail-section");
+      section.appendChild(createElement("h3", "", "Snapshot scope"));
+      const grid = createElement("dl", "detail-grid");
+      [
+        ["Commit", architecture.meta.commit],
+        ["Working tree", "Included"],
+        ["Components", architecture.components.length],
+        ["Flows", architecture.flows.length],
+        ["Views", architecture.views.length]
+      ].forEach(([label, value]) => {
+        grid.append(createElement("dt", "", label), createElement("dd", "", value));
+      });
+      section.appendChild(grid);
+      fragment.appendChild(section);
+      return fragment;
+    };
+
+    const renderDetails = () => {
+      let content;
+      if (state.selectedType === "component" && componentById.has(state.selectedId)) {
+        content = renderComponentDetails(componentById.get(state.selectedId));
+      } else if (state.selectedType === "flow" && flowById.has(state.selectedId)) {
+        content = renderFlowDetails(flowById.get(state.selectedId));
+      } else {
+        content = renderDefaultDetails();
+      }
+      elements.detailPanel.replaceChildren(content);
+    };
+
+    const setInspectorTab = (tab) => {
+      state.inspectorTab = tab === "components" ? "components" : "details";
+      const showDetails = state.inspectorTab === "details";
+      elements.detailPanel.hidden = !showDetails;
+      elements.navigatorPanel.hidden = showDetails;
+      elements.detailsTab.classList.toggle("is-active", showDetails);
+      elements.componentsTab.classList.toggle("is-active", !showDetails);
+      elements.detailsTab.setAttribute("aria-selected", String(showDetails));
+      elements.componentsTab.setAttribute("aria-selected", String(!showDetails));
+    };
+
+    const renderNavigator = () => {
+      if (!state.visibleComponents.length) {
+        elements.navigatorList.replaceChildren(
+          createElement("div", "navigator-empty", "No components match the filters.")
+        );
+        return;
+      }
+      const fragment = document.createDocumentFragment();
+      state.visibleComponents.forEach((item) => {
+        const button = createElement("button", "", `${item.name} - ${item.kind}`);
+        button.type = "button";
+        button.dataset.navigateComponent = item.id;
+        if (state.selectedType === "component" && state.selectedId === item.id) {
+          button.classList.add("is-selected");
+        }
+        fragment.appendChild(button);
+      });
+      elements.navigatorList.replaceChildren(fragment);
+    };
+
+    const syncSvgViewport = () => {
+      const rect = elements.diagram.getBoundingClientRect();
+      const width = Math.max(1, rect.width);
+      const height = Math.max(1, rect.height);
+      elements.diagram.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    };
+
+    const applyTransform = () => {
+      elements.viewport.setAttribute(
+        "transform",
+        `translate(${state.translateX} ${state.translateY}) scale(${state.scale})`
+      );
+    };
+
+    const fitDiagram = () => {
+      syncSvgViewport();
+      const rect = elements.diagram.getBoundingClientRect();
+      const padding = 34;
+      const scaleX = (rect.width - padding * 2) / state.worldWidth;
+      const scaleY = (rect.height - padding * 2) / state.worldHeight;
+      if (rect.width < 600) {
+        state.scale = Math.max(0.58, Math.min(0.72, scaleY));
+        state.translateX = 12 - 28 * state.scale;
+        state.translateY = 12 - 18 * state.scale;
+        state.hasFitted = true;
+        applyTransform();
+        return;
+      }
+      state.scale = Math.max(0.25, Math.min(1.25, scaleX, scaleY));
+      state.translateX = (rect.width - state.worldWidth * state.scale) / 2;
+      state.translateY = (rect.height - state.worldHeight * state.scale) / 2;
+      state.hasFitted = true;
+      applyTransform();
+    };
+
+    const zoomAt = (factor, clientX, clientY) => {
+      const rect = elements.diagram.getBoundingClientRect();
+      const pointX = clientX - rect.left;
+      const pointY = clientY - rect.top;
+      const nextScale = Math.max(0.25, Math.min(2.8, state.scale * factor));
+      const worldX = (pointX - state.translateX) / state.scale;
+      const worldY = (pointY - state.translateY) / state.scale;
+      state.translateX = pointX - worldX * nextScale;
+      state.translateY = pointY - worldY * nextScale;
+      state.scale = nextScale;
+      applyTransform();
+    };
+
+    const focusComponent = (componentId) => {
+      const position = state.positions.get(componentId);
+      if (!position) {
+        return;
+      }
+      const rect = elements.diagram.getBoundingClientRect();
+      const centerX = position.x + position.width / 2;
+      const centerY = position.y + position.height / 2;
+      const targetScale = Math.max(state.scale, 0.9);
+      state.scale = Math.min(1.5, targetScale);
+      state.translateX = rect.width / 2 - centerX * state.scale;
+      state.translateY = rect.height / 2 - centerY * state.scale;
+      applyTransform();
+    };
+
+    const updateHash = () => {
+      const params = new URLSearchParams();
+      params.set("view", state.viewId);
+      if (state.selectedType === "component") {
+        params.set("component", state.selectedId);
+      }
+      if (state.selectedType === "flow") {
+        params.set("flow", state.selectedId);
+      }
+      history.replaceState(null, "", `#${params.toString()}`);
+    };
+
+    const viewContainingComponent = (componentId) =>
+      architecture.views.find((view) =>
+        view.lanes.some((lane) => lane.nodeIds.includes(componentId))
+      );
+
+    const viewContainsComponent = (view, componentId) =>
+      view.lanes.some((lane) => lane.nodeIds.includes(componentId));
+
+    const selectComponent = (componentId, { focus = false, updateUrl = true } = {}) => {
+      if (!componentById.has(componentId)) {
+        return;
+      }
+      state.selectedType = "component";
+      state.selectedId = componentId;
+      setInspectorTab("details");
+      renderDiagram();
+      if (focus) {
+        focusComponent(componentId);
+      }
+      const node = elements.nodeLayer.querySelector(`[data-component-id="${componentId}"]`);
+      if (node) {
+        node.focus({ preventScroll: true });
+      }
+      if (updateUrl) {
+        updateHash();
+      }
+    };
+
+    const selectFlow = (flowId, { updateUrl = true } = {}) => {
+      if (!flowById.has(flowId)) {
+        return;
+      }
+      state.selectedType = "flow";
+      state.selectedId = flowId;
+      setInspectorTab("details");
+      renderDiagram();
+      const node = elements.flowLayer.querySelector(`[data-flow-id="${flowId}"]`);
+      if (node) {
+        node.focus({ preventScroll: true });
+      }
+      if (updateUrl) {
+        updateHash();
+      }
+    };
+
+    const clearSelection = ({ updateUrl = true } = {}) => {
+      state.selectedType = null;
+      state.selectedId = null;
+      renderDiagram();
+      if (updateUrl) {
+        updateHash();
+      }
+    };
+
+    const switchView = (viewId, { fit = true, clear = true, updateUrl = true } = {}) => {
+      if (!viewById.has(viewId)) {
+        return;
+      }
+      state.viewId = viewId;
+      elements.viewSelect.value = viewId;
+      syncActiveLens();
+      state.hasFitted = false;
+      if (clear) {
+        state.selectedType = null;
+        state.selectedId = null;
+      }
+      renderDiagram({ fit });
+      if (updateUrl) {
+        updateHash();
+      }
+    };
+
+    const resetFilters = () => {
+      state.group = "all";
+      state.kind = "all";
+      state.mode = "all";
+      state.confidence = "all";
+      state.showSecondary = false;
+      state.trace = "off";
+      elements.groupFilter.value = "all";
+      elements.kindFilter.value = "all";
+      elements.modeFilter.value = "all";
+      elements.confidenceFilter.value = "all";
+      elements.secondaryToggle.checked = false;
+      elements.traceSelect.value = "off";
+      elements.filterPopover.open = false;
+      renderDiagram({ fit: true });
+    };
+
+    const searchableText = (item) => {
+      const values = [
+        item.name,
+        item.kind,
+        item.summary,
+        ...(item.groupIds || []).map((id) => groupById.get(id)?.name || id),
+        ...(item.responsibilities || []),
+        ...(item.technologies || []),
+        ...(item.interfaces || []),
+        ...(item.dataOwned || []),
+        ...(item.deployment || []),
+        ...(item.security || []),
+        ...(item.operations || []),
+        ...(item.evidence || []).flatMap((entry) => [entry.path, entry.note])
+      ];
+      return values.join(" ").toLowerCase();
+    };
+
+    const closeSearchResults = ({ clearInput = false } = {}) => {
+      state.searchIndex = -1;
+      elements.searchResults.classList.remove("is-open");
+      elements.searchInput.setAttribute("aria-expanded", "false");
+      elements.searchInput.removeAttribute("aria-activedescendant");
+      elements.searchResults.replaceChildren();
+      if (clearInput) {
+        elements.searchInput.value = "";
+      }
+    };
+
+    const renderSearchResults = () => {
+      const query = elements.searchInput.value.trim().toLowerCase();
+      if (!query) {
+        closeSearchResults();
+        return;
+      }
+      state.searchIndex = -1;
+      elements.searchInput.removeAttribute("aria-activedescendant");
+      const componentResults = architecture.components
+        .filter((item) => searchableText(item).includes(query))
+        .slice(0, 8)
+        .map((item) => ({ type: "component", id: item.id, name: item.name, note: item.kind }));
+      const flowResults = architecture.flows
+        .filter((item) => {
+          const text = [
+            item.label,
+            item.protocol,
+            item.authentication,
+            item.failureBehavior,
+            ...item.data,
+            ...item.evidence.flatMap((entry) => [entry.path, entry.note])
+          ].join(" ").toLowerCase();
+          return text.includes(query);
+        })
+        .slice(0, Math.max(0, 10 - componentResults.length))
+        .map((item) => ({
+          type: "flow",
+          id: item.id,
+          name: item.label,
+          note: `${componentById.get(item.from).name} to ${componentById.get(item.to).name}`
+        }));
+      const results = [...componentResults, ...flowResults];
+      if (!results.length) {
+        const empty = createElement(
+          "div",
+          "navigator-empty",
+          "No architecture evidence matched."
+        );
+        empty.id = "search-option-empty";
+        empty.setAttribute("role", "option");
+        empty.setAttribute("aria-disabled", "true");
+        elements.searchResults.replaceChildren(empty);
+        elements.searchResults.classList.add("is-open");
+        elements.searchInput.setAttribute("aria-expanded", "true");
+        return;
+      }
+      const fragment = document.createDocumentFragment();
+      results.forEach((result, index) => {
+        const button = createElement("button", "search-result");
+        button.type = "button";
+        button.tabIndex = -1;
+        button.id = `search-option-${index}`;
+        button.setAttribute("role", "option");
+        button.setAttribute("aria-selected", "false");
+        button.dataset.searchType = result.type;
+        button.dataset.searchId = result.id;
+        button.append(
+          createElement("span", "", result.name),
+          createElement("small", "", result.note)
+        );
+        fragment.appendChild(button);
+      });
+      elements.searchResults.replaceChildren(fragment);
+      elements.searchResults.classList.add("is-open");
+      elements.searchInput.setAttribute("aria-expanded", "true");
+    };
+
+    const setActiveSearchOption = (nextIndex) => {
+      const options = [...elements.searchResults.querySelectorAll("[data-search-type]")];
+      if (!options.length) {
+        return;
+      }
+      state.searchIndex = (nextIndex + options.length) % options.length;
+      options.forEach((option, index) => {
+        const isActive = index === state.searchIndex;
+        option.classList.toggle("is-active", isActive);
+        option.setAttribute("aria-selected", String(isActive));
+      });
+      const activeOption = options[state.searchIndex];
+      elements.searchInput.setAttribute("aria-activedescendant", activeOption.id);
+      activeOption.scrollIntoView({ block: "nearest" });
+    };
+
+    const activateSearchResult = (type, id) => {
+      closeSearchResults({ clearInput: true });
+      if (type === "component") {
+        state.group = "all";
+        state.kind = "all";
+        state.confidence = "all";
+        elements.groupFilter.value = "all";
+        elements.kindFilter.value = "all";
+        elements.confidenceFilter.value = "all";
+        const view = viewContainsComponent(currentView(), id)
+          ? currentView()
+          : viewContainingComponent(id);
+        if (view && view.id !== state.viewId) {
+          switchView(view.id, { fit: true, clear: false, updateUrl: false });
+        }
+        selectComponent(id, { focus: true });
+        return;
+      }
+      const item = flowById.get(id);
+      if (!item) {
+        return;
+      }
+      state.mode = "all";
+      state.confidence = "all";
+      elements.modeFilter.value = "all";
+      elements.confidenceFilter.value = "all";
+      if (!item.viewIds.includes(state.viewId)) {
+        switchView(item.viewIds[0], { fit: true, clear: false, updateUrl: false });
+      }
+      state.showSecondary = item.importance === "secondary" ? true : state.showSecondary;
+      elements.secondaryToggle.checked = state.showSecondary;
+      selectFlow(id);
+    };
+
+    const parseHash = () => {
+      const params = new URLSearchParams(window.location.hash.slice(1));
+      const viewId = params.get("view");
+      if (viewId && viewById.has(viewId)) {
+        state.viewId = viewId;
+      }
+      const componentId = params.get("component");
+      const flowId = params.get("flow");
+      if (componentId && componentById.has(componentId)) {
+        if (!viewContainsComponent(currentView(), componentId)) {
+          const containingView = viewContainingComponent(componentId);
+          if (containingView) {
+            state.viewId = containingView.id;
+          }
+        }
+        state.selectedType = "component";
+        state.selectedId = componentId;
+      } else if (flowId && flowById.has(flowId)) {
+        const selectedFlow = flowById.get(flowId);
+        if (!selectedFlow.viewIds.includes(state.viewId)) {
+          state.viewId = selectedFlow.viewIds[0];
+        }
+        state.selectedType = "flow";
+        state.selectedId = flowId;
+        if (selectedFlow.importance === "secondary") {
+          state.showSecondary = true;
+        }
+      } else {
+        state.selectedType = null;
+        state.selectedId = null;
+      }
+    };
+
+    const validateModel = () => {
+      const errors = [];
+      const componentIds = new Set();
+      architecture.components.forEach((item) => {
+        if (componentIds.has(item.id)) {
+          errors.push(`Duplicate component ID: ${item.id}`);
+        }
+        componentIds.add(item.id);
+        if (item.confidence === "observed" && item.evidence.length === 0) {
+          errors.push(`Observed component lacks evidence: ${item.id}`);
+        }
+      });
+      const flowIds = new Set();
+      architecture.flows.forEach((item) => {
+        if (flowIds.has(item.id)) {
+          errors.push(`Duplicate flow ID: ${item.id}`);
+        }
+        flowIds.add(item.id);
+        if (!componentIds.has(item.from) || !componentIds.has(item.to)) {
+          errors.push(`Flow has missing endpoint: ${item.id}`);
+        }
+        if (item.confidence === "observed" && item.evidence.length === 0) {
+          errors.push(`Observed flow lacks evidence: ${item.id}`);
+        }
+        item.viewIds.forEach((viewId) => {
+          if (!viewById.has(viewId)) {
+            errors.push(`Flow ${item.id} references missing view ${viewId}`);
+          }
+        });
+      });
+      architecture.views.forEach((view) => {
+        view.lanes.forEach((lane) => {
+          lane.nodeIds.forEach((id) => {
+            if (!componentIds.has(id)) {
+              errors.push(`View ${view.id} references missing component ${id}`);
+            }
+          });
+        });
+      });
+      if (errors.length) {
+        throw new Error(`Architecture model validation failed:\n${errors.join("\n")}`);
+      }
+    };
+
+    let pointerState = null;
+
+    elements.diagram.addEventListener("pointerdown", (event) => {
+      if (event.target.closest("[data-component-id], [data-flow-id]")) {
+        return;
+      }
+      pointerState = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        translateX: state.translateX,
+        translateY: state.translateY,
+        moved: false
+      };
+      elements.diagram.setPointerCapture(event.pointerId);
+      elements.diagram.classList.add("is-dragging");
+    });
+
+    elements.diagram.addEventListener("pointermove", (event) => {
+      if (!pointerState || pointerState.pointerId !== event.pointerId) {
+        return;
+      }
+      const deltaX = event.clientX - pointerState.startX;
+      const deltaY = event.clientY - pointerState.startY;
+      if (Math.abs(deltaX) + Math.abs(deltaY) > 4) {
+        pointerState.moved = true;
+      }
+      state.translateX = pointerState.translateX + deltaX;
+      state.translateY = pointerState.translateY + deltaY;
+      applyTransform();
+    });
+
+    const finishPointer = (event) => {
+      if (!pointerState || pointerState.pointerId !== event.pointerId) {
+        return;
+      }
+      const shouldClear = !pointerState.moved;
+      pointerState = null;
+      elements.diagram.classList.remove("is-dragging");
+      if (elements.diagram.hasPointerCapture(event.pointerId)) {
+        elements.diagram.releasePointerCapture(event.pointerId);
+      }
+      if (shouldClear) {
+        clearSelection();
+      }
+    };
+
+    elements.diagram.addEventListener("pointerup", finishPointer);
+    elements.diagram.addEventListener("pointercancel", finishPointer);
+
+    elements.diagram.addEventListener("wheel", (event) => {
+      event.preventDefault();
+      zoomAt(event.deltaY < 0 ? 1.12 : 0.89, event.clientX, event.clientY);
+    }, { passive: false });
+
+    elements.diagram.addEventListener("click", (event) => {
+      const componentNode = event.target.closest("[data-component-id]");
+      if (componentNode) {
+        selectComponent(componentNode.dataset.componentId);
+        return;
+      }
+      const flowNode = event.target.closest("[data-flow-id]");
+      if (flowNode) {
+        selectFlow(flowNode.dataset.flowId);
+      }
+    });
+
+    elements.diagram.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        clearSelection();
+        return;
+      }
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      const componentNode = event.target.closest("[data-component-id]");
+      const flowNode = event.target.closest("[data-flow-id]");
+      if (componentNode) {
+        event.preventDefault();
+        selectComponent(componentNode.dataset.componentId);
+      } else if (flowNode) {
+        event.preventDefault();
+        selectFlow(flowNode.dataset.flowId);
+      }
+    });
+
+    elements.detailPanel.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-inspect-flow]");
+      if (button) {
+        selectFlow(button.dataset.inspectFlow);
+      }
+    });
+
+    elements.navigatorList.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-navigate-component]");
+      if (button) {
+        selectComponent(button.dataset.navigateComponent, { focus: true });
+      }
+    });
+
+    elements.lensNav.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-view-id]");
+      if (button) {
+        switchView(button.dataset.viewId);
+      }
+    });
+
+    [elements.detailsTab, elements.componentsTab].forEach((tab) => {
+      tab.addEventListener("click", () => {
+        setInspectorTab(tab === elements.detailsTab ? "details" : "components");
+      });
+      tab.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+          return;
+        }
+        event.preventDefault();
+        const nextTab = tab === elements.detailsTab
+          ? elements.componentsTab
+          : elements.detailsTab;
+        setInspectorTab(nextTab === elements.detailsTab ? "details" : "components");
+        nextTab.focus();
+      });
+    });
+
+    elements.searchResults.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-search-type]");
+      if (button) {
+        activateSearchResult(button.dataset.searchType, button.dataset.searchId);
+      }
+    });
+
+    elements.searchInput.addEventListener("input", renderSearchResults);
+    elements.searchInput.addEventListener("focus", renderSearchResults);
+    elements.searchInput.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        closeSearchResults({ clearInput: true });
+        return;
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        if (!elements.searchResults.classList.contains("is-open")) {
+          renderSearchResults();
+        }
+        const optionCount =
+          elements.searchResults.querySelectorAll("[data-search-type]").length;
+        if (!optionCount) {
+          return;
+        }
+        event.preventDefault();
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        const nextIndex = state.searchIndex < 0
+          ? (direction > 0 ? 0 : optionCount - 1)
+          : state.searchIndex + direction;
+        setActiveSearchOption(nextIndex);
+        return;
+      }
+      if (event.key === "Enter" && state.searchIndex >= 0) {
+        const activeOption =
+          elements.searchResults.querySelectorAll("[data-search-type]")[state.searchIndex];
+        if (activeOption) {
+          event.preventDefault();
+          activateSearchResult(
+            activeOption.dataset.searchType,
+            activeOption.dataset.searchId
+          );
+        }
+      }
+    });
+
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest(".search-field")) {
+        closeSearchResults();
+      }
+      if (!event.target.closest(".filter-popover")) {
+        elements.filterPopover.open = false;
+      }
+    });
+
+    elements.viewSelect.addEventListener("change", () => switchView(elements.viewSelect.value));
+    elements.groupFilter.addEventListener("change", () => {
+      state.group = elements.groupFilter.value;
+      renderDiagram({ fit: true });
+    });
+    elements.kindFilter.addEventListener("change", () => {
+      state.kind = elements.kindFilter.value;
+      renderDiagram({ fit: true });
+    });
+    elements.modeFilter.addEventListener("change", () => {
+      state.mode = elements.modeFilter.value;
+      renderDiagram();
+    });
+    elements.confidenceFilter.addEventListener("change", () => {
+      state.confidence = elements.confidenceFilter.value;
+      renderDiagram({ fit: true });
+    });
+    elements.traceSelect.addEventListener("change", () => {
+      state.trace = elements.traceSelect.value;
+      renderDiagram();
+    });
+    elements.secondaryToggle.addEventListener("change", () => {
+      state.showSecondary = elements.secondaryToggle.checked;
+      renderDiagram();
+    });
+    elements.fitButton.addEventListener("click", fitDiagram);
+    elements.heroFit.addEventListener("click", fitDiagram);
+    elements.zoomFit.addEventListener("click", fitDiagram);
+    elements.resetButton.addEventListener("click", resetFilters);
+    elements.zoomIn.addEventListener("click", () => {
+      const rect = elements.diagram.getBoundingClientRect();
+      zoomAt(1.2, rect.left + rect.width / 2, rect.top + rect.height / 2);
+    });
+    elements.zoomOut.addEventListener("click", () => {
+      const rect = elements.diagram.getBoundingClientRect();
+      zoomAt(0.83, rect.left + rect.width / 2, rect.top + rect.height / 2);
+    });
+
+    elements.themeToggle.addEventListener("click", () => {
+      const current = document.documentElement.getAttribute("data-theme");
+      const next = current === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      elements.themeToggle.textContent =
+        next === "dark" ? "Use light theme" : "Use dark theme";
+    });
+
+    window.addEventListener("hashchange", () => {
+      parseHash();
+      elements.viewSelect.value = state.viewId;
+      syncActiveLens();
+      setInspectorTab("details");
+      renderDiagram({ fit: true });
+    });
+
+    const resizeObserver = new ResizeObserver(() => {
+      syncSvgViewport();
+      if (state.hasFitted) {
+        fitDiagram();
+      }
+    });
+    resizeObserver.observe(elements.diagramWrap);
+
+    const initialize = () => {
+      validateModel();
+      renderStats();
+      renderControls();
+      renderCaveats();
+      parseHash();
+      elements.viewSelect.value = state.viewId;
+      elements.secondaryToggle.checked = state.showSecondary;
+      syncActiveLens();
+      setInspectorTab("details");
+      const currentTheme = document.documentElement.getAttribute("data-theme");
+      elements.themeToggle.textContent =
+        currentTheme === "dark" ? "Use light theme" : "Use dark theme";
+      renderDiagram({ fit: true });
+      updateHash();
+    };
+
+    initialize();
+  </script>
+</body>
+</html>

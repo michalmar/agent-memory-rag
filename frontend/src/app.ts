@@ -1,50 +1,70 @@
 // app.ts — <a2ui-native-app> root component (Lit). Chat + memory-layer UI (§12):
-// collapsible sidebar (History + Memory), Profile drawer, RAG toggle, A2UI surfaces.
-import { LitElement, html, css, nothing, type PropertyValues } from 'lit';
+// collapsible sidebar, selectable Foundry agents, memory/profile UI, and A2UI surfaces.
+import { LitElement, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { unsafeHTML } from 'lit/directives/unsafe-html.js';
-import { marked } from 'marked';
-import DOMPurify from 'dompurify';
 
-import './a2ui/surface-renderer.js';
-import { A2UIProcessor, type SurfaceState } from './a2ui/processor.js';
+import { A2UIProcessor } from './a2ui/processor.js';
+import type { ChatTurn, ResourceStatus } from './chat-models.js';
 import {
   AGUIClient,
   type AGUIEvent,
+  type AgentOption,
+  type AgentType,
+  type CitationSource,
   type ConversationSummary,
   type MemoryRow,
   type ProfileDoc,
+  type TokenUsage,
 } from './client.js';
-import { convertToolResult } from './converters.js';
-import { getMockUserId, setMockUserId, getConfig, signOut } from './auth.js';
+import { convertToolResult, extractToolCitations, parseCitations } from './converters.js';
+import {
+  AUTH_REQUIRED_EVENT,
+  type AuthSession,
+  getMockUserId,
+  getConfig,
+  initializeAuthSession,
+  setMockUserId,
+  signIn,
+  signOut,
+} from './auth.js';
+import { appStyles } from './app.styles.js';
+import './components/chat-composer.js';
+import './components/chat-transcript.js';
+import './components/conversation-sidebar.js';
+import './components/memory-rail.js';
+import { ProfileDrawer } from './components/profile-drawer.js';
 import { uiLogger } from './ui-logger.js';
 
-interface ChatTurn {
-  role: 'user' | 'assistant';
-  text: string;
-  surfaces: SurfaceState[];
-  error?: string;
-}
+type AuthStatus = 'checking' | 'signed-out' | 'signing-in' | 'signed-in' | 'error';
 
-type RagMode = 'none' | 'agentic' | 'classic';
-
-const MOCK_USERS = ['user-alice', 'user-bob', 'user-charlie'];
+const storedTheme = localStorage.getItem('theme');
+const INITIAL_THEME: 'light' | 'dark' = storedTheme === 'dark' ? 'dark' : 'light';
+const THREAD_RAIL_DESKTOP = window.matchMedia('(min-width: 901px)');
+const MEMORY_RAIL_DESKTOP = window.matchMedia('(min-width: 1361px)');
+const REPOSITORY_URL = 'https://github.com/michalmar/agent-memory-rag';
 
 @customElement('a2ui-native-app')
 export class NativeApp extends LitElement {
   @state() private turns: ChatTurn[] = [];
   @state() private input = '';
-  @state() private ragMode: RagMode = 'classic';
+  @state() private agentType: AgentType = 'agent-framework';
+  @state() private agentOptions: AgentOption[] = [];
   @state() private busy = false;
   @state() private mockUser = getMockUserId();
-  @state() private theme: 'light' | 'dark' =
-    (localStorage.getItem('theme') as 'light' | 'dark') || 'light';
+  @state() private theme: 'light' | 'dark' = INITIAL_THEME;
   @state() private me: Record<string, unknown> | null = null;
+  @state() private authStatus: AuthStatus =
+    getConfig().authMode === 'mock' ? 'signed-in' : 'checking';
+  @state() private authSession: AuthSession | null = null;
+  @state() private authError: string | null = null;
 
   // Memory-layer UI state
-  @state() private sidebarOpen = true;
+  @state() private sidebarOpen = THREAD_RAIL_DESKTOP.matches;
+  @state() private memoryPanelOpen = MEMORY_RAIL_DESKTOP.matches;
   @state() private conversations: ConversationSummary[] = [];
   @state() private memories: MemoryRow[] = [];
+  @state() private conversationsStatus: ResourceStatus = 'loading';
+  @state() private memoriesStatus: ResourceStatus = 'loading';
   @state() private memoryQuery = '';
   @state() private searchResults: MemoryRow[] | null = null;
   @state() private selectedMemory: MemoryRow | null = null;
@@ -53,418 +73,116 @@ export class NativeApp extends LitElement {
   @state() private profile: ProfileDoc | null = null;
   @state() private profileDraft = '';
   @state() private toast: string | null = null;
+  @state() private relativeClock = Date.now();
 
   private client = new AGUIClient();
   private processor = new A2UIProcessor();
-  private threadId: string | null = null;
+  private conversationId: string | null = null;
   private toolNames = new Map<string, string>();
   private surfaceSeq = 0;
   private toastTimer?: number;
+  private relativeClockTimer?: number;
+  private profileTrigger?: HTMLElement;
+  private authGeneration = 0;
+  private identityGeneration = 0;
+  private chatGeneration = 0;
+  private turnSequence = 0;
+  private chatAbort?: AbortController;
+  private sidebarActions = {
+    close: () => (this.sidebarOpen = false),
+    newConversation: () => this.newChat(),
+    toggleMemory: () => this.toggleMemoryPanel(),
+    openProfile: (trigger?: HTMLElement) => void this.openProfile(trigger),
+    switchMockUser: (userId: string) => this.switchMockUser(userId),
+    signOut: () => void this.signOutOfApplication(),
+    openConversation: (conversationId: string) =>
+      void this.openConversation(conversationId),
+    saveMemory: (conversation: ConversationSummary) =>
+      void this.memorise(conversation),
+    renameConversation: (conversation: ConversationSummary) =>
+      void this.renameConversation(conversation),
+    deleteConversation: (conversation: ConversationSummary) =>
+      void this.deleteConversation(conversation),
+  };
+  private memoryActions = {
+    close: () => (this.memoryPanelOpen = false),
+    updateQuery: (query: string) => (this.memoryQuery = query),
+    search: () => void this.runMemorySearch(),
+    clearSearch: () => this.clearMemorySearch(),
+    select: (memory: MemoryRow) => this.selectMemory(memory),
+    clearSelection: () => (this.selectedMemory = null),
+    openConversation: (conversationId: string) =>
+      this.openConversationFromMemory(conversationId),
+    deleteMemory: (memory: MemoryRow) => void this.deleteMemory(memory),
+  };
+  private composerActions = {
+    updateInput: (value: string) => (this.input = value),
+    chooseAgent: (agentType: AgentType) => this.chooseAgent(agentType),
+    send: () => void this.send(),
+  };
+  private transcriptActions = {
+    copy: (turn: ChatTurn) => void this.copyTurn(turn),
+    setFeedback: (turn: ChatTurn, feedback: 'up' | 'down') =>
+      this.setFeedback(turn, feedback),
+  };
+  private profileActions = {
+    close: () => this.closeProfile(),
+    updateDraft: (value: string) => (this.profileDraft = value),
+    save: () => void this.saveProfile(),
+    generate: () => void this.generateProfile(),
+    clear: () => void this.clearProfile(),
+  };
+  private onThreadRailBreakpointChange = (event: MediaQueryListEvent): void => {
+    this.sidebarOpen = event.matches;
+    if (!event.matches) this.memoryPanelOpen = false;
+  };
+  private onMemoryRailBreakpointChange = (event: MediaQueryListEvent): void => {
+    this.memoryPanelOpen = event.matches;
+  };
+  private onAuthRequired = (): void => {
+    if (getConfig().authMode !== 'entra' || this.authStatus !== 'signed-in') return;
+    ++this.authGeneration;
+    ++this.identityGeneration;
+    this.cancelActiveChat();
+    this.clearUserScopedState();
+    this.authSession = null;
+    this.authError = 'Your session expired. Sign in again to continue.';
+    this.authStatus = 'signed-out';
+  };
 
-  static styles = css`
-    :host {
-      display: flex;
-      flex-direction: column;
-      height: 100vh;
-      color: var(--fg);
-      background: var(--bg);
-    }
-    header {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 10px 18px;
-      border-bottom: 1px solid var(--border);
-      background: var(--bg-alt);
-    }
-    header .title {
-      font-weight: 700;
-      font-size: 1rem;
-      margin-right: auto;
-    }
-    header .sub {
-      font-weight: 400;
-      color: var(--fg-muted);
-      font-size: 0.8rem;
-      margin-left: 6px;
-    }
-    select,
-    button.ctl {
-      font: inherit;
-      font-size: 0.82rem;
-      padding: 5px 10px;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      background: var(--card);
-      color: var(--fg);
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-    }
-    button.ctl.active {
-      background: var(--accent);
-      color: var(--accent-fg);
-      border-color: var(--accent);
-    }
-    button.icon-btn {
-      border: none;
-      background: transparent;
-      color: var(--fg-muted);
-      cursor: pointer;
-      padding: 2px 4px;
-      border-radius: 6px;
-    }
-    button.icon-btn:hover {
-      background: var(--bg-alt);
-      color: var(--fg);
-    }
-    /* ---------------- layout: sidebar + chat ---------------- */
-    .body {
-      flex: 1;
-      display: flex;
-      min-height: 0;
-    }
-    aside.sidebar {
-      width: 288px;
-      flex-shrink: 0;
-      border-right: 1px solid var(--border);
-      background: var(--bg-alt);
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-    aside.sidebar.collapsed {
-      display: none;
-    }
-    .side-scroll {
-      flex: 1;
-      overflow-y: auto;
-      padding: 8px 10px;
-    }
-    .side-section-title {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 0.72rem;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      color: var(--fg-muted);
-      margin: 14px 4px 6px;
-    }
-    .side-section-title .count {
-      margin-left: auto;
-      font-weight: 500;
-    }
-    .list-item {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      padding: 7px 8px;
-      border-radius: 8px;
-      cursor: pointer;
-      font-size: 0.85rem;
-    }
-    .list-item:hover {
-      background: var(--card);
-    }
-    .list-item.active {
-      background: var(--card);
-      border: 1px solid var(--border);
-    }
-    .list-item .li-main {
-      flex: 1;
-      min-width: 0;
-    }
-    .list-item .li-title {
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .list-item .li-sub {
-      font-size: 0.72rem;
-      color: var(--fg-muted);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .list-item .row-actions {
-      display: none;
-      gap: 2px;
-    }
-    .list-item:hover .row-actions {
-      display: flex;
-    }
-    .side-empty {
-      color: var(--fg-muted);
-      font-size: 0.8rem;
-      padding: 6px 8px;
-    }
-    .mem-search {
-      display: flex;
-      gap: 6px;
-      padding: 2px 4px 6px;
-    }
-    .mem-search input {
-      flex: 1;
-      min-width: 0;
-      font: inherit;
-      font-size: 0.82rem;
-      padding: 6px 8px;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      background: var(--card);
-      color: var(--fg);
-    }
-    .sim {
-      font-size: 0.7rem;
-      font-weight: 600;
-      color: var(--accent);
-    }
-    .user-card {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 10px 12px;
-      border-top: 1px solid var(--border);
-      cursor: pointer;
-    }
-    .user-card:hover {
-      background: var(--card);
-    }
-    .avatar {
-      width: 30px;
-      height: 30px;
-      border-radius: 50%;
-      background: var(--accent);
-      color: var(--accent-fg);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 0.75rem;
-      font-weight: 700;
-      flex-shrink: 0;
-    }
-    .chat-col {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      min-width: 0;
-    }
-    main {
-      flex: 1;
-      overflow-y: auto;
-      padding: 20px;
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-    }
-    .msg {
-      max-width: 720px;
-      width: fit-content;
-    }
-    .msg.user {
-      align-self: flex-end;
-    }
-    .bubble {
-      padding: 10px 14px;
-      border-radius: 14px;
-      font-size: 0.92rem;
-      line-height: 1.5;
-    }
-    .msg.user .bubble {
-      background: var(--accent);
-      color: var(--accent-fg);
-      border-bottom-right-radius: 4px;
-    }
-    .msg.assistant .bubble {
-      background: var(--bg-alt);
-      border: 1px solid var(--border);
-      border-bottom-left-radius: 4px;
-    }
-    .bubble :first-child { margin-top: 0; }
-    .bubble :last-child { margin-bottom: 0; }
-    .bubble pre {
-      background: var(--card);
-      padding: 8px 10px;
-      border-radius: 8px;
-      overflow-x: auto;
-    }
-    .surfaces {
-      margin-top: 10px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-    .err {
-      color: #b91c1c;
-      font-size: 0.85rem;
-      margin-top: 6px;
-    }
-    .empty {
-      margin: auto;
-      color: var(--fg-muted);
-      text-align: center;
-      max-width: 420px;
-    }
-    /* ---------------- memory detail ---------------- */
-    .mem-detail {
-      max-width: 720px;
-      margin: auto;
-      background: var(--bg-alt);
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 20px;
-    }
-    .mem-detail h2 {
-      margin: 0 0 4px;
-      font-size: 1.05rem;
-    }
-    .mem-detail .meta {
-      color: var(--fg-muted);
-      font-size: 0.78rem;
-      margin-bottom: 14px;
-    }
-    footer {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-      padding: 12px 18px;
-      border-top: 1px solid var(--border);
-      background: var(--bg-alt);
-    }
-    .rag-toggle {
-      display: flex;
-      gap: 4px;
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 3px;
-      background: var(--card);
-      flex-shrink: 0;
-    }
-    .rag-toggle button {
-      font: inherit;
-      font-size: 0.76rem;
-      padding: 4px 9px;
-      border: none;
-      border-radius: 7px;
-      background: transparent;
-      color: var(--fg-muted);
-      cursor: pointer;
-    }
-    .rag-toggle button.on {
-      background: var(--accent);
-      color: var(--accent-fg);
-    }
-    textarea {
-      flex: 1;
-      resize: none;
-      font: inherit;
-      font-size: 0.92rem;
-      padding: 10px 12px;
-      border-radius: 10px;
-      border: 1px solid var(--border);
-      background: var(--card);
-      color: var(--fg);
-    }
-    button.send {
-      padding: 0 18px;
-      height: 40px;
-      border-radius: 10px;
-      border: none;
-      background: var(--accent);
-      color: var(--accent-fg);
-      font: inherit;
-      font-weight: 600;
-      cursor: pointer;
-    }
-    button.send:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-    /* ---------------- profile drawer ---------------- */
-    .drawer-scrim {
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.35);
-      z-index: 40;
-    }
-    .drawer {
-      position: fixed;
-      top: 0;
-      right: 0;
-      height: 100vh;
-      width: 400px;
-      max-width: 92vw;
-      background: var(--bg);
-      border-left: 1px solid var(--border);
-      box-shadow: var(--shadow);
-      z-index: 41;
-      display: flex;
-      flex-direction: column;
-    }
-    .drawer header {
-      justify-content: space-between;
-    }
-    .drawer .drawer-body {
-      flex: 1;
-      overflow-y: auto;
-      padding: 16px 18px;
-    }
-    .drawer textarea {
-      width: 100%;
-      min-height: 320px;
-      font-family: ui-monospace, monospace;
-      font-size: 0.8rem;
-    }
-    .drawer .actions {
-      display: flex;
-      gap: 8px;
-      padding: 12px 18px;
-      border-top: 1px solid var(--border);
-    }
-    .field-note {
-      font-size: 0.78rem;
-      color: var(--fg-muted);
-      margin: 0 0 10px;
-    }
-    .toast {
-      position: fixed;
-      bottom: 20px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: var(--fg);
-      color: var(--bg);
-      padding: 9px 16px;
-      border-radius: 10px;
-      font-size: 0.84rem;
-      z-index: 50;
-      box-shadow: var(--shadow);
-    }
-    .material-symbols-outlined {
-      font-family: 'Material Symbols Outlined';
-      font-size: 1.1rem;
-      vertical-align: middle;
-    }
-  `;
+  static styles = appStyles;
 
   connectedCallback(): void {
     super.connectedCallback();
+    THREAD_RAIL_DESKTOP.addEventListener('change', this.onThreadRailBreakpointChange);
+    MEMORY_RAIL_DESKTOP.addEventListener('change', this.onMemoryRailBreakpointChange);
+    window.addEventListener(AUTH_REQUIRED_EVENT, this.onAuthRequired);
+    this.scheduleRelativeClock();
     this.applyTheme();
-    void this.refreshMe();
-    void this.refreshConversations();
-    void this.refreshMemories();
+    if (getConfig().authMode === 'entra') {
+      void this.initializeAuthentication();
+    } else {
+      this.loadAuthenticatedState();
+    }
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    THREAD_RAIL_DESKTOP.removeEventListener('change', this.onThreadRailBreakpointChange);
+    MEMORY_RAIL_DESKTOP.removeEventListener('change', this.onMemoryRailBreakpointChange);
+    window.removeEventListener(AUTH_REQUIRED_EVENT, this.onAuthRequired);
+    ++this.authGeneration;
+    this.chatAbort?.abort();
     if (this.toastTimer) clearTimeout(this.toastTimer);
+    if (this.relativeClockTimer) clearTimeout(this.relativeClockTimer);
   }
 
   private applyTheme(): void {
     document.documentElement.setAttribute('data-theme', this.theme);
     localStorage.setItem('theme', this.theme);
+    document
+      .querySelector('meta[name="theme-color"]')
+      ?.setAttribute('content', this.theme === 'dark' ? '#0E0F10' : '#F6F7F8');
   }
 
   private showToast(msg: string): void {
@@ -473,52 +191,223 @@ export class NativeApp extends LitElement {
     this.toastTimer = window.setTimeout(() => (this.toast = null), 2600);
   }
 
-  private async refreshMe(): Promise<void> {
+  private loadAuthenticatedState(): void {
+    const generation = ++this.identityGeneration;
+    void Promise.all([
+      this.refreshMe(generation),
+      this.refreshAgentOptions(generation),
+      this.refreshConversations(generation),
+      this.refreshMemories(generation),
+    ]);
+  }
+
+  private async initializeAuthentication(): Promise<void> {
+    const generation = ++this.authGeneration;
+    this.authStatus = 'checking';
+    this.authError = null;
     try {
-      this.me = await this.client.me();
+      const session = await initializeAuthSession();
+      if (generation !== this.authGeneration || !this.isConnected) return;
+      if (!session) {
+        this.authSession = null;
+        this.authStatus = 'signed-out';
+        return;
+      }
+      this.authSession = session;
+      this.authStatus = 'signed-in';
+      this.loadAuthenticatedState();
+    } catch (error) {
+      uiLogger.error('Authentication initialization failed', error);
+      if (generation !== this.authGeneration || !this.isConnected) return;
+      this.authSession = null;
+      this.authError = 'Authentication could not be initialized. Check the Entra configuration and retry.';
+      this.authStatus = 'error';
+    }
+  }
+
+  private signInToApplication = async (): Promise<void> => {
+    if (this.authStatus === 'signing-in') return;
+    const generation = ++this.authGeneration;
+    this.authStatus = 'signing-in';
+    this.authError = null;
+    try {
+      const session = await signIn();
+      if (generation !== this.authGeneration || !this.isConnected) return;
+      this.authSession = session;
+      this.authStatus = 'signed-in';
+      this.loadAuthenticatedState();
+    } catch (error) {
+      uiLogger.error('Interactive sign-in failed', error);
+      if (generation !== this.authGeneration || !this.isConnected) return;
+      this.authSession = null;
+      this.authError = 'Sign-in did not complete. Close any blocked popup and try again.';
+      this.authStatus = 'signed-out';
+    }
+  };
+
+  private signOutOfApplication = async (): Promise<void> => {
+    try {
+      await signOut();
+      ++this.authGeneration;
+      ++this.identityGeneration;
+      this.cancelActiveChat();
+      this.clearUserScopedState();
+      this.authSession = null;
+      this.authError = null;
+      this.authStatus = 'signed-out';
+    } catch (error) {
+      uiLogger.error('Sign-out failed', error);
+      this.showToast('Sign-out did not complete. Try again.');
+    }
+  };
+
+  private async refreshMe(generation = this.identityGeneration): Promise<void> {
+    try {
+      const me = await this.client.me();
+      if (generation === this.identityGeneration) this.me = me;
     } catch (e) {
       uiLogger.error('me() failed', e);
-      this.me = null;
+      if (generation === this.identityGeneration) this.me = null;
     }
   }
 
-  private async refreshConversations(): Promise<void> {
+  private async refreshConversations(generation = this.identityGeneration): Promise<void> {
+    if (generation === this.identityGeneration && this.conversations.length === 0) {
+      this.conversationsStatus = 'loading';
+    }
     try {
-      this.conversations = await this.client.listConversations();
+      const conversations = await this.client.listConversations();
+      if (generation === this.identityGeneration) {
+        this.conversations = conversations;
+        this.conversationsStatus = 'ready';
+      }
     } catch (e) {
       uiLogger.error('listConversations failed', e);
+      if (generation === this.identityGeneration) {
+        this.conversations = [];
+        this.conversationsStatus = 'error';
+      }
     }
   }
 
-  private async refreshMemories(): Promise<void> {
+  private async refreshAgentOptions(generation = this.identityGeneration): Promise<void> {
     try {
-      this.memories = await this.client.listMemories();
+      const capabilities = await this.client.getAgentCapabilities();
+      if (generation !== this.identityGeneration) return;
+      this.agentOptions = capabilities.agents.filter((agent) => agent.available);
+      if (!this.agentOptions.some((agent) => agent.agent_type === this.agentType)) {
+        const first = this.agentOptions[0];
+        if (first) this.agentType = first.agent_type;
+      }
+    } catch (e) {
+      uiLogger.error('getAgentCapabilities failed', e);
+      if (generation === this.identityGeneration) this.agentOptions = [];
+    }
+  }
+
+  private async refreshMemories(generation = this.identityGeneration): Promise<void> {
+    if (generation === this.identityGeneration && this.memories.length === 0) {
+      this.memoriesStatus = 'loading';
+    }
+    try {
+      const memories = await this.client.listMemories();
+      if (generation === this.identityGeneration) {
+        this.memories = memories;
+        this.memoriesStatus = 'ready';
+      }
     } catch (e) {
       uiLogger.error('listMemories failed', e);
+      if (generation === this.identityGeneration) {
+        this.memories = [];
+        this.memoriesStatus = 'error';
+      }
     }
   }
 
-  protected updated(changed: PropertyValues): void {
-    if (changed.has('turns')) {
-      const main = this.renderRoot.querySelector('main');
-      if (main) main.scrollTop = main.scrollHeight;
+  private scheduleRelativeClock(): void {
+    if (!this.isConnected) return;
+    if (this.relativeClockTimer) clearTimeout(this.relativeClockTimer);
+    const now = Date.now();
+    const hasRecentTurn = this.turns.some((turn) => {
+      if (!turn.createdAt) return false;
+      const timestamp = Date.parse(turn.createdAt);
+      return Number.isFinite(timestamp) && now - timestamp < 60_000;
+    });
+    this.relativeClockTimer = window.setTimeout(() => {
+      this.relativeClock = Date.now();
+      this.scheduleRelativeClock();
+    }, hasRecentTurn ? 1000 : 60_000);
+  }
+
+  private nextTurnId(): string {
+    this.turnSequence += 1;
+    return `turn-${this.turnSequence}`;
+  }
+
+  private copyTurn = async (turn: ChatTurn): Promise<void> => {
+    if (!navigator.clipboard) {
+      this.showToast('Clipboard access is unavailable');
+      return;
     }
+    try {
+      const text = turn.text.replace(
+        /【\d+:([^†】]+)†([^】]+)】/g,
+        (_marker, refId: string, sourceName: string) => {
+          const index = turn.citations.findIndex(
+            (citation) =>
+              citation.ref_id === refId || citation.source_name === sourceName,
+          );
+          return index >= 0 ? `[${index + 1}]` : `[${sourceName}]`;
+        },
+      );
+      await navigator.clipboard.writeText(text);
+      this.showToast('Message copied');
+    } catch (error) {
+      uiLogger.error('copy message failed', error);
+      this.showToast('Message could not be copied');
+    }
+  };
+
+  private setFeedback(turn: ChatTurn, feedback: 'up' | 'down'): void {
+    turn.feedback = turn.feedback === feedback ? undefined : feedback;
+    this.turns = [...this.turns];
   }
 
-  private renderMarkdown(text: string) {
-    const raw = marked.parse(text, { async: false }) as string;
-    return unsafeHTML(DOMPurify.sanitize(raw));
+  private switchMockUser(userId: string): void {
+    if (userId === this.mockUser) return;
+
+    const generation = ++this.identityGeneration;
+    this.cancelActiveChat();
+    this.mockUser = userId;
+    setMockUserId(userId);
+    this.clearUserScopedState();
+    void Promise.all([
+      this.refreshMe(generation),
+      this.refreshAgentOptions(generation),
+      this.refreshConversations(generation),
+      this.refreshMemories(generation),
+    ]);
   }
 
-  private onMockUserChange(e: Event): void {
-    const id = (e.target as HTMLSelectElement).value;
-    this.mockUser = id;
-    setMockUserId(id);
-    // New identity → fresh conversation + reload that user's memory layers.
-    this.newChat();
-    void this.refreshMe();
-    void this.refreshConversations();
-    void this.refreshMemories();
+  private clearUserScopedState(): void {
+    this.conversationId = null;
+    this.turns = [];
+    this.conversations = [];
+    this.agentOptions = [];
+    this.memories = [];
+    this.conversationsStatus = 'loading';
+    this.memoriesStatus = 'loading';
+    this.memoryQuery = '';
+    this.searchResults = null;
+    this.selectedMemory = null;
+    this.memorisedIds = new Set();
+    this.profileOpen = false;
+    this.profile = null;
+    this.profileDraft = '';
+    this.me = null;
+    this.busy = false;
+    this.toolNames.clear();
+    this.processor = new A2UIProcessor();
   }
 
   private toggleTheme(): void {
@@ -526,86 +415,183 @@ export class NativeApp extends LitElement {
     this.applyTheme();
   }
 
-  private setRag(mode: RagMode): void {
-    this.ragMode = mode;
+  private chooseAgent(next: AgentType): void {
+    if (next === this.agentType) return;
+    if (this.conversationId && !window.confirm('Changing the runtime starts a new thread. Continue?')) {
+      this.requestUpdate();
+      return;
+    }
+    if (this.conversationId) this.newChat();
+    this.agentType = next;
+  }
+
+  private cancelActiveChat(): number {
+    const generation = ++this.chatGeneration;
+    this.chatAbort?.abort();
+    this.chatAbort = undefined;
+    this.busy = false;
+    return generation;
   }
 
   private newChat = (): void => {
-    this.threadId = null;
+    this.cancelActiveChat();
+    this.conversationId = null;
     this.turns = [];
+    this.toolNames.clear();
+    this.processor = new A2UIProcessor();
     this.selectedMemory = null;
+    if (!THREAD_RAIL_DESKTOP.matches) this.sidebarOpen = false;
   };
+
+  private toggleSidebar(): void {
+    const open = !this.sidebarOpen;
+    this.sidebarOpen = open;
+    if (open && !THREAD_RAIL_DESKTOP.matches) this.memoryPanelOpen = false;
+  }
+
+  private toggleMemoryPanel(): void {
+    const open = !this.memoryPanelOpen;
+    this.memoryPanelOpen = open;
+    if (open && !THREAD_RAIL_DESKTOP.matches) this.sidebarOpen = false;
+  }
+
+  private selectMemory(memory: MemoryRow): void {
+    this.selectedMemory = memory;
+    if (!MEMORY_RAIL_DESKTOP.matches) this.memoryPanelOpen = true;
+    if (!THREAD_RAIL_DESKTOP.matches) this.sidebarOpen = false;
+  }
+
+  private openConversationFromMemory(id: string): void {
+    void this.openConversation(id);
+    if (!MEMORY_RAIL_DESKTOP.matches) this.memoryPanelOpen = false;
+  }
+
+  private onAppKeydown(e: KeyboardEvent): void {
+    if (this.profileOpen && e.key === 'Tab') {
+      const drawer = this.renderRoot.querySelector<HTMLElement>('.profile-drawer');
+      const focusable = drawer
+        ? Array.from(
+            drawer.querySelectorAll<HTMLElement>(
+              'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])',
+            ),
+          )
+        : [];
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (first && last) {
+        const active = this.shadowRoot?.activeElement;
+        if (e.shiftKey && (active === first || !drawer?.contains(active ?? null))) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && active === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+      return;
+    }
+
+    if (e.key !== 'Escape') return;
+    if (this.profileOpen) {
+      this.closeProfile();
+      return;
+    }
+    if (this.memoryPanelOpen && !MEMORY_RAIL_DESKTOP.matches) {
+      this.memoryPanelOpen = false;
+      return;
+    }
+    if (this.sidebarOpen && !THREAD_RAIL_DESKTOP.matches) {
+      this.sidebarOpen = false;
+    }
+  }
 
   // ---------------------------------------------------------------- history
   private async openConversation(id: string): Promise<void> {
+    const identityGeneration = this.identityGeneration;
+    const chatGeneration = this.cancelActiveChat();
     this.selectedMemory = null;
     try {
       const doc = await this.client.getConversation(id);
-      this.threadId = doc.id;
+      if (
+        identityGeneration !== this.identityGeneration ||
+        chatGeneration !== this.chatGeneration
+      ) return;
+      this.conversationId = doc.id;
       this.turns = (doc.messages ?? []).map((m) => ({
+        id: this.nextTurnId(),
         role: m.role === 'user' ? 'user' : 'assistant',
         text: m.content,
         surfaces: [],
+        createdAt: m.created_at,
+        usage: m.usage,
+        tools: [...new Set(m.tools ?? [])],
+        citations: m.citations ?? [],
       }));
-      const rag = doc.metadata?.rag_mode as RagMode | undefined;
-      if (rag === 'none' || rag === 'agentic' || rag === 'classic') this.ragMode = rag;
+      this.scheduleRelativeClock();
+      if (doc.metadata?.agent_type) this.agentType = doc.metadata.agent_type;
+      if (!THREAD_RAIL_DESKTOP.matches) this.sidebarOpen = false;
     } catch (e) {
       uiLogger.error('openConversation failed', e);
-      this.showToast('Could not open conversation');
+      this.showToast('Could not open thread');
     }
   }
 
-  private async renameConversation(ev: Event, c: ConversationSummary): Promise<void> {
-    ev.stopPropagation();
-    const title = window.prompt('Rename conversation', c.title ?? '')?.trim();
+  private async renameConversation(c: ConversationSummary): Promise<void> {
+    const title = window.prompt('Rename thread', c.title ?? '')?.trim();
     if (!title) return;
+    const generation = this.identityGeneration;
     try {
       await this.client.renameConversation(c.id, title);
-      await this.refreshConversations();
+      if (generation === this.identityGeneration) await this.refreshConversations(generation);
     } catch {
-      this.showToast('Rename failed');
+      if (generation === this.identityGeneration) this.showToast('Thread was not renamed');
     }
   }
 
-  private async deleteConversation(ev: Event, c: ConversationSummary): Promise<void> {
-    ev.stopPropagation();
-    if (!window.confirm(`Delete "${c.title ?? c.id}"? This also removes its memories.`)) return;
+  private async deleteConversation(c: ConversationSummary): Promise<void> {
+    if (!window.confirm(`Delete "${c.title ?? c.id}"? Its saved memory will also be removed.`)) return;
+    const generation = this.identityGeneration;
     try {
       await this.client.deleteConversation(c.id);
-      if (this.threadId === c.id) this.newChat();
-      await this.refreshConversations();
-      await this.refreshMemories();
+      if (generation !== this.identityGeneration) return;
+      if (this.conversationId === c.id) this.newChat();
+      await this.refreshConversations(generation);
+      await this.refreshMemories(generation);
     } catch {
-      this.showToast('Delete failed');
+      if (generation === this.identityGeneration) this.showToast('Thread was not deleted');
     }
   }
 
-  private async memorise(ev: Event, c: ConversationSummary): Promise<void> {
-    ev.stopPropagation();
+  private async memorise(c: ConversationSummary): Promise<void> {
+    const generation = this.identityGeneration;
     this.memorisedIds = new Set(this.memorisedIds).add(c.id);
     try {
       await this.client.createMemory(c.id, c.title);
-      await this.refreshMemories();
-      this.showToast('Conversation memorised');
+      if (generation !== this.identityGeneration) return;
+      await this.refreshMemories(generation);
+      this.showToast('Thread saved to memory');
     } catch {
+      if (generation !== this.identityGeneration) return;
       const next = new Set(this.memorisedIds);
       next.delete(c.id);
       this.memorisedIds = next;
-      this.showToast('Memorise failed');
+      this.showToast('Thread was not saved to memory');
     }
   }
 
   // ---------------------------------------------------------------- memory
   private runMemorySearch = async (): Promise<void> => {
+    const generation = this.identityGeneration;
     const q = this.memoryQuery.trim();
     if (!q) {
       this.searchResults = null;
       return;
     }
     try {
-      this.searchResults = await this.client.searchMemories(q);
+      const results = await this.client.searchMemories(q);
+      if (generation === this.identityGeneration) this.searchResults = results;
     } catch {
-      this.showToast('Memory search failed');
+      if (generation === this.identityGeneration) this.showToast('Memory search failed. Try again.');
     }
   };
 
@@ -614,28 +600,62 @@ export class NativeApp extends LitElement {
     this.searchResults = null;
   };
 
-  private async deleteMemory(ev: Event, m: MemoryRow): Promise<void> {
-    ev.stopPropagation();
+  private async deleteMemory(m: MemoryRow): Promise<void> {
+    const generation = this.identityGeneration;
     try {
       await this.client.deleteMemory(m.id);
+      if (generation !== this.identityGeneration) return;
       if (this.selectedMemory?.id === m.id) this.selectedMemory = null;
-      await this.refreshMemories();
+      await this.refreshMemories(generation);
       await this.runMemorySearch();
+      this.showToast('Memory deleted');
     } catch {
-      this.showToast('Delete failed');
+      if (generation === this.identityGeneration) this.showToast('Memory was not deleted');
     }
   }
 
   // ---------------------------------------------------------------- profile
-  private openProfile = async (): Promise<void> => {
+  private openProfile = async (trigger?: HTMLElement): Promise<void> => {
+    const generation = this.identityGeneration;
+    const activeElement = this.shadowRoot?.activeElement;
+    this.profileTrigger =
+      trigger ?? (activeElement instanceof HTMLElement ? activeElement : undefined);
     try {
-      this.profile = await this.client.getProfile();
-      this.profileDraft = JSON.stringify(this.profileToSections(this.profile), null, 2);
+      const profile = await this.client.getProfile();
+      if (generation !== this.identityGeneration) return;
+      this.profile = profile;
+      this.profileDraft = JSON.stringify(this.profileToSections(profile), null, 2);
       this.profileOpen = true;
+      if (!THREAD_RAIL_DESKTOP.matches) this.sidebarOpen = false;
+      await this.updateComplete;
+      const drawer = this.renderRoot.querySelector<ProfileDrawer>('profile-drawer');
+      await drawer?.updateComplete;
+      drawer?.querySelector<HTMLElement>('.profile-close')?.focus();
     } catch {
-      this.showToast('Could not load profile');
+      if (generation === this.identityGeneration) this.showToast('Could not load profile');
     }
   };
+
+  private closeProfile(): void {
+    this.profileOpen = false;
+    void this.updateComplete.then(() => {
+      const trigger = this.profileTrigger;
+      const fallback = this.renderRoot.querySelector<HTMLElement>('.thread-toggle');
+      const triggerStyle = trigger ? getComputedStyle(trigger) : undefined;
+      const threadRail = trigger?.closest('.thread-rail');
+      const memoryRail = trigger?.closest('.memory-rail');
+      const containingRailIsAvailable =
+        (!threadRail || !threadRail.classList.contains('collapsed') || THREAD_RAIL_DESKTOP.matches)
+        && (!memoryRail || !memoryRail.classList.contains('collapsed'));
+      const triggerIsAvailable = trigger?.isConnected
+        && containingRailIsAvailable
+        && triggerStyle?.display !== 'none'
+        && triggerStyle?.visibility === 'visible'
+        && trigger.getClientRects().length > 0;
+      if (trigger && triggerIsAvailable) trigger.focus();
+      else fallback?.focus();
+    });
+  }
 
   private profileToSections(p: ProfileDoc): Record<string, unknown> {
     return {
@@ -649,6 +669,7 @@ export class NativeApp extends LitElement {
   }
 
   private saveProfile = async (): Promise<void> => {
+    const generation = this.identityGeneration;
     let sections: Record<string, unknown>;
     try {
       sections = JSON.parse(this.profileDraft);
@@ -657,71 +678,127 @@ export class NativeApp extends LitElement {
       return;
     }
     try {
-      this.profile = await this.client.putProfile(sections);
+      const profile = await this.client.putProfile(sections);
+      if (generation !== this.identityGeneration) return;
+      this.profile = profile;
       this.profileDraft = JSON.stringify(this.profileToSections(this.profile), null, 2);
       this.showToast('Profile saved');
     } catch {
-      this.showToast('Save failed');
+      if (generation === this.identityGeneration) this.showToast('Profile was not saved');
     }
   };
 
   private generateProfile = async (): Promise<void> => {
-    if (!this.threadId) {
-      this.showToast('Open or start a conversation first');
+    if (!this.conversationId) {
+      this.showToast('Open or start a thread first');
       return;
     }
+    const generation = this.identityGeneration;
+    const conversationId = this.conversationId;
     try {
-      const res = await this.client.generateProfile(this.threadId);
+      const res = await this.client.generateProfile(conversationId);
+      if (generation !== this.identityGeneration) return;
       if (res.updated && res.profile) {
         this.profile = res.profile;
         this.profileDraft = JSON.stringify(this.profileToSections(res.profile), null, 2);
-        this.showToast('Profile generated from conversation');
+        this.showToast('Profile generated from thread');
       } else {
         this.showToast('No new profile facts found');
       }
     } catch {
-      this.showToast('Generate failed');
+      if (generation === this.identityGeneration) this.showToast('Profile was not generated');
     }
   };
 
   private clearProfile = async (): Promise<void> => {
     if (!window.confirm('Delete the entire profile for this user?')) return;
+    const generation = this.identityGeneration;
     try {
       await this.client.deleteProfile();
-      this.profile = await this.client.getProfile();
+      if (generation !== this.identityGeneration) return;
+      const profile = await this.client.getProfile();
+      if (generation !== this.identityGeneration) return;
+      this.profile = profile;
       this.profileDraft = JSON.stringify(this.profileToSections(this.profile), null, 2);
       this.showToast('Profile cleared');
     } catch {
-      this.showToast('Clear failed');
+      if (generation === this.identityGeneration) this.showToast('Profile was not cleared');
     }
   };
 
   // ---------------------------------------------------------------- chat
   private send = async (): Promise<void> => {
     const text = this.input.trim();
-    if (!text || this.busy) return;
+    const agentAvailable = this.agentOptions.some(
+      (agent) => agent.available && agent.agent_type === this.agentType,
+    );
+    if (!text || this.busy || !agentAvailable) return;
     this.input = '';
     this.busy = true;
     this.selectedMemory = null;
 
-    const history = this.turns.map((t) => ({ role: t.role, content: t.text }));
-    const userTurn: ChatTurn = { role: 'user', text, surfaces: [] };
-    const assistantTurn: ChatTurn = { role: 'assistant', text: '', surfaces: [] };
+    const createdAt = new Date().toISOString();
+    const userTurn: ChatTurn = {
+      id: this.nextTurnId(),
+      role: 'user',
+      text,
+      surfaces: [],
+      createdAt,
+      tools: [],
+      citations: [],
+    };
+    const assistantTurn: ChatTurn = {
+      id: this.nextTurnId(),
+      role: 'assistant',
+      text: '',
+      surfaces: [],
+      createdAt,
+      tools: [],
+      citations: [],
+    };
+    this.toolNames.clear();
     this.turns = [...this.turns, userTurn, assistantTurn];
+    this.scheduleRelativeClock();
 
-    const messages = [...history, { role: 'user', content: text }];
-    const isNew = this.threadId === null;
+    const isNew = this.conversationId === null;
+    const identityGeneration = this.identityGeneration;
+    const chatGeneration = ++this.chatGeneration;
+    const controller = new AbortController();
+    this.chatAbort = controller;
 
     try {
-      await this.client.chat(messages, this.threadId, this.ragMode, {
-        onSessionId: (id) => (this.threadId = id),
-        onEvent: (ev) => this.handleEvent(ev, assistantTurn),
-      });
+      await this.client.chat(text, this.conversationId, this.agentType, {
+        onConversationId: (id) => {
+          if (
+            identityGeneration === this.identityGeneration &&
+            chatGeneration === this.chatGeneration
+          ) this.conversationId = id;
+        },
+        onEvent: (ev) => {
+          if (
+            identityGeneration === this.identityGeneration &&
+            chatGeneration === this.chatGeneration
+          ) this.handleEvent(ev, assistantTurn);
+        },
+      }, controller.signal);
     } catch (e) {
-      assistantTurn.error = String(e);
+      if (
+        identityGeneration === this.identityGeneration &&
+        chatGeneration === this.chatGeneration &&
+        !controller.signal.aborted
+      ) {
+        assistantTurn.error = String(e);
+      }
     } finally {
+      if (this.chatAbort === controller) this.chatAbort = undefined;
+      if (
+        identityGeneration !== this.identityGeneration ||
+        chatGeneration !== this.chatGeneration
+      ) return;
       this.busy = false;
+      assistantTurn.createdAt = new Date().toISOString();
       this.turns = [...this.turns];
+      this.scheduleRelativeClock();
       // A turn was persisted server-side; refresh history (new convo appears / updates).
       void this.refreshConversations();
       if (isNew) void this.refreshMe();
@@ -736,13 +813,28 @@ export class NativeApp extends LitElement {
       case 'TOOL_CALL_START':
         if (ev.toolCallId && ev.toolCallName) {
           this.toolNames.set(ev.toolCallId, ev.toolCallName);
+          if (!turn.tools.includes(ev.toolCallName)) turn.tools.push(ev.toolCallName);
         }
         break;
       case 'TOOL_CALL_RESULT': {
         const name = ev.toolCallId ? this.toolNames.get(ev.toolCallId) : undefined;
-        if (name && ev.content) this.renderToolSurface(name, ev.content, turn);
+        if (ev.content) {
+          this.mergeCitations(turn, extractToolCitations(ev.content));
+          if (name) this.renderToolSurface(name, ev.content, turn);
+        }
         break;
       }
+      case 'TOOL_CALL_END':
+        if (ev.toolCallId) this.toolNames.delete(ev.toolCallId);
+        break;
+      case 'CUSTOM':
+        if (ev.name === 'agent_usage') {
+          const usage = this.readUsage(ev.value);
+          if (usage) turn.usage = usage;
+        } else if (ev.name === 'agent_citations') {
+          this.mergeCitations(turn, parseCitations(ev.value));
+        }
+        break;
       case 'RUN_ERROR':
         turn.error = ev.message ?? 'Run error';
         break;
@@ -750,6 +842,57 @@ export class NativeApp extends LitElement {
         break;
     }
     this.turns = [...this.turns];
+  }
+
+  private readUsage(value: unknown): TokenUsage | undefined {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const usage = value as Record<string, unknown>;
+    const result: TokenUsage = {};
+    if (
+      typeof usage.input_tokens === 'number' &&
+      Number.isFinite(usage.input_tokens) &&
+      usage.input_tokens >= 0
+    ) {
+      result.input_tokens = usage.input_tokens;
+    }
+    if (
+      typeof usage.output_tokens === 'number' &&
+      Number.isFinite(usage.output_tokens) &&
+      usage.output_tokens >= 0
+    ) {
+      result.output_tokens = usage.output_tokens;
+    }
+    if (
+      typeof usage.cached_tokens === 'number' &&
+      Number.isFinite(usage.cached_tokens) &&
+      usage.cached_tokens >= 0
+    ) {
+      result.cached_tokens = usage.cached_tokens;
+    }
+    return Object.keys(result).length ? result : undefined;
+  }
+
+  private mergeCitations(turn: ChatTurn, citations: CitationSource[]): void {
+    const positions = new Map(
+      turn.citations.map((citation, index) => [
+        `${citation.ref_id}\u0000${citation.source_name}`,
+        index,
+      ]),
+    );
+    for (const citation of citations) {
+      const key = `${citation.ref_id}\u0000${citation.source_name}`;
+      const existingIndex = positions.get(key);
+      if (existingIndex !== undefined) {
+        const existing = turn.citations[existingIndex];
+        if (!existing.url && citation.url) existing.url = citation.url;
+        if (existing.search_idx == null && citation.search_idx != null) {
+          existing.search_idx = citation.search_idx;
+        }
+        continue;
+      }
+      positions.set(key, turn.citations.length);
+      turn.citations.push(citation);
+    }
   }
 
   private renderToolSurface(toolName: string, content: string, turn: ChatTurn): void {
@@ -760,261 +903,279 @@ export class NativeApp extends LitElement {
     const surface = this.processor.getSurface(surfaceId);
     if (surface) turn.surfaces = [...turn.surfaces, surface];
   }
-
-  private onKeydown(e: KeyboardEvent): void {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      void this.send();
-    }
-  }
-
   // ---------------------------------------------------------------- render
   render() {
-    const name = (this.me?.display_name as string) ?? this.mockUser;
-    const initials = (this.me?.initials as string) ?? this.mockUser.slice(5, 7).toUpperCase();
+    if (getConfig().authMode === 'entra' && this.authStatus !== 'signed-in') {
+      return this.renderAuthentication();
+    }
+
+    const name = this.currentUserName;
+    const email = this.currentUserEmail;
+    const initials = (this.me?.initials as string)
+      ?? name
+        .split(/\s+/)
+        .map((part) => part[0])
+        .join('')
+        .slice(0, 2)
+        .toUpperCase();
+    const activeConversation = this.conversationId
+      ? this.conversations.find((conversation) => conversation.id === this.conversationId)
+      : undefined;
+    const title = activeConversation?.title
+      ?? (this.conversationId ? 'Active support thread' : 'New support thread');
+
     return html`
-      <header>
-        <button class="icon-btn" @click=${() => (this.sidebarOpen = !this.sidebarOpen)} title="Toggle sidebar">
-          <span class="material-symbols-outlined">menu</span>
-        </button>
-        <span class="material-symbols-outlined">support_agent</span>
-        <span class="title">
-          Support Chat<span class="sub">signed in as ${name}</span>
-        </span>
-        <button class="ctl" @click=${this.newChat} title="Start a new chat">
-          <span class="material-symbols-outlined">add</span> New
-        </button>
-        ${getConfig().authMode === 'mock'
-          ? html`<select .value=${this.mockUser} @change=${this.onMockUserChange} title="Switch mock user">
-              ${MOCK_USERS.map((u) => html`<option value=${u} ?selected=${u === this.mockUser}>${u}</option>`)}
-            </select>`
-          : html`<button class="ctl" @click=${() => void signOut()} title="Sign out">
-              <span class="material-symbols-outlined">logout</span> Sign out
-            </button>`}
-        <button class="ctl" @click=${this.toggleTheme} title="Toggle theme">
+      <div class="app-shell" @keydown=${this.onAppKeydown}>
+        <header class="app-header">
+          <button
+            class="icon-button thread-toggle"
+            type="button"
+            aria-label=${this.sidebarOpen ? 'Hide thread history' : 'Show thread history'}
+            aria-controls="thread-panel"
+            aria-expanded=${this.sidebarOpen}
+            @click=${this.toggleSidebar}
+          >
+            <span class="material-symbols-outlined">menu</span>
+          </button>
+
+          <div class="brand" aria-label="Memory Thread">
+            <span class="brand-mark" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </span>
+            <span class="brand-name">Memory Thread</span>
+          </div>
+
+          <div class="header-actions">
+            <a
+              class="header-button"
+              href="${REPOSITORY_URL}/tree/main/docs"
+              target="_blank"
+              rel="noreferrer"
+              aria-label="Documentation"
+              title="Documentation"
+            >
+              <span class="material-symbols-outlined">description</span>
+            </a>
+            <a
+              class="header-button"
+              href="${REPOSITORY_URL}#current-architecture"
+              target="_blank"
+              rel="noreferrer"
+              aria-label="Architecture"
+              title="Architecture"
+            >
+              <span class="material-symbols-outlined">account_tree</span>
+            </a>
+            <a
+              class="header-button"
+              href=${REPOSITORY_URL}
+              target="_blank"
+              rel="noreferrer"
+              aria-label="GitHub source"
+              title="GitHub source"
+            >
+              <svg class="github-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.69c-2.78.61-3.37-1.19-3.37-1.19-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.04 1.53 1.04.9 1.53 2.35 1.09 2.92.83.09-.65.35-1.09.64-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.64 0 0 .84-.27 2.75 1.02A9.58 9.58 0 0 1 12 7.01c.85 0 1.7.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.37.2 2.39.1 2.64.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.86v2.58c0 .27.18.58.69.48A10 10 0 0 0 12 2Z"
+              ></path>
+              </svg>
+            </a>
+            <button
+              class="header-button"
+              type="button"
+              aria-label=${this.theme === 'light' ? 'Use dark theme' : 'Use light theme'}
+              title=${this.theme === 'light' ? 'Dark theme' : 'Light theme'}
+              @click=${this.toggleTheme}
+            >
+              <span class="material-symbols-outlined">
+              ${this.theme === 'light' ? 'dark_mode' : 'light_mode'}
+              </span>
+            </button>
+            <span
+              class="header-separator"
+              role="separator"
+              aria-orientation="vertical"
+            ></span>
+            <button
+              class="header-button"
+              type="button"
+              aria-label=${this.memoryPanelOpen ? 'Hide saved memory' : 'Show saved memory'}
+              aria-controls="memory-panel"
+              aria-expanded=${this.memoryPanelOpen}
+              title="Saved memory"
+              @click=${this.toggleMemoryPanel}
+            >
+              <span class="material-symbols-outlined">database</span>
+            </button>
+          </div>
+        </header>
+
+        <div class="body">
+          <conversation-sidebar
+            .open=${this.sidebarOpen}
+            .conversations=${this.conversations}
+            .status=${this.conversationsStatus}
+            .memorisedIds=${this.memorisedIds}
+            .activeConversationId=${this.conversationId}
+            .initials=${initials}
+            .userName=${name}
+            .userEmail=${email}
+            .mockUser=${this.mockUser}
+            .actions=${this.sidebarActions}
+          ></conversation-sidebar>
+
+          <section class="chat-col" aria-labelledby="conversation-title">
+            <header class="conversation-header">
+              <h1 class="conversation-title" id="conversation-title">${title}</h1>
+            </header>
+
+          <main
+            class="conversation-main"
+            aria-label="Conversation"
+            aria-live="polite"
+            aria-relevant="additions text"
+          >
+            <chat-transcript
+              .turns=${this.turns}
+              .busy=${this.busy}
+              .agentType=${this.agentType}
+              .agentOptions=${this.agentOptions}
+              .userName=${name}
+              .clock=${this.relativeClock}
+              .actions=${this.transcriptActions}
+            ></chat-transcript>
+          </main>
+          <chat-composer
+            .input=${this.input}
+            .busy=${this.busy}
+            .conversationActive=${this.conversationId !== null}
+            .agentType=${this.agentType}
+            .agentOptions=${this.agentOptions}
+            .actions=${this.composerActions}
+          ></chat-composer>
+          </section>
+
+          <memory-rail
+            .open=${this.memoryPanelOpen}
+            .memories=${this.memories}
+            .searchResults=${this.searchResults}
+            .selectedMemory=${this.selectedMemory}
+            .status=${this.memoriesStatus}
+            .query=${this.memoryQuery}
+            .actions=${this.memoryActions}
+          ></memory-rail>
+        </div>
+
+        ${this.sidebarOpen
+          ? html`<button
+            class="panel-scrim thread-scrim"
+            type="button"
+            aria-label="Close thread history"
+            @click=${() => (this.sidebarOpen = false)}
+          ></button>`
+          : nothing}
+        ${this.memoryPanelOpen
+          ? html`<button
+            class="panel-scrim memory-scrim"
+            type="button"
+            aria-label="Close saved memory"
+            @click=${() => (this.memoryPanelOpen = false)}
+          ></button>`
+          : nothing}
+
+        <profile-drawer
+          .open=${this.profileOpen}
+          .profile=${this.profile}
+          .draft=${this.profileDraft}
+          .actions=${this.profileActions}
+        ></profile-drawer>
+        ${this.toast
+          ? html`<div class="toast" role="status" aria-live="polite">${this.toast}</div>`
+          : nothing}
+      </div>
+    `;
+  }
+
+  private renderAuthentication() {
+    const checking = this.authStatus === 'checking';
+    const signingIn = this.authStatus === 'signing-in';
+    return html`
+      <main class="auth-shell" aria-labelledby="auth-title">
+        <button
+          class="auth-theme-toggle"
+          type="button"
+          aria-label=${this.theme === 'light' ? 'Use dark theme' : 'Use light theme'}
+          title=${this.theme === 'light' ? 'Dark theme' : 'Light theme'}
+          @click=${this.toggleTheme}
+        >
           <span class="material-symbols-outlined">
             ${this.theme === 'light' ? 'dark_mode' : 'light_mode'}
           </span>
         </button>
-      </header>
 
-      <div class="body">
-        ${this.renderSidebar(initials, name)}
-        <div class="chat-col">
-          <main>${this.renderMain()}</main>
-          <footer>
-            <div class="rag-toggle" title="Knowledge-base retrieval mode">
-              ${(['none', 'agentic', 'classic'] as RagMode[]).map(
-                (m) => html`<button
-                  class=${this.ragMode === m ? 'on' : ''}
-                  @click=${() => this.setRag(m)}
-                >
-                  ${m === 'none' ? 'Off' : m[0].toUpperCase() + m.slice(1)}
-                </button>`,
-              )}
-            </div>
-            <textarea
-              rows="1"
-              placeholder="Type a message…"
-              .value=${this.input}
-              @input=${(e: Event) => (this.input = (e.target as HTMLTextAreaElement).value)}
-              @keydown=${this.onKeydown}
-            ></textarea>
-            <button class="send" ?disabled=${this.busy || !this.input.trim()} @click=${this.send}>
-              Send
-            </button>
-          </footer>
-        </div>
-      </div>
-
-      ${this.renderProfileDrawer()}
-      ${this.toast ? html`<div class="toast">${this.toast}</div>` : nothing}
-    `;
-  }
-
-  private renderSidebar(initials: string, name: string) {
-    const mems = this.searchResults ?? this.memories;
-    return html`
-      <aside class="sidebar ${this.sidebarOpen ? '' : 'collapsed'}">
-        <div class="side-scroll">
-          <div class="side-section-title">
-            <span class="material-symbols-outlined">history</span> History
-            <span class="count">${this.conversations.length}</span>
+        <section class="auth-card" aria-busy=${checking || signingIn}>
+          <div class="auth-brand">
+            <span class="brand-mark" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </span>
+            <span class="brand-name">Memory Thread</span>
           </div>
-          ${this.conversations.length === 0
-            ? html`<div class="side-empty">No conversations yet.</div>`
-            : this.conversations.map((c) => this.renderConversation(c))}
 
-          <div class="side-section-title">
-            <span class="material-symbols-outlined">psychology</span> Memory
-            <span class="count">${this.memories.length}</span>
+          <div class="auth-heading">
+            <p class="auth-eyebrow">Grounded support workspace</p>
+            <h1 id="auth-title">${checking ? 'Checking your session' : 'Welcome back'}</h1>
+            <p>
+              ${checking
+                ? 'Confirming your Microsoft Entra ID session before loading the workspace.'
+                : 'Sign in with your organizational account to access your conversations and memory.'}
+            </p>
           </div>
-          <div class="mem-search">
-            <input
-              placeholder="Semantic search…"
-              .value=${this.memoryQuery}
-              @input=${(e: Event) => (this.memoryQuery = (e.target as HTMLInputElement).value)}
-              @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && this.runMemorySearch()}
-            />
-            <button class="icon-btn" @click=${this.runMemorySearch} title="Search">
-              <span class="material-symbols-outlined">search</span>
-            </button>
-            ${this.searchResults
-              ? html`<button class="icon-btn" @click=${this.clearMemorySearch} title="Clear">
-                  <span class="material-symbols-outlined">close</span>
-                </button>`
-              : nothing}
-          </div>
-          ${mems.length === 0
-            ? html`<div class="side-empty">
-                ${this.searchResults ? 'No matches.' : 'No memories yet — use “Memorise”.'}
+
+          ${checking
+            ? html`<div class="auth-progress" role="status">
+                <span class="auth-spinner" aria-hidden="true"></span>
+                <span>Connecting securely...</span>
               </div>`
-            : mems.map((m) => this.renderMemoryItem(m))}
-        </div>
+            : html`
+                ${this.authError
+                  ? html`<div class="auth-error" role="alert">
+                      <span class="material-symbols-outlined" aria-hidden="true">error</span>
+                      <span>${this.authError}</span>
+                    </div>`
+                  : nothing}
+                <button
+                  class="entra-sign-in"
+                  type="button"
+                  ?disabled=${signingIn}
+                  @click=${this.signInToApplication}
+                >
+                  <span class="microsoft-mark" aria-hidden="true">
+                    <span></span><span></span><span></span><span></span>
+                  </span>
+                  <span>${signingIn ? 'Signing in...' : 'Sign in with Microsoft Entra ID'}</span>
+                </button>
+              `}
 
-        <div class="user-card" @click=${this.openProfile} title="Open profile">
-          <div class="avatar">${initials}</div>
-          <div class="li-main">
-            <div class="li-title">${name}</div>
-            <div class="li-sub">View profile</div>
-          </div>
-          <span class="material-symbols-outlined">tune</span>
-        </div>
-      </aside>
-    `;
-  }
-
-  private renderConversation(c: ConversationSummary) {
-    const memorised = this.memorisedIds.has(c.id);
-    return html`
-      <div
-        class="list-item ${this.threadId === c.id ? 'active' : ''}"
-        @click=${() => this.openConversation(c.id)}
-      >
-        <div class="li-main">
-          <div class="li-title">${c.title ?? 'Untitled'}</div>
-          <div class="li-sub">${c.message_count ?? 0} msgs</div>
-        </div>
-        <div class="row-actions">
-          <button
-            class="icon-btn"
-            title=${memorised ? 'Memorised' : 'Memorise'}
-            @click=${(e: Event) => this.memorise(e, c)}
-          >
-            <span class="material-symbols-outlined">${memorised ? 'bookmark_added' : 'bookmark_add'}</span>
-          </button>
-          <button class="icon-btn" title="Rename" @click=${(e: Event) => this.renameConversation(e, c)}>
-            <span class="material-symbols-outlined">edit</span>
-          </button>
-          <button class="icon-btn" title="Delete" @click=${(e: Event) => this.deleteConversation(e, c)}>
-            <span class="material-symbols-outlined">delete</span>
-          </button>
-        </div>
-      </div>
-    `;
-  }
-
-  private renderMemoryItem(m: MemoryRow) {
-    return html`
-      <div
-        class="list-item ${this.selectedMemory?.id === m.id ? 'active' : ''}"
-        @click=${() => (this.selectedMemory = m)}
-      >
-        <div class="li-main">
-          <div class="li-title">${m.source_title ?? 'Memory'}</div>
-          <div class="li-sub">${(m.summary ?? '').slice(0, 60)}…</div>
-        </div>
-        ${typeof m.similarity === 'number'
-          ? html`<span class="sim">${Math.round(m.similarity * 100)}%</span>`
-          : nothing}
-        <div class="row-actions">
-          <button class="icon-btn" title="Delete" @click=${(e: Event) => this.deleteMemory(e, m)}>
-            <span class="material-symbols-outlined">delete</span>
-          </button>
-        </div>
-      </div>
-    `;
-  }
-
-  private renderMain() {
-    if (this.selectedMemory) return this.renderMemoryDetail(this.selectedMemory);
-    if (this.turns.length === 0) {
-      return html`<div class="empty">
-        <p><strong>Ask about an order or our policies.</strong></p>
-        <p>Try: “Where is my order ORD-001?” or “What's your return policy?”</p>
-      </div>`;
-    }
-    return this.turns.map((t) => this.renderTurn(t));
-  }
-
-  private renderMemoryDetail(m: MemoryRow) {
-    return html`
-      <div class="mem-detail">
-        <h2>${m.source_title ?? 'Memory'}</h2>
-        <div class="meta">
-          from conversation ${m.conversation_id}
-          ${typeof m.similarity === 'number' ? `· ${Math.round(m.similarity * 100)}% match` : ''}
-          ${m.created_at ? `· ${new Date(m.created_at).toLocaleString()}` : ''}
-        </div>
-        <p>${m.summary}</p>
-        <div style="display:flex; gap:8px; margin-top:16px;">
-          <button class="ctl" @click=${() => this.openConversation(m.conversation_id)}>
-            Open conversation
-          </button>
-          <button class="ctl" @click=${() => (this.selectedMemory = null)}>Close</button>
-        </div>
-      </div>
-    `;
-  }
-
-  private renderTurn(t: ChatTurn) {
-    return html`
-      <div class="msg ${t.role}">
-        <div class="bubble">
-          ${t.role === 'assistant' ? this.renderMarkdown(t.text || '…') : t.text}
-        </div>
-        ${t.surfaces.length
-          ? html`<div class="surfaces">
-              ${t.surfaces.map((s) => html`<a2ui-surface .surface=${s}></a2ui-surface>`)}
-            </div>`
-          : nothing}
-        ${t.error ? html`<div class="err">⚠ ${t.error}</div>` : nothing}
-      </div>
-    `;
-  }
-
-  private renderProfileDrawer() {
-    if (!this.profileOpen) return nothing;
-    const version = this.profile?.version ?? 0;
-    return html`
-      <div class="drawer-scrim" @click=${() => (this.profileOpen = false)}></div>
-      <div class="drawer">
-        <header>
-          <span class="title">User Profile <span class="sub">v${version}</span></span>
-          <button class="icon-btn" @click=${() => (this.profileOpen = false)} title="Close">
-            <span class="material-symbols-outlined">close</span>
-          </button>
-        </header>
-        <div class="drawer-body">
-          <p class="field-note">
-            Learned automatically during chat, or generate from the current conversation.
-            Edit the JSON sections directly and save.
+          <p class="auth-footnote">
+            Access is restricted to authorized organizational accounts.
           </p>
-          <textarea
-            .value=${this.profileDraft}
-            @input=${(e: Event) => (this.profileDraft = (e.target as HTMLTextAreaElement).value)}
-          ></textarea>
-        </div>
-        <div class="actions">
-          <button class="send" @click=${this.saveProfile}>Save</button>
-          <button class="ctl" @click=${this.generateProfile} title="Extract from current conversation">
-            Generate
-          </button>
-          <button class="ctl" style="margin-left:auto" @click=${this.clearProfile}>Clear</button>
-        </div>
-      </div>
+        </section>
+      </main>
     `;
   }
+
+  private get currentUserName(): string {
+    const apiName = this.me?.display_name;
+    if (typeof apiName === 'string' && apiName.trim()) return apiName;
+    return this.authSession?.displayName || this.mockUser;
+  }
+
+  private get currentUserEmail(): string | null {
+    const apiEmail = this.me?.email;
+    if (typeof apiEmail === 'string' && apiEmail.trim()) return apiEmail;
+    return this.authSession?.username || null;
+  }
+
 }
 
 // Touch getConfig so tree-shaking keeps runtime config wiring available.

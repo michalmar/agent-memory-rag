@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+requiredVersions:
+    extensions:
+        azure.ai.agents: '>=1.0.0-beta.4'
+name: customer-support-maf-hosted
+services:
+    ai-project:
+        host: azure.ai.project
+        endpoint: ${FOUNDRY_PROJECT_ENDPOINT}
+    customer-support-maf-hosted:
+        project: src/customer-support-maf
+        host: azure.ai.agent
+        language: docker
+        image: agmem5df652acr.azurecr.io/customer-support-maf-hosted:dual-foundry-001
+        docker:
+            remoteBuild: true
+        uses:
+            - ai-project
+        container:
+            resources:
+                cpu: "0.5"
+                memory: 1Gi
+        description: Customer support agent implemented with Microsoft Agent Framework.
+        environmentVariables:
+            - name: AZURE_AI_MODEL_DEPLOYMENT_NAME
+              value: ${AZURE_AI_MODEL_DEPLOYMENT_NAME}
+            - name: IQ_CONNECTION_ID
+              value: ${IQ_CONNECTION_ID}
+            - name: IQ_MCP_ENDPOINT
+              value: ${IQ_MCP_ENDPOINT}
+            - name: APP_TOOL_GATEWAY_URL
+              value: ${APP_TOOL_GATEWAY_URL}
+            - name: APP_TOOL_GATEWAY_SCOPE
+              value: ${APP_TOOL_GATEWAY_SCOPE}
+        kind: hosted
+        name: customer-support-maf-hosted
+        protocols:
+            - protocol: responses
+              version: 2.0.0
+infra:
+    provider: microsoft.foundry

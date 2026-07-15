@@ -1,11 +1,12 @@
 // auth.ts — dual-mode auth. Mock header (X-Mock-User-ID) for local/demo; Entra ID
 // (MSAL Browser) for production. getAuthHeaders() returns the right header per mode.
 import type {
-  AuthenticationResult,
+  AccountInfo,
   PopupRequest,
   PublicClientApplication as PublicClientApplicationType,
   SilentRequest,
 } from '@azure/msal-browser';
+import { InteractionRequiredAuthError } from '@azure/msal-browser';
 
 export interface AppConfig {
   apiBaseUrl: string;
@@ -35,6 +36,19 @@ export function getConfig(): AppConfig {
 }
 
 const MOCK_KEY = 'mockUserId';
+export const AUTH_REQUIRED_EVENT = 'memory-thread:auth-required';
+
+export interface AuthSession {
+  displayName: string;
+  username: string;
+}
+
+export class AuthRequiredError extends Error {
+  constructor() {
+    super('An interactive sign-in is required');
+    this.name = 'AuthRequiredError';
+  }
+}
 
 export function getMockUserId(): string {
   const params = new URLSearchParams(window.location.search);
@@ -77,35 +91,96 @@ async function getMsal(): Promise<PublicClientApplicationType> {
       cache: { cacheLocation: 'localStorage' },
     });
     await app.initialize();
-    // Complete any redirect flow; harmless when popup-only.
-    await app.handleRedirectPromise().catch(() => undefined);
     _msal = app;
     return app;
   })();
-  return _msalInit;
+  try {
+    return await _msalInit;
+  } catch (error) {
+    _msalInit = null;
+    throw error;
+  }
 }
 
-/** Acquire an access token, prompting the user via popup if needed. */
-async function acquireEntraToken(): Promise<string> {
-  const app = await getMsal();
-  let account = app.getActiveAccount() ?? app.getAllAccounts()[0] ?? null;
+function findAccount(app: PublicClientApplicationType): AccountInfo | null {
+  const activeAccount = app.getActiveAccount();
+  if (activeAccount) return activeAccount;
 
-  if (!account) {
-    const loginReq: PopupRequest = { scopes: scopes() };
-    const result: AuthenticationResult = await app.loginPopup(loginReq);
-    account = result.account;
-    app.setActiveAccount(account);
-    if (result.accessToken) return result.accessToken;
+  const accounts = app.getAllAccounts();
+  const account = accounts.length === 1 ? accounts[0] : null;
+  if (account) app.setActiveAccount(account);
+  return account;
+}
+
+function sessionFromAccount(account: AccountInfo): AuthSession {
+  return {
+    displayName: account.name || account.username,
+    username: account.username,
+  };
+}
+
+function tokenRequest(account: AccountInfo): SilentRequest {
+  return { scopes: scopes(), account };
+}
+
+/** Validate a cached Entra session without opening interactive UI. */
+export async function initializeAuthSession(): Promise<AuthSession | null> {
+  if (getConfig().authMode !== 'entra') {
+    const username = getMockUserId();
+    return { displayName: username, username };
   }
 
-  const silentReq: SilentRequest = { scopes: scopes(), account: account ?? undefined };
+  const app = await getMsal();
+  const account = findAccount(app);
+  if (!account) return null;
+
   try {
-    const result = await app.acquireTokenSilent(silentReq);
+    await app.acquireTokenSilent(tokenRequest(account));
+    return sessionFromAccount(account);
+  } catch (error) {
+    if (error instanceof InteractionRequiredAuthError) {
+      app.setActiveAccount(null);
+      return null;
+    }
+    throw error;
+  }
+}
+
+/** Start the only interactive Entra sign-in flow. */
+export async function signIn(): Promise<AuthSession> {
+  if (getConfig().authMode !== 'entra') {
+    const username = getMockUserId();
+    return { displayName: username, username };
+  }
+
+  const app = await getMsal();
+  const loginReq: PopupRequest = {
+    scopes: scopes(),
+    ...(app.getAllAccounts().length > 1 ? { prompt: 'select_account' } : {}),
+  };
+  const result = await app.loginPopup(loginReq);
+  if (!result.account) throw new Error('Entra sign-in completed without an account');
+  app.setActiveAccount(result.account);
+  return sessionFromAccount(result.account);
+}
+
+/** Acquire an access token without unexpectedly opening interactive UI. */
+async function acquireEntraToken(): Promise<string> {
+  const app = await getMsal();
+  const account = findAccount(app);
+  if (!account) {
+    window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
+    throw new AuthRequiredError();
+  }
+  try {
+    const result = await app.acquireTokenSilent(tokenRequest(account));
     return result.accessToken;
-  } catch {
-    const result = await app.acquireTokenPopup({ scopes: scopes() });
-    if (result.account) app.setActiveAccount(result.account);
-    return result.accessToken;
+  } catch (error) {
+    if (error instanceof InteractionRequiredAuthError) {
+      window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
+      throw new AuthRequiredError();
+    }
+    throw error;
   }
 }
 

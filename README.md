@@ -1,102 +1,259 @@
-# Agentic AI Memory — Support Chat (Challenges 1–5)
+# Agentic AI Memory - Dual Foundry Support Chat
 
-Reference implementation of the customer-support chat app described in
+Reference implementation of a secure customer-support chat application with five
+memory layers, Foundry IQ retrieval, and two user-selectable agents hosted in one
+Microsoft Foundry project.
+
+The current product and architecture source of truth is
 [`docs/PRD-Solution-Challenges-1-5.md`](docs/PRD-Solution-Challenges-1-5.md).
-The full design and phased delivery plan live in
-[`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
+[`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) is the delivery record,
+not an alternative architecture.
 
-## What's implemented (P0–P2 vertical slice)
+## Current architecture
 
-A working, **fully offline** slice of the stack:
+| Agent | Runs in | Capabilities |
+| --- | --- | --- |
+| **Foundry Prompt Agent** | Native Foundry Prompt Agent | Foundry IQ `knowledge_base_retrieve` only |
+| **Hosted Agent Framework** | Foundry Hosted Agent using Microsoft Agent Framework | Foundry IQ plus protected order, profile, and semantic-memory tools |
 
-- **Backend** (`backend/`) — FastAPI app exposing `/chat` (AG-UI SSE stream),
-  `/me`, `/prompts/{name}`, `/sessions*`, `/health`. Session memory is
-  **in-memory only** (no Redis). Ships with a **mock LLM runner** so it runs
-  with zero Azure access; a real Azure AI Foundry runner is scaffolded behind an
-  env flag.
-- **Frontend** (`frontend/`) — Vite + Lit single-page app with an A2UI surface
-  renderer. Streams the assistant response, renders Markdown, and inflates tool
-  results into A2UI cards (shipping status, RAG citations).
+Agent selection is required for a new conversation and immutable afterward. Both
+agents emit the same normalized AG-UI stream, but they intentionally have different
+application capabilities.
 
-Later phases (Cosmos history/profile, Postgres/pgvector memory, AI Search RAG,
-Terraform infra, Container Apps deploy) are described in the implementation plan
-and not yet built.
+```mermaid
+flowchart LR
+    U[Browser] --> F[Public Frontend ACA]
+    F --> B[Internal FastAPI ACA]
+    B -->|Application UAMI| P[Native Prompt Agent]
+    B -->|Application UAMI| H[Hosted MAF Agent]
+    P --> IQ[Foundry IQ]
+    H --> IQ
+    H -->|App-only token| F
+    F -->|Restricted proxy| B
+    B --> C[(Private Cosmos DB)]
+    B --> PG[(Private PostgreSQL)]
+    B --> M[Active Foundry Models]
+    P --> O[Project Application Insights]
+    H --> O
+    B -->|UAMI / AMPLS| O
+```
 
-## Run it offline (two terminals)
+FastAPI remains the authentication, authorization, conversation registry,
+persistence, tool-policy, and public API boundary. The Hosted Agent never receives
+direct application-data roles.
 
-**Backend** — needs [uv](https://docs.astral.sh/uv/) and Python 3.11:
+## What is implemented
+
+- **Backend** (`backend/`) - FastAPI application with AG-UI SSE chat, owner-scoped
+  conversation/profile/memory APIs, remote Foundry adapters, an app-only Hosted
+  tool gateway, privacy-safe telemetry, and bounded liveness/readiness endpoints.
+- **Agent contracts** (`agent_contracts/`) - separate versioned prompts, strict
+  application-tool schemas, runtime state, citation/result envelopes, and
+  normalized agent events.
+- **Native Prompt release** (`setup/agents/`) - idempotently publishes an immutable
+  Prompt Agent definition containing exactly one Foundry IQ MCP tool.
+- **Hosted MAF agent** (`agents/customer-support-maf/`) - uses
+  `FoundryChatClient`, `Agent`, and `ResponsesHostServer` with Hosted Responses
+  protocol `2.0.0`.
+- **Frontend** (`frontend/`) - Vite + Lit SPA with a login-first Entra gate,
+  immutable agent selection, Markdown/citation streaming, and a constrained A2UI
+  subset for internal tool cards.
+- **Infrastructure** (`infra/`) - Terraform for Foundry Basic Setup, Container Apps,
+  Search, Cosmos DB, PostgreSQL, ACR, private endpoints, monitoring, managed
+  identities, and least-privilege RBAC.
+- **Direct Foundry release** (`scripts/release_foundry_assets.sh`) - configures
+  Search/Foundry IQ and publishes the Prompt Agent without setup containers.
+- **Private setup job** (`setup/postgres/`) - the only retained Container Apps Job,
+  used for PostgreSQL bootstrap inside the VNet.
+
+## Five memory layers
+
+1. **Session memory** - Foundry conversations plus bounded in-memory runtime
+   mappings and per-conversation locks.
+2. **Conversation history** - Cosmos DB, partitioned and queried by tenant-scoped
+   authenticated user ID.
+3. **Semantic conversation memory** - PostgreSQL with pgvector and an async
+   managed-identity connection pool.
+4. **User profile memory** - owner-partitioned Cosmos DB profile documents.
+5. **Enterprise knowledge** - Foundry IQ backed by Azure AI Search knowledge
+   sources and returned citations.
+
+The backend is intentionally pinned to one replica because Redis-based distributed
+session coordination is not part of this implementation.
+
+## Security and networking
+
+| Component | Network exposure | Identity model |
+| --- | --- | --- |
+| Frontend Container App | Public | Entra delegated user tokens; app-only Hosted tool route |
+| Backend Container App | Internal ACA ingress | Application UAMI and backend token validation |
+| Foundry agent account/project and models | Public only | Entra/RBAC only; local auth disabled |
+| Azure AI Search / Foundry IQ | Public only | Entra/RBAC only; local auth disabled |
+| Azure Container Registry | Public plus private endpoint | Entra/RBAC only; admin and anonymous pull disabled |
+| Cosmos DB | Private endpoint only | Application UAMI; local auth disabled |
+| PostgreSQL | Private endpoint only | Entra managed identity; password auth disabled |
+| Application Insights / Log Analytics | Public Foundry platform path plus private AMPLS path for ACA | Foundry project connection; backend UAMI |
+
+The public Foundry, Search, and ACR endpoints are required by non-VNet-injected
+Foundry runtimes. Foundry and Search intentionally have no private endpoints. ACR
+retains a private path for Container Apps image pulls.
+
+Foundry uses Basic Setup with platform-managed agent state. Standard Setup and BYO
+Storage are intentionally not used because tenant policy disables Storage
+shared-key access.
+
+The Foundry project is connected to the workspace-based Application Insights
+resource. Prompt platform traces, Hosted MAF traces/dependencies, backend telemetry,
+and Foundry diagnostics use the same project workspace. Foundry tracing requires
+public ingestion and a connection string; this is the documented exception to the
+managed-identity-only preference. Trace reads remain Entra/RBAC-controlled with
+30-day retention. Full Foundry traces can contain user, model, retrieval, and tool
+content.
+
+### Authorization boundaries
+
+- Browser APIs require a validated single-tenant Entra token with
+  `access_as_user`.
+- User ownership keys are derived as `tid:oid`; APIs do not accept caller-supplied
+  user IDs.
+- The backend uses a user-assigned managed identity for Foundry, Cosmos DB,
+  PostgreSQL, Search, ACR, and telemetry.
+- The Hosted Agent uses its Foundry-created service principal only to request the
+  `AgentTools.Invoke` application role.
+- Hosted gateway tokens must be application-only, contain the required role, and
+  come from an allowlisted principal. Delegated `scp` tokens are rejected.
+- Tool dispatch verifies the stored user/session binding before accessing data.
+- Conversation DTOs use explicit allowlists and exclude private runtime IDs,
+  owner keys, ETags, and Cosmos metadata.
+- Authenticated profile and memory APIs intentionally return only the current
+  user's profile and memory content. Telemetry excludes that content, identities,
+  messages, tokens, and tool arguments.
+
+## Async runtime model
+
+- Azure-backed stores and runtimes are asynchronous and expose explicit
+  initialize/close lifecycles.
+- Cosmos uses `azure.cosmos.aio.CosmosClient`.
+- PostgreSQL uses
+  `asyncpg.create_pool(..., min_size=2, max_size=10)`.
+- Runtime Azure SDK and HTTP clients are asynchronous.
+- Agent streams are consumed with `async for`.
+- Synchronous JWT/JWKS work is isolated from the event loop.
+- Shutdown closes credentials, clients, pools, and refresh tasks.
+- Persistence and remote invocation failures are surfaced rather than converted to
+  success-shaped fallbacks.
+
+## Run locally
+
+Local mode uses mock users and mock agent runtimes. It does not require Azure.
+
+### Backend
+
+Requires [uv](https://docs.astral.sh/uv/) and Python 3.11:
 
 ```bash
 cd backend
 uv venv --python 3.11
-uv pip install --python .venv/bin/python -e .
-.venv/bin/python -m uvicorn server:app --port 8000
+uv pip install --python .venv/bin/python -e ../agent_contracts -e .
+.venv/bin/python -m uvicorn agent_memory_backend.server:app --port 8000
 ```
 
-**Frontend** — needs Node 20+:
+### Frontend
+
+Requires Node.js 20+:
 
 ```bash
 cd frontend
 npm install
-npm run dev   # http://localhost:5175  (proxies /api → :8000)
+npm run dev
 ```
 
-Open http://localhost:5175 and try: **“Where is my order ORD-001?”**
-Switch mock users (alice/bob/charlie) and toggle RAG/theme from the header.
+Open http://localhost:5175. The frontend proxies `/api` to
+`http://localhost:8000`.
 
-Mock orders: `ORD-001` (shipped), `ORD-002` (processing), `ORD-003` (delivered).
+Mock users are `user-alice`, `user-bob`, and `user-charlie`. Mock orders are
+`ORD-001` (shipped), `ORD-002` (processing), and `ORD-003` (delivered). The local
+Prompt mock remains knowledge-only; order-tool behavior belongs to the Hosted MAF
+mock.
 
-## Repo layout
+## Entra app registration
 
-```
-backend/    FastAPI app, prompts, mock + real agent runners
-frontend/   Vite + Lit app, A2UI renderer, tool→surface converters
-docs/        PRD spec + implementation plan
-```
+Terraform manages Azure subscription resources, but the SPA/API app registration
+is intentionally manual because it requires Entra directory permissions such as
+Application Administrator or `Application.ReadWrite.All`.
 
-## Authentication (mock vs Entra ID)
-
-The app supports two auth modes, selected by the backend `AUTH_MODE` env var:
-
-- **`mock`** (default, used for local dev and the live demo): the frontend sends an
-  `X-Mock-User-ID` header; the backend resolves a fixed user table
-  (`user-alice` / `user-bob` / `user-charlie`). No directory setup required.
-- **`entra`** (production): the frontend signs in with MSAL and sends an
-  `Authorization: Bearer <JWT>`; the backend validates the RS256 token against the
-  tenant JWKS (audience / issuer / expiry, plus optional required scopes/roles).
-
-### The Entra app registration is a **manual** step — *not* Terraform
-
-The `infra/` Terraform provisions all Azure **resources** (Foundry, Cosmos, Postgres,
-AI Search, ACA, networking, RBAC) using subscription-scoped permissions. The Entra
-**app registration** is intentionally kept **out of Terraform** because creating one
-requires **Entra directory permissions** (Application Administrator /
-`Application.ReadWrite.All`) — a different, often separately-governed grant than the
-subscription Contributor role used for everything else. Keeping it manual lets the
-infra apply cleanly for operators who don't hold directory rights, and keeps the app
-runnable in `mock` mode with zero directory setup.
-
-Provision it with the helper script (requires directory rights):
+Create or update it with:
 
 ```bash
 AZURE_CONFIG_DIR="$HOME/.azure-365" \
   ./scripts/create_entra_app.sh \
     --frontend-url https://<frontend-fqdn> \
-    --localhost            # also allow http://localhost:5175 for dev
+    --localhost
 ```
 
-The script creates one SPA app registration that exposes an `access_as_user` scope,
-issues **v2** access tokens, registers the SPA redirect URI, and pre-authorizes the
-Azure CLI (so you can fetch a test token). It prints the exact env values to set.
-Note: for v2 tokens `aud` is the **client-id GUID**, so `ENTRA_AUDIENCE=<clientId>`
-(not `api://<clientId>`).
+The script:
 
-Then flip both apps to Entra mode (backend `AUTH_MODE=entra` + `ENTRA_TENANT_ID` /
-`ENTRA_AUDIENCE` / `ENTRA_REQUIRED_SCOPES`; frontend `/config.js` `authMode=entra` +
-`ENTRA_TENANT_ID` / `ENTRA_CLIENT_ID` / `ENTRA_API_SCOPE`) and redeploy. Verify:
+- exposes the delegated `access_as_user` scope;
+- defines the `AgentTools.Invoke` application role;
+- configures v2 access tokens and SPA redirect URIs;
+- preauthorizes Azure CLI for test-token acquisition;
+- prints the tenant and client values required by Terraform.
+
+For v2 access tokens, configure the backend user-token audience as the client-ID
+GUID. Hosted identity token acquisition still uses
+`api://<client-id>/.default`.
+
+Example authenticated request:
 
 ```bash
-TOKEN=$(az account get-access-token --scope api://<clientId>/access_as_user --query accessToken -o tsv)
-curl -H "Authorization: Bearer $TOKEN" https://<frontend-fqdn>/api/me   # -> 200
-curl https://<frontend-fqdn>/api/me                                     # -> 401
+TOKEN=$(az account get-access-token \
+  --scope api://<client-id>/access_as_user \
+  --query accessToken -o tsv)
+
+curl -H "Authorization: Bearer $TOKEN" \
+  https://<frontend-fqdn>/api/me
+```
+
+## Deployment model
+
+1. Configure `infra/terraform.tfvars` from
+   `infra/terraform.tfvars.example`.
+2. Provision Azure resources and RBAC with Terraform.
+3. Run `scripts/release_foundry_assets.sh all` to configure Search/Foundry IQ and
+   publish the native Prompt Agent directly.
+4. Build backend, frontend, PostgreSQL bootstrap, and Hosted MAF images with ACR
+   Tasks; local Docker is not required.
+5. Run the VNet-integrated PostgreSQL bootstrap job.
+6. Deploy the Hosted MAF image to the Foundry project.
+7. Assign `AgentTools.Invoke` to the generated Hosted Agent principal and add that
+   principal to the backend allowlist.
+8. Deploy backend/frontend images and enable agents only after readiness and live
+   acceptance pass.
+
+`scripts/deploy_images.sh` builds the application, PostgreSQL bootstrap, and Hosted
+MAF images through ACR and updates the Container Apps and PostgreSQL job.
+`scripts/assign_hosted_agent_access.sh` idempotently assigns the Hosted application
+role.
+
+Hosted Agent source-code deployment without a container image is currently preview.
+The implementation keeps the established container deployment and will reassess the
+source option after general availability.
+
+Hosted images are tagged with `agent_release_id`. Use a new value for every
+release; the deployment helper does not prevent overwriting an existing tag.
+The active Hosted image repository is `customer-support-maf-hosted`;
+`customer-support-maf` is retained only as a rollback artifact. Obsolete
+`kb-setup` and `prompt-agent-release` repositories are not retained.
+
+## Repository layout
+
+```text
+agent_contracts/  Versioned prompts, strict tools, and runtime/event contracts
+agents/           Foundry Hosted Microsoft Agent Framework source
+backend/          Packaged FastAPI trust boundary, stores, gateway, and agent adapters
+frontend/         Componentized Vite + Lit SPA and constrained A2UI tool cards
+infra/            Terraform infrastructure, networking, identities, and RBAC
+setup/            Direct Foundry IQ/Prompt release code and PostgreSQL bootstrap
+scripts/          Entra, direct Foundry release, image deployment, and role assignment
+docs/             Current PRD and implementation delivery record
 ```

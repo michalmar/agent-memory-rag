@@ -1,7 +1,7 @@
-// converters.ts — map tool-result JSON to A2UI messages (see PRD §B8).
+// Map tool-result JSON to the internal A2UI tool-card subset.
 import type { A2UIMessage, ComponentDef, DataEntry } from './a2ui/types.js';
+import type { CitationSource } from './client.js';
 import { SHIPPING_STATUS_TEMPLATE } from './templates/shipping-status.js';
-import { RAG_CITATIONS_TEMPLATE } from './templates/rag-citations.js';
 
 function flatten(model: Record<string, unknown>): DataEntry[] {
   const entries: DataEntry[] = [];
@@ -31,26 +31,43 @@ function inflateSurfaceTemplate(
   ];
 }
 
-interface Citation {
-  search_idx: number;
-  ref_id: string;
-  source_name: string;
-  content: string;
-  annotation: string;
+function citationValues(parsed: unknown): unknown[] {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+  const envelope = parsed as Record<string, unknown>;
+  const data =
+    envelope.data && typeof envelope.data === 'object' && !Array.isArray(envelope.data)
+      ? (envelope.data as Record<string, unknown>)
+      : envelope;
+  const values = Array.isArray(envelope.citations) ? envelope.citations : data.citations;
+  return Array.isArray(values) ? values : [];
 }
 
-function buildCitationModel(citations: Citation[]): Record<string, unknown> {
-  const citationMap: Record<string, unknown> = {};
-  citations.forEach((c, i) => {
-    citationMap[String(i)] = {
-      sourceName: `${c.annotation}  ${c.source_name}`,
-      snippet: (c.content ?? '').slice(0, 150),
-    };
+export function parseCitations(value: unknown): CitationSource[] {
+  const values = Array.isArray(value) ? value : citationValues(value);
+  return values.flatMap((value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+    const citation = value as Record<string, unknown>;
+    if (typeof citation.ref_id !== 'string' || typeof citation.source_name !== 'string') {
+      return [];
+    }
+    return [
+      {
+        ref_id: citation.ref_id,
+        source_name: citation.source_name,
+        search_idx:
+          typeof citation.search_idx === 'number' ? citation.search_idx : undefined,
+        url: typeof citation.url === 'string' ? citation.url : undefined,
+      },
+    ];
   });
-  return {
-    citationCount: `${citations.length} sources`,
-    citations: citationMap,
-  };
+}
+
+export function extractToolCitations(content: string): CitationSource[] {
+  try {
+    return parseCitations(JSON.parse(content));
+  } catch {
+    return [];
+  }
 }
 
 function genericDump(toolName: string, parsed: unknown, surfaceId: string): A2UIMessage[] {
@@ -81,7 +98,12 @@ export function convertToolResult(
     return [];
   }
 
-  const obj = (parsed ?? {}) as Record<string, unknown>;
+  const envelope = (parsed ?? {}) as Record<string, unknown>;
+  const obj = (
+    envelope.data && typeof envelope.data === 'object' && !Array.isArray(envelope.data)
+      ? envelope.data
+      : envelope
+  ) as Record<string, unknown>;
 
   if (toolName === 'get_order_status') {
     if (obj.status === 'not_found') return [];
@@ -96,16 +118,7 @@ export function convertToolResult(
     );
   }
 
-  // Classic RAG or any result carrying a citations array (agentic MCP).
-  if (toolName === 'do_classic_rag' || Array.isArray(obj.citations)) {
-    const citations = (obj.citations as Citation[]) ?? [];
-    if (citations.length === 0) return [];
-    return inflateSurfaceTemplate(
-      RAG_CITATIONS_TEMPLATE,
-      buildCitationModel(citations),
-      surfaceId,
-    );
-  }
+  if (toolName === 'knowledge_base_retrieve' || citationValues(parsed).length > 0) return [];
 
   return genericDump(toolName, parsed, surfaceId);
 }

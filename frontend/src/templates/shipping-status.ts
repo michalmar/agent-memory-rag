@@ -1,4 +1,4 @@
-// SHIPPING_STATUS_TEMPLATE — verbatim ComponentDef[] (see PRD §B8).
+// Declarative A2UI template for order-status tool results.
 import type { ComponentDef } from '../a2ui/types.js';
 
 export const SHIPPING_STATUS_TEMPLATE: ComponentDef[] = [
