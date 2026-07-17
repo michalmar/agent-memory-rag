@@ -23,7 +23,7 @@ strict application tools and owner-scoped application data.
 | Trust boundary | FastAPI authenticates users, owns application data, persists routing, and emits AG-UI |
 | Prompt tools | Foundry IQ `knowledge_base_retrieve` only |
 | Hosted tools | Foundry IQ plus app-only backend gateway through the public frontend proxy |
-| Networking | Public Entra-only Foundry/Search/ACR endpoints; private backend, Cosmos, and PostgreSQL |
+| Networking | Public Entra-only Foundry/Search/ACR endpoints; private backend and Cosmos |
 | Backend identity | Existing application UAMI |
 | Hosted identity | Foundry-created service principal; no UAMI support in preview |
 | Agent state | Foundry conversations; private mapping persisted in Cosmos schema v3 |
@@ -85,7 +85,7 @@ strict application tools and owner-scoped application data.
 - [x] Added chat and embedding deployments.
 - [x] Added the Foundry IQ `RemoteTool` project connection using
   `ProjectManagedIdentity`.
-- [x] Added project, backend, setup, ACR, Search, and telemetry RBAC.
+- [x] Added project, backend, ACR, Search, and telemetry RBAC.
 - [x] Added backend feature flags and safe Terraform outputs.
 - [x] Removed the empty resources left by the interrupted Standard Setup apply;
   the final Terraform plan has no changes.
@@ -156,19 +156,32 @@ strict application tools and owner-scoped application data.
 - [x] Enabled both selectors after acceptance.
 - [x] Confirmed the final Terraform plan has no changes.
 
+### Phase 11 - Cosmos semantic-memory cutover
+
+- [x] Added the `support/memories` container with `/user_id` partitioning,
+  3,072-dimensional cosine embeddings, and a `quantizedFlat` vector index.
+- [x] Replaced semantic-memory store internals with async Cosmos CRUD and vector
+  queries while preserving the public API contract.
+- [x] Made semantic memory an optional readiness dependency so its outage cannot
+  remove agents or thread history from ingress.
+- [x] Verified create, idempotent upsert, list, vector search, delete, and Hosted
+  `check_memory` behavior against the deployed application.
+- [x] Removed the retired database, private endpoint/DNS, bootstrap identity/job,
+  setup image, configuration, and deployment steps.
+
 ## 4. Azure topology
 
 | Component | Region | Notes |
 | --- | --- | --- |
 | Foundry/Container Apps/VNet | East US 2 | Foundry Basic Setup uses public Entra-only ingress; Container Apps retains its VNet |
-| PostgreSQL | North Central US | Private endpoint; Entra-only runtime |
+| Cosmos DB | East US 2 | Private endpoint; serverless history, profile, and vector-memory containers |
 | KB Search | West Europe | Public Entra-only endpoint for Foundry IQ and setup clients |
 
 Interactive jumpboxes and Bastion are not part of the deployed topology.
 
 ## 5. Security rules
 
-- Never enable public access on application Cosmos, PostgreSQL, or the backend
+- Never enable public access on application Cosmos or the backend
   Container App.
 - Public Foundry, KB Search, and ACR must remain Entra/RBAC-only with local/key,
   admin, and anonymous authentication disabled as applicable.

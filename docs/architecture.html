@@ -1506,7 +1506,7 @@
       <div class="header-context">
         <div class="meta-row">
           <span class="status-pill">Implemented and accepted</span>
-          <span class="meta-pill mono">snapshot c1f56e30c0fa + working tree</span>
+          <span class="meta-pill mono">snapshot 6d3194ea55a5 + working tree</span>
         </div>
         <div class="hero-actions">
           <button id="theme-toggle" type="button">Toggle theme</button>
@@ -1818,9 +1818,9 @@
         project: "Agentic AI Memory - Dual Foundry Support Chat",
         summary:
           "A secure support SPA with two selectable Foundry agents, one FastAPI policy boundary, five memory layers, and Foundry IQ grounding.",
-        generatedAt: "2026-07-13T19:05:23+02:00",
-        commit: "c1f56e30c0fa",
-        scope: "Current working tree after orchestration, frontend, Search setup, and backend package simplification",
+        generatedAt: "2026-07-15",
+        commit: "6d3194ea55a5",
+        scope: "Current working tree after the Cosmos semantic-memory cutover and relational-store decommission",
         repositoryUrl: "https://github.com/michalmar/agent-memory-rag",
         caveats: []
       },
@@ -1828,7 +1828,7 @@
         { value: "2", label: "Selectable agents", note: "Native Prompt and Hosted MAF" },
         { value: "5", label: "Memory layers", note: "Session through enterprise knowledge" },
         { value: "4", label: "Protected app tools", note: "Hosted Agent only" },
-        { value: "3", label: "Azure regions", note: "East US 2, North Central US, West Europe" },
+        { value: "2", label: "Azure regions", note: "East US 2 and West Europe" },
         { value: "1", label: "Backend replica", note: "In-process conversation coordination" }
       ],
       groups: [
@@ -1840,7 +1840,7 @@
         { id: "memory", name: "Application memory", kind: "ownership", description: "Session, history, semantic memory, and user profile stores." },
         { id: "identity", name: "Identity and authorization", kind: "trust-boundary", description: "Entra tokens, managed identities, and app roles." },
         { id: "operations", name: "Operations", kind: "layer", description: "Health, telemetry, deployment, and rollback controls." },
-        { id: "delivery", name: "Bootstrap and release", kind: "runtime", description: "Terraform, ACR builds, the PostgreSQL setup job, and the direct Foundry release script." }
+        { id: "delivery", name: "Bootstrap and release", kind: "runtime", description: "Terraform, ACR builds, and the direct Foundry release script." }
       ],
       components: [
         component("user", "Support user", "actor", ["experience"], "Chooses an agent and owns all application-visible state.", {
@@ -1895,7 +1895,7 @@
             evidence("infra/compute.tf", "25-29", "AcrPull assignment")
           ]
         }),
-        component("aca-environment", "Container Apps environment", "platform", ["edge", "operations"], "VNet-integrated Azure Container Apps environment hosting apps and manual setup jobs.", {
+        component("aca-environment", "Container Apps environment", "platform", ["edge", "operations"], "VNet-integrated Azure Container Apps environment hosting the frontend and backend.", {
           technologies: ["Azure Container Apps", "Consumption workload profile"],
           deployment: ["East US 2", "snet-aca 10.42.0.0/23", "Log Analytics connected"],
           security: ["Default outbound access disabled on delegated subnet"],
@@ -1921,7 +1921,7 @@
         component("app-uami", "Application UAMI", "identity", ["identity"], "Backend user-assigned identity for Foundry, data, model, registry, and telemetry access.", {
           responsibilities: ["Authenticate backend Azure data-plane calls"],
           security: ["Least-privilege RBAC", "No application secrets required"],
-          dataOwned: ["Cosmos data contributor", "PostgreSQL Entra principal"],
+          dataOwned: ["Cosmos DB Built-in Data Contributor"],
           evidence: [
             evidence("infra/main.tf", "46-51", "Application managed identity"),
             evidence("infra/identity.tf", "4-66", "Foundry, Search, Monitor, Cosmos, and deployer roles"),
@@ -1989,7 +1989,7 @@
           technologies: ["Python 3.13", "Microsoft Agent Framework", "FoundryChatClient", "ResponsesHostServer"],
           interfaces: ["Hosted Responses protocol 2.0.0", "Foundry IQ MCP", "App-only HTTPS tool gateway"],
           responsibilities: ["Ground answers", "Read trusted request context", "Call application tools through FastAPI"],
-          security: ["Receives no direct Cosmos, PostgreSQL, or application data roles", "Five function-invocation iterations"],
+          security: ["Receives no direct Cosmos or application data roles", "Five function-invocation iterations"],
           deployment: ["Foundry Hosted Agent", "Container image built and pushed to ACR", "Port 8088 in image", "Planned/preview only: source-code (non-container) Hosted deployment is not used today"],
           evidence: [
             evidence("agents/customer-support-maf/src/customer-support-maf/main.py", "1-56", "Agent, MCP, tools, and host server"),
@@ -2132,21 +2132,21 @@
             evidence("backend/agent_memory_backend/user_profile_memory.py", "15-181", "Profile schema, isolation, merge patch, and retries")
           ]
         }),
-        component("postgres-memory", "PostgreSQL semantic memory", "database", ["memory"], "One pgvector summary row per conversation and user, searched by cosine similarity.", {
-          technologies: ["Azure PostgreSQL Flexible Server 16", "pgvector", "asyncpg"],
-          interfaces: ["memory.conversation_memory", "Port 5432", "Entra token"],
-          dataOwned: ["Conversation summary", "vector(3072)", "source title", "message count"],
-          deployment: ["North Central US", "Private endpoint", "B_Standard_B1ms", "32 GiB"],
-          security: ["Password auth disabled", "Application managed identity", "Parameterized owner-scoped queries"],
-          operations: ["Pool min 2 / max 10", "No ANN vector index in bootstrap"],
+        component("cosmos-memories", "Cosmos semantic memory", "database", ["memory"], "One owner-partitioned summary document per conversation with bounded cosine vector search.", {
+          technologies: ["Azure Cosmos DB for NoSQL", "Async SDK", "quantizedFlat vector index"],
+          interfaces: ["support/memories", "Partition key /user_id", "Vector path /embedding"],
+          dataOwned: ["Conversation summary", "float32 embedding (3072)", "source title", "message count"],
+          deployment: ["East US 2", "Serverless", "Same private account as history and profiles"],
+          security: ["Local auth disabled", "Application UAMI", "Owner partition key and explicit owner predicate"],
+          operations: ["Optimistic-concurrency upsert", "Optional readiness dependency", "Bounded TOP 1-50 vector queries"],
           evidence: [
-            evidence("infra/data.tf", "73-140", "PostgreSQL resource, Entra auth, vector extension, and private endpoint"),
-            evidence("setup/postgres/bootstrap.py", "13-111", "Schema, principal, and grants"),
-            evidence("backend/agent_memory_backend/conversation_memory.py", "176-244", "Upsert and vector search")
+            evidence("infra/data.tf", "azapi_resource.cosmos_memories", "Partition key, vector embedding policy, and quantizedFlat index"),
+            evidence("backend/agent_memory_backend/conversation_memory.py", "ConversationMemoryStore", "Owner-partitioned CRUD, concurrency, and vector search"),
+            evidence("backend/agent_memory_backend/server.py", "health_ready", "Memory is reported but does not gate readiness")
           ]
         }),
         component("memory-agent", "Memory Agent", "module", ["application", "memory"], "User-triggered summarization and embedding pipeline for semantic conversation memory.", {
-          responsibilities: ["Summarize transcript", "Embed summary", "Upsert one row per conversation/user"],
+          responsibilities: ["Summarize transcript", "Embed summary", "Upsert one document per conversation/user"],
           interfaces: ["POST /memories"],
           evidence: [
             evidence("backend/agent_memory_backend/server.py", "523-584", "Manual memory APIs"),
@@ -2197,34 +2197,17 @@
             evidence("infra/monitoring.tf", "64-112", "AMPLS Open access mode, scoped services, and private endpoint")
           ]
         }),
-        component("acr", "Azure Container Registry", "registry", ["delivery"], "Premium registry with four active build repositories plus customer-support-maf retained only for Hosted Agent rollback.", {
+        component("acr", "Azure Container Registry", "registry", ["delivery"], "Premium registry with three active build repositories plus customer-support-maf retained only for Hosted Agent rollback.", {
           interfaces: ["Private endpoint for ACA", "Public Entra/RBAC endpoint for Hosted runtime"],
           deployment: ["Premium SKU", "Public plus private access"],
-          dataOwned: ["backend", "frontend", "pg-bootstrap", "customer-support-maf-hosted", "customer-support-maf (rollback only)"],
+          dataOwned: ["backend", "frontend", "customer-support-maf-hosted", "customer-support-maf (rollback only)"],
           security: ["Admin and anonymous pull disabled", "Azure AD ARM authentication", "No knowledge or Prompt setup repositories"],
           evidence: [
             evidence("infra/compute.tf", "4-49", "Registry, controls, RBAC, and private endpoint"),
             evidence("infra/foundry_agents.tf", "186-199", "ARM authentication enforcement"),
-            evidence("scripts/deploy_images.sh", "44-53", "Four active ACR builds"),
+            evidence("scripts/deploy_images.sh", "deploy_images.sh", "Three active ACR builds"),
             evidence("README.md", "242-244", "customer-support-maf-hosted active; customer-support-maf retained only for Hosted rollback"),
             evidence("docs/PRD-Solution-Challenges-1-5.md", "401-402", "Prior repository retained only as a Hosted Agent rollback artifact")
-          ]
-        }),
-        component("pg-bootstrap-uami", "PostgreSQL bootstrap UAMI", "identity", ["identity", "delivery"], "Dedicated administrative identity used by the retained PostgreSQL bootstrap job to create the application database principal and grants.", {
-          security: ["PostgreSQL Entra administrator", "AcrPull"],
-          evidence: [
-            evidence("infra/main.tf", "56-61", "Bootstrap identity"),
-            evidence("infra/data.tf", "97-104", "Entra administrator"),
-            evidence("infra/jobs.tf", "13-17", "AcrPull assignment")
-          ]
-        }),
-        component("pg-setup-job", "PostgreSQL bootstrap job", "job", ["delivery", "memory"], "The only retained Container Apps Job: creates the Entra principal, pgvector schema, and least-privilege grants inside the VNet.", {
-          technologies: ["Python 3.11", "Container Apps Job"],
-          operations: ["One replica", "900-second timeout", "Retry limit 1"],
-          evidence: [
-            evidence("setup/postgres/bootstrap.py", "62-134", "Principal and transactional schema setup"),
-            evidence("infra/jobs.tf", "19-70", "Job identity, resources, and dependency"),
-            evidence("README.md", "60-61", "Only retained Container Apps Job")
           ]
         }),
         component("release-foundry-assets", "Direct Foundry release script", "pipeline", ["delivery", "knowledge", "agent-runtime"], "Idempotent script that configures Search/Foundry IQ and publishes the native Prompt Agent directly, with no setup container, image, or shared managed identity.", {
@@ -2250,12 +2233,12 @@
             evidence("docs/PRD-Solution-Challenges-1-5.md", "359-377", "Infrastructure and release requirements")
           ]
         }),
-        component("deploy-images", "Image deployment helper", "pipeline", ["delivery"], "Builds four images with ACR Tasks (backend, frontend, PostgreSQL bootstrap, Hosted MAF) and rolls Container Apps plus the PostgreSQL job.", {
-          interfaces: ["az acr build", "az containerapp update", "az containerapp job update"],
+        component("deploy-images", "Image deployment helper", "pipeline", ["delivery"], "Builds backend, frontend, and Hosted MAF images with ACR Tasks and rolls both Container Apps.", {
+          interfaces: ["az acr build", "az containerapp update"],
           responsibilities: ["Build without local Docker", "Tag application and Hosted Agent releases"],
           operations: ["Hosted image is pulled by Foundry rather than rolled as a Container App"],
           evidence: [
-            evidence("scripts/deploy_images.sh", "44-62", "Four builds and three rolling updates")
+            evidence("scripts/deploy_images.sh", "deploy_images.sh", "Three builds and two Container App updates")
           ]
         }),
         component("repo-corpus", "Demo knowledge corpus", "dataset", ["delivery", "knowledge"], "Thirteen local order and return-policy chunks embedded into Search.", {
@@ -2266,8 +2249,8 @@
             evidence("setup/knowledgebase/documents", "orders/* and policies/*", "Current demo corpus")
           ]
         }),
-        component("operator", "Platform operator", "actor", ["delivery", "operations"], "Runs Terraform, the direct Foundry release script, image builds, the PostgreSQL bootstrap job, and Hosted role assignment.", {
-          responsibilities: ["Apply infrastructure", "Run scripts/release_foundry_assets.sh", "Build and roll images", "Trigger the PostgreSQL bootstrap job", "Assign the Hosted AgentTools.Invoke role"],
+        component("operator", "Platform operator", "actor", ["delivery", "operations"], "Runs Terraform, the direct Foundry release script, image builds, and Hosted role assignment.", {
+          responsibilities: ["Apply infrastructure", "Run scripts/release_foundry_assets.sh", "Build and roll images", "Assign the Hosted AgentTools.Invoke role"],
           security: ["Holds deployer RBAC on the Foundry account, project, and Search granted directly by Terraform"],
           evidence: [
             evidence("README.md", "205-224", "Deployment sequence"),
@@ -2427,12 +2410,11 @@
           authentication: "Application UAMI",
           evidence: [evidence("backend/agent_memory_backend/user_profile_memory.py", "132-181", "Owner-scoped merge patch")]
         }),
-        flow("semantic-store", "fastapi-backend", "postgres-memory", "Manage semantic memory", "async", ["overview", "memory"], {
-          protocol: "PostgreSQL over TLS",
-          port: 5432,
+        flow("semantic-store", "fastapi-backend", "cosmos-memories", "Manage semantic memory", "async", ["overview", "memory"], {
+          protocol: "Cosmos DB NoSQL async SDK",
           data: ["Summaries", "Embeddings", "Similarity results"],
-          authentication: "Application UAMI Entra token",
-          evidence: [evidence("backend/agent_memory_backend/conversation_memory.py", "93-143, 176-244", "Managed identity pool, upsert, and search")]
+          authentication: "Application UAMI",
+          evidence: [evidence("backend/agent_memory_backend/conversation_memory.py", "ConversationMemoryStore", "Owner-partitioned CRUD and vector search")]
         }),
         flow("memory-orchestration", "fastapi-backend", "memory-agent", "User-triggered memory creation", "async", ["memory"], {
           trigger: "POST /memories",
@@ -2444,9 +2426,9 @@
           authentication: "Application UAMI",
           evidence: [evidence("backend/agent_memory_backend/memory_agent.py", "39-55", "Summary and embedding")]
         }),
-        flow("memory-upsert", "memory-agent", "postgres-memory", "Upsert conversation memory", "async", ["memory"], {
-          data: ["One summary row per conversation and user"],
-          evidence: [evidence("backend/agent_memory_backend/conversation_memory.py", "176-196", "Upsert schema and conflict key")]
+        flow("memory-upsert", "memory-agent", "cosmos-memories", "Upsert conversation memory", "async", ["memory"], {
+          data: ["One summary document per conversation and user"],
+          evidence: [evidence("backend/agent_memory_backend/conversation_memory.py", "upsert", "Optimistic-concurrency document upsert")]
         }),
         flow("profile-orchestration", "fastapi-backend", "profile-agent", "User-triggered profile generation", "async", ["memory"], {
           trigger: "POST /profile/generate",
@@ -2495,7 +2477,7 @@
           authentication: "Trusted backend owner context",
           evidence: [evidence("backend/agent_memory_backend/agent_tools.py", "64-73, 115-143", "Profile tool handlers")]
         }),
-        flow("tool-memory", "app-tools", "postgres-memory", "check_memory", "async", ["hosted-tools"], {
+        flow("tool-memory", "app-tools", "cosmos-memories", "check_memory", "async", ["hosted-tools"], {
           data: ["Semantic query", "Top three owner-scoped matches"],
           authentication: "Trusted backend owner context",
           evidence: [evidence("backend/agent_memory_backend/agent_tools.py", "97-112", "Memory recall tool")]
@@ -2503,7 +2485,7 @@
         flow("tool-embedding", "app-tools", "foundry-models", "Embed recall query", "async", ["hosted-tools"], {
           importance: "secondary",
           data: ["Query embedding"],
-          evidence: [evidence("backend/agent_memory_backend/agent_tools.py", "97-112", "Embedding before pgvector search")]
+          evidence: [evidence("backend/agent_memory_backend/agent_tools.py", "check_memory", "Embedding before Cosmos vector search")]
         }),
         flow("project-identity", "project-mi", "foundry-project", "Project runtime identity", "sync", ["security"], {
           importance: "secondary",
@@ -2520,10 +2502,6 @@
         flow("operator-release", "operator", "release-foundry-assets", "Run direct Foundry release script", "sync", ["security", "bootstrap"], {
           importance: "secondary",
           evidence: [evidence("scripts/release_foundry_assets.sh", "1-62", "Operator-invoked release")]
-        }),
-        flow("pg-job-identity", "pg-bootstrap-uami", "pg-setup-job", "Assigned admin identity", "sync", ["security", "bootstrap"], {
-          importance: "secondary",
-          evidence: [evidence("infra/jobs.tf", "19-70", "PostgreSQL job identity")]
         }),
         flow("search-identity", "search-mi", "ai-search", "Search service identity", "sync", ["security"], {
           importance: "secondary",
@@ -2564,9 +2542,10 @@
           importance: "secondary",
           evidence: [evidence("backend/agent_memory_backend/server.py", "350-395", "Cosmos readiness registration")]
         }),
-        flow("health-postgres", "health-readiness", "postgres-memory", "SELECT 1", "async", ["operations"], {
+        flow("health-memory", "health-readiness", "cosmos-memories", "Read container metadata", "async", ["operations"], {
           importance: "secondary",
-          evidence: [evidence("backend/agent_memory_backend/server.py", "350-395", "PostgreSQL readiness registration")]
+          failureBehavior: "Reported as optional degraded dependency; backend remains ready",
+          evidence: [evidence("backend/agent_memory_backend/server.py", "health_ready", "Optional Cosmos memory readiness registration")]
         }),
         flow("health-iq", "health-readiness", "foundry-iq", "Minimal semantic search", "async", ["operations"], {
           importance: "secondary",
@@ -2592,8 +2571,8 @@
         flow("terraform-search", "terraform", "ai-search", "Provision Search and RBAC", "batch", ["bootstrap"], {
           evidence: [evidence("infra/data.tf", "146-159", "Search service")]
         }),
-        flow("terraform-postgres", "terraform", "postgres-memory", "Provision database and PE", "batch", ["bootstrap"], {
-          evidence: [evidence("infra/data.tf", "73-140", "PostgreSQL and private endpoint")]
+        flow("terraform-memory", "terraform", "cosmos-memories", "Provision vector-memory container", "batch", ["bootstrap"], {
+          evidence: [evidence("infra/data.tf", "azapi_resource.cosmos_memories", "Cosmos vector container")]
         }),
         flow("terraform-cosmos", "terraform", "cosmos-history", "Provision Cosmos data plane", "batch", ["bootstrap"], {
           evidence: [evidence("infra/data.tf", "6-70", "Cosmos account and containers")]
@@ -2602,8 +2581,8 @@
           evidence: [evidence("scripts/deploy_images.sh", "1-64", "Image deployment helper")]
         }),
         flow("build-acr", "deploy-images", "acr", "Server-side ACR builds", "batch", ["bootstrap", "operations"], {
-          data: ["Backend", "Frontend", "PostgreSQL bootstrap", "Hosted MAF image"],
-          evidence: [evidence("scripts/deploy_images.sh", "44-53", "Four ACR builds")]
+          data: ["Backend", "Frontend", "Hosted MAF image"],
+          evidence: [evidence("scripts/deploy_images.sh", "deploy_images.sh", "Three ACR builds")]
         }),
         flow("acr-frontend", "acr", "frontend-ca", "Pull frontend image", "batch", ["network", "bootstrap", "operations"], {
           importance: "secondary",
@@ -2619,10 +2598,6 @@
           authentication: "Foundry project identity through public Entra-only registry",
           boundaryCrossings: ["Foundry Hosted runtime to public ACR"],
           evidence: [evidence("agents/customer-support-maf/azure.yaml", "11-16", "Hosted image reference")]
-        }),
-        flow("acr-pg-job", "acr", "pg-setup-job", "Pull bootstrap image", "batch", ["bootstrap"], {
-          importance: "secondary",
-          evidence: [evidence("scripts/deploy_images.sh", "50, 62", "PostgreSQL image and job update")]
         }),
         flow("corpus-job", "repo-corpus", "release-foundry-assets", "Load local JSON corpus", "batch", ["bootstrap"], {
           data: ["Order chunks", "Return-policy chunks"],
@@ -2641,12 +2616,6 @@
         flow("kb-definition", "release-foundry-assets", "foundry-iq", "Upsert IQ sources and base", "batch", ["bootstrap"], {
           data: ["orders-ks", "return-policy-ks", "customer-support-kb"],
           evidence: [evidence("setup/knowledgebase/setup_search.py", "284-353", "IQ definitions")]
-        }),
-        flow("pg-bootstrap", "pg-setup-job", "postgres-memory", "Create principal and schema", "batch", ["bootstrap"], {
-          protocol: "PostgreSQL TLS",
-          port: 5432,
-          authentication: "PostgreSQL bootstrap UAMI",
-          evidence: [evidence("setup/postgres/bootstrap.py", "62-111", "Principal, schema, and grants")]
         }),
         flow("prompt-publish", "release-foundry-assets", "prompt-agent", "Create immutable version", "batch", ["bootstrap"], {
           data: ["Prompt hash", "Tool hash", "Release ID"],
@@ -2676,7 +2645,7 @@
             { id: "policy", title: "FastAPI trust boundary", subtitle: "Internal ACA ingress", kind: "trust", nodeIds: ["fastapi-backend", "conversation-orchestration"] },
             { id: "agents", title: "Foundry agent plane", subtitle: "One project, two logical agents", kind: "network", nodeIds: ["prompt-agent", "hosted-maf"] },
             { id: "grounding", title: "Knowledge and models", subtitle: "Grounding plus shared Foundry models", kind: "network", nodeIds: ["foundry-iq", "ai-search", "foundry-models"] },
-            { id: "data", title: "Memory and operations", subtitle: "Private stores and telemetry", kind: "data", nodeIds: ["cosmos-history", "cosmos-profiles", "postgres-memory", "app-insights"] }
+            { id: "data", title: "Memory and operations", subtitle: "Private stores and telemetry", kind: "data", nodeIds: ["cosmos-history", "cosmos-profiles", "cosmos-memories", "app-insights"] }
           ]
         },
         {
@@ -2699,7 +2668,7 @@
             { id: "tool-foundry", title: "Hosted runtime and identity", subtitle: "App-only token; no direct data roles", kind: "trust", nodeIds: ["hosted-maf", "hosted-sp", "shared-contracts", "entra-id"] },
             { id: "tool-edge", title: "Public frontend route", subtitle: "Rate and body limits", kind: "network", nodeIds: ["frontend-ca"] },
             { id: "tool-policy", title: "FastAPI policy boundary", subtitle: "Token plus stored session binding", kind: "trust", nodeIds: ["app-tool-gateway", "app-tools"] },
-            { id: "tool-data", title: "Owner-scoped application data", subtitle: "Gateway handlers only", kind: "data", nodeIds: ["mock-orders", "cosmos-profiles", "postgres-memory", "foundry-models"] },
+            { id: "tool-data", title: "Owner-scoped application data", subtitle: "Gateway handlers only", kind: "data", nodeIds: ["mock-orders", "cosmos-profiles", "cosmos-memories", "foundry-models"] },
             { id: "tool-iq", title: "Independent grounding", subtitle: "Project MCP connection", kind: "network", nodeIds: ["foundry-iq"] }
           ]
         },
@@ -2711,7 +2680,7 @@
             { id: "memory-client", title: "User actions", subtitle: "Chat plus explicit memory/profile APIs", kind: "layer", nodeIds: ["browser-spa"] },
             { id: "memory-policy", title: "Application orchestration", subtitle: "FastAPI and in-process state", kind: "trust", nodeIds: ["fastapi-backend", "conversation-orchestration", "memory-agent", "profile-agent"] },
             { id: "memory-remote", title: "F1 remote session state", subtitle: "Platform-managed", kind: "network", nodeIds: ["prompt-runtime", "hosted-runtime", "foundry-conversations"] },
-            { id: "memory-owned", title: "F2-F4 application memory", subtitle: "Owner-partitioned private stores", kind: "data", nodeIds: ["cosmos-history", "postgres-memory", "cosmos-profiles"] },
+            { id: "memory-owned", title: "F2-F4 application memory", subtitle: "Owner-partitioned private Cosmos stores", kind: "data", nodeIds: ["cosmos-history", "cosmos-memories", "cosmos-profiles"] },
             { id: "memory-knowledge", title: "F5 knowledge and models", subtitle: "Retrieval plus summary, profile, embedding, and IQ planning", kind: "network", nodeIds: ["prompt-agent", "hosted-maf", "foundry-iq", "ai-search", "foundry-models"] }
           ]
         },
@@ -2722,8 +2691,8 @@
           lanes: [
             { id: "net-callers", title: "Public callers", subtitle: "Internet and Foundry platform", kind: "network", nodeIds: ["browser-spa", "hosted-maf"] },
             { id: "net-public", title: "Public Entra-only endpoints", subtitle: "No local, admin, or anonymous auth", kind: "network", nodeIds: ["frontend-ca", "foundry-project", "foundry-models", "ai-search", "acr"] },
-            { id: "net-aca", title: "ACA VNet - East US 2", subtitle: "snet-aca; default outbound disabled", kind: "trust", nodeIds: ["aca-environment", "fastapi-backend", "pg-setup-job", "app-uami"] },
-            { id: "net-private", title: "Private endpoint data plane", subtitle: "snet-pe in East US 2", kind: "data", nodeIds: ["cosmos-history", "cosmos-profiles", "postgres-memory", "ampls"] },
+            { id: "net-aca", title: "ACA VNet - East US 2", subtitle: "snet-aca; default outbound disabled", kind: "trust", nodeIds: ["aca-environment", "fastapi-backend", "app-uami"] },
+            { id: "net-private", title: "Private endpoint data plane", subtitle: "snet-pe in East US 2", kind: "data", nodeIds: ["cosmos-history", "cosmos-profiles", "cosmos-memories", "ampls"] },
             { id: "net-observe", title: "Service identities and telemetry", subtitle: "Project, Search, ingestion, and query", kind: "data", nodeIds: ["project-mi", "search-mi", "app-insights", "log-analytics"] }
           ]
         },
@@ -2735,20 +2704,19 @@
             { id: "sec-callers", title: "Callers and Entra ID", subtitle: "Delegated and app-only token classes", kind: "trust", nodeIds: ["user", "browser-spa", "hosted-maf", "entra-id"] },
             { id: "sec-edge", title: "Public application edge", subtitle: "Delegated and app-only routes", kind: "network", nodeIds: ["frontend-ca"] },
             { id: "sec-policy", title: "Policy enforcement", subtitle: "Never trust caller-supplied owner IDs", kind: "trust", nodeIds: ["fastapi-backend", "app-tool-gateway", "app-tools"] },
-            { id: "sec-identities", title: "Managed identities", subtitle: "Runtime identities plus the one remaining PostgreSQL setup identity", kind: "trust", nodeIds: ["app-uami", "frontend-uami", "hosted-sp", "project-mi", "pg-bootstrap-uami", "search-mi"] },
+            { id: "sec-identities", title: "Managed identities", subtitle: "Least-privilege runtime and service identities", kind: "trust", nodeIds: ["app-uami", "frontend-uami", "hosted-sp", "project-mi", "search-mi"] },
             { id: "sec-public-resources", title: "Public protected resources", subtitle: "Entra and RBAC only", kind: "network", nodeIds: ["foundry-project", "foundry-models", "ai-search", "acr"] },
-            { id: "sec-private-resources", title: "Private protected resources", subtitle: "Owner-partitioned application data", kind: "data", nodeIds: ["cosmos-history", "cosmos-profiles", "postgres-memory"] }
+            { id: "sec-private-resources", title: "Private protected resources", subtitle: "Owner-partitioned application data", kind: "data", nodeIds: ["cosmos-history", "cosmos-profiles", "cosmos-memories"] }
           ]
         },
         {
           id: "bootstrap",
           name: "Bootstrap and release",
-          description: "Terraform creates the platform and RBAC, ACR Tasks build four images, the only remaining Container Apps Job bootstraps PostgreSQL inside the VNet, and a direct operator-run script configures Search/Foundry IQ and publishes the Prompt Agent with no setup container or shared identity.",
+          description: "Terraform creates the platform and RBAC, ACR Tasks build three runtime images, and a direct operator-run script configures Search/Foundry IQ and publishes the Prompt Agent with no setup container, job, or shared identity.",
           lanes: [
             { id: "boot-inputs", title: "Operator and control plane", subtitle: "Source, Terraform, and image release", kind: "trust", nodeIds: ["operator", "repo-corpus", "terraform", "deploy-images"] },
             { id: "boot-registry", title: "Container registry", subtitle: "Private ACA and public Foundry pulls", kind: "network", nodeIds: ["acr"] },
-            { id: "boot-jobs", title: "VNet-integrated setup job", subtitle: "Manual, one replica, retry limit 1", kind: "trust", nodeIds: ["pg-bootstrap-uami", "pg-setup-job"] },
-            { id: "boot-release", title: "Direct Foundry release", subtitle: "Deployer RBAC; initializes knowledge and agent definitions", kind: "network", nodeIds: ["release-foundry-assets", "foundry-models", "ai-search", "foundry-iq", "postgres-memory", "prompt-agent"] },
+            { id: "boot-release", title: "Direct Foundry release", subtitle: "Deployer RBAC; initializes knowledge and agent definitions", kind: "network", nodeIds: ["release-foundry-assets", "foundry-models", "ai-search", "foundry-iq", "prompt-agent"] },
             { id: "boot-runtime", title: "Runtime images", subtitle: "Rolled apps and Foundry-hosted image", kind: "network", nodeIds: ["aca-environment", "frontend-ca", "fastapi-backend", "hosted-maf", "foundry-project"] }
           ]
         },
@@ -2758,7 +2726,7 @@
           description: "Liveness is dependency-free; readiness checks configured stores and runtimes with timeouts, while private telemetry records only allowlisted dimensions.",
           lanes: [
             { id: "ops-runtime", title: "Runtime and health plane", subtitle: "Single replica; bounded and sanitized checks", kind: "trust", nodeIds: ["frontend-ca", "fastapi-backend", "conversation-orchestration", "health-readiness"] },
-            { id: "ops-deps", title: "Checked dependencies", subtitle: "Only configured services", kind: "data", nodeIds: ["foundry-project", "foundry-iq", "cosmos-history", "postgres-memory"] },
+            { id: "ops-deps", title: "Checked dependencies", subtitle: "Memory is optional; history and runtimes gate readiness", kind: "data", nodeIds: ["foundry-project", "foundry-iq", "cosmos-history", "cosmos-memories"] },
             { id: "ops-telemetry", title: "Private telemetry path", subtitle: "AAD-authenticated", kind: "network", nodeIds: ["ampls", "app-insights", "log-analytics"] },
             { id: "ops-release", title: "Release and rollback", subtitle: "Feature flags and retained versions", kind: "layer", nodeIds: ["operator", "terraform", "deploy-images", "acr"] },
             { id: "ops-images", title: "Runtime image consumers", subtitle: "ACA and Foundry", kind: "network", nodeIds: ["aca-environment", "hosted-maf"] }
@@ -2773,10 +2741,10 @@
           evidence: evidence("backend/agent_memory_backend/conversation_registry.py", "40-49", "Process-local mappings and locks")
         },
         {
-          title: "Semantic vectors have no ANN index",
-          detail: "The bootstrap creates vector(3072) but no HNSW or IVFFlat index, so similarity search is a sequential scan as the table grows.",
+          title: "Cosmos vector index has a small-set fallback",
+          detail: "The memories container uses quantizedFlat cosine search. Cosmos may use full-scan behavior below 1,000 indexed vectors, which is appropriate for this bounded demo workload but should be revisited for materially larger collections.",
           confidence: "observed",
-          evidence: evidence("setup/postgres/bootstrap.py", "13-27", "Current schema SQL")
+          evidence: evidence("infra/data.tf", "azapi_resource.cosmos_memories", "Current vector embedding and index policy")
         },
         {
           title: "Public does not mean key-based",
@@ -2785,10 +2753,10 @@
           evidence: evidence("docs/PRD-Solution-Challenges-1-5.md", "207-223", "Approved network posture")
         },
         {
-          title: "The data plane spans three regions",
-          detail: "Container Apps and Foundry run in East US 2, PostgreSQL in North Central US, and Search in West Europe. PostgreSQL is reached through a cross-region private endpoint.",
+          title: "The data plane spans two regions",
+          detail: "Container Apps, Foundry, and private Cosmos application data run in East US 2; Search and Foundry IQ knowledge indexes run in West Europe.",
           confidence: "observed",
-          evidence: evidence("infra/variables.tf", "7-21", "Region defaults and constraints")
+          evidence: evidence("infra/variables.tf", "location and search_location", "Region defaults and constraints")
         },
         {
           title: "Foundry release runs outside Terraform, by design",
@@ -2822,7 +2790,7 @@
         },
         {
           title: "Snapshot includes working-tree changes",
-          detail: "Evidence was collected from the current local working tree, not only commit c1f56e30c0fa, so immutable GitHub line links would be misleading.",
+          detail: "Evidence was collected from the current local working tree, not only commit 6d3194ea55a5, so immutable GitHub line links would be misleading.",
           confidence: "observed",
           evidence: evidence("docs/architecture.html", "1816-1825", "Snapshot metadata records the working-tree scope")
         }

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 import unittest
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -14,7 +13,6 @@ from agent_contracts import (
     tool_definition,
 )
 from agent_memory_backend.agent_tools import ToolExecutionError, ToolExecutor
-from agent_memory_backend.conversation_memory import AzurePostgresTokenCache
 from agent_memory_backend.foundry_iq_health import FoundryIqHealthProbe
 from setup.agents.release_prompt_agent import _prompt_definition
 from agent_memory_backend.telemetry import _safe_attributes
@@ -152,51 +150,6 @@ class SharedToolContractTests(unittest.IsolatedAsyncioTestCase):
     def test_unknown_tool_definition_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown tool"):
             tool_definition("knowledge_base_retrieve")
-
-
-class _FakeCredential:
-    def __init__(self, *, fail_after: int | None = None) -> None:
-        self.calls = 0
-        self.fail_after = fail_after
-
-    async def get_token(self, scope: str) -> SimpleNamespace:
-        self.calls += 1
-        if self.fail_after is not None and self.calls > self.fail_after:
-            raise RuntimeError("token service detail")
-        return SimpleNamespace(
-            token=f"token-{self.calls}",
-            expires_on=int(time.time()) + 3600,
-        )
-
-
-class PostgresTokenCacheTests(unittest.IsolatedAsyncioTestCase):
-    async def test_refresh_keeps_password_callback_nonblocking(self) -> None:
-        credential = _FakeCredential()
-        cache = AzurePostgresTokenCache(credential)
-        await cache.start()
-        try:
-            self.assertEqual(cache.password(), "token-1")
-            await cache._refresh()
-            self.assertEqual(cache.password(), "token-2")
-            self.assertEqual(credential.calls, 2)
-        finally:
-            await cache.close()
-        self.assertIsNone(cache._refresh_task)
-
-    async def test_expired_token_is_rejected(self) -> None:
-        cache = AzurePostgresTokenCache(_FakeCredential())
-        cache._token = "expired"
-        cache._expires_on = int(time.time()) - 1
-        with self.assertRaises(RuntimeError):
-            cache.password()
-
-    async def test_refresh_failure_preserves_still_valid_token(self) -> None:
-        credential = _FakeCredential(fail_after=1)
-        cache = AzurePostgresTokenCache(credential)
-        await cache._refresh()
-        with self.assertRaises(RuntimeError):
-            await cache._refresh()
-        self.assertEqual(cache.password(), "token-1")
 
 
 class ReadinessTests(unittest.IsolatedAsyncioTestCase):

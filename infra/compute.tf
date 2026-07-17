@@ -81,11 +81,7 @@ locals {
     AZURE_OPENAI_EMBED_DEPLOYMENT              = azurerm_cognitive_deployment.foundry_agents_embedding.name
     COSMOS_ENDPOINT                            = azurerm_cosmosdb_account.main.endpoint
     COSMOS_DATABASE                            = azurerm_cosmosdb_sql_database.main.name
-    POSTGRES_HOST                              = azurerm_postgresql_flexible_server.main.fqdn
-    POSTGRES_DB                                = azurerm_postgresql_flexible_server_database.memory.name
-    POSTGRES_USER                              = azurerm_user_assigned_identity.app.name
-    POSTGRES_PORT                              = "5432"
-    PG_AUTH_MODE                               = "managed_identity"
+    COSMOS_MEMORY_CONTAINER                    = azapi_resource.cosmos_memories.name
     SEARCH_ENDPOINT                            = "https://${azurerm_search_service.main.name}.search.windows.net"
     SEARCH_KB                                  = "customer-support-kb"
     SEARCH_ORDERS_KNOWLEDGE_SOURCE             = "orders-ks"

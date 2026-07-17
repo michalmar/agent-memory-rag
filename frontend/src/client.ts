@@ -141,7 +141,7 @@ export class AGUIClient {
     return this.req('/agents');
   }
 
-  // Conversation memory (pgvector)
+  // Conversation memory (Cosmos vector search)
   listMemories(): Promise<MemoryRow[]> {
     return this.req('/memories');
   }

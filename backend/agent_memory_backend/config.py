@@ -45,17 +45,7 @@ class Settings:
     cosmos_database = _get("COSMOS_DATABASE", "support")
     cosmos_history_container = _get("COSMOS_HISTORY_CONTAINER", "history")
     cosmos_profiles_container = _get("COSMOS_PROFILES_CONTAINER", "profiles")
-
-    # Postgres
-    pg_host = _get("POSTGRES_HOST")
-    pg_db = _get("POSTGRES_DB", "memory")
-    pg_user = _get("POSTGRES_USER", "pgadmin")
-    pg_password = _get("POSTGRES_PASSWORD")
-    pg_port = int(_get("POSTGRES_PORT", "5432") or "5432")
-    pg_auth_mode = _get("PG_AUTH_MODE", "password")  # password | managed_identity
-    pg_token_refresh_margin_seconds = int(
-        _get("POSTGRES_TOKEN_REFRESH_MARGIN_SECONDS", "300") or "300"
-    )
+    cosmos_memory_container = _get("COSMOS_MEMORY_CONTAINER", "memories")
 
     # Search
     search_endpoint = _get("SEARCH_ENDPOINT")
@@ -113,10 +103,6 @@ class Settings:
     @property
     def cosmos_configured(self) -> bool:
         return bool(self.cosmos_endpoint)
-
-    @property
-    def postgres_configured(self) -> bool:
-        return bool(self.pg_host)
 
     @property
     def search_configured(self) -> bool:

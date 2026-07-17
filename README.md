@@ -30,8 +30,7 @@ flowchart LR
     H --> IQ
     H -->|App-only token| F
     F -->|Restricted proxy| B
-    B --> C[(Private Cosmos DB)]
-    B --> PG[(Private PostgreSQL)]
+    B --> C[(Private Cosmos DB: history, profile, semantic memory)]
     B --> M[Active Foundry Models]
     P --> O[Project Application Insights]
     H --> O
@@ -59,12 +58,10 @@ direct application-data roles.
   immutable agent selection, Markdown/citation streaming, and a constrained A2UI
   subset for internal tool cards.
 - **Infrastructure** (`infra/`) - Terraform for Foundry Basic Setup, Container Apps,
-  Search, Cosmos DB, PostgreSQL, ACR, private endpoints, monitoring, managed
+  Search, Cosmos DB, ACR, private endpoints, monitoring, managed
   identities, and least-privilege RBAC.
 - **Direct Foundry release** (`scripts/release_foundry_assets.sh`) - configures
   Search/Foundry IQ and publishes the Prompt Agent without setup containers.
-- **Private setup job** (`setup/postgres/`) - the only retained Container Apps Job,
-  used for PostgreSQL bootstrap inside the VNet.
 
 ## Five memory layers
 
@@ -72,8 +69,8 @@ direct application-data roles.
    mappings and per-conversation locks.
 2. **Conversation history** - Cosmos DB, partitioned and queried by tenant-scoped
    authenticated user ID.
-3. **Semantic conversation memory** - PostgreSQL with pgvector and an async
-   managed-identity connection pool.
+3. **Semantic conversation memory** - owner-partitioned Cosmos DB documents with
+   3,072-dimensional cosine vector search.
 4. **User profile memory** - owner-partitioned Cosmos DB profile documents.
 5. **Enterprise knowledge** - Foundry IQ backed by Azure AI Search knowledge
    sources and returned citations.
@@ -91,7 +88,6 @@ session coordination is not part of this implementation.
 | Azure AI Search / Foundry IQ | Public only | Entra/RBAC only; local auth disabled |
 | Azure Container Registry | Public plus private endpoint | Entra/RBAC only; admin and anonymous pull disabled |
 | Cosmos DB | Private endpoint only | Application UAMI; local auth disabled |
-| PostgreSQL | Private endpoint only | Entra managed identity; password auth disabled |
 | Application Insights / Log Analytics | Public Foundry platform path plus private AMPLS path for ACA | Foundry project connection; backend UAMI |
 
 The public Foundry, Search, and ACR endpoints are required by non-VNet-injected
@@ -117,7 +113,7 @@ content.
 - User ownership keys are derived as `tid:oid`; APIs do not accept caller-supplied
   user IDs.
 - The backend uses a user-assigned managed identity for Foundry, Cosmos DB,
-  PostgreSQL, Search, ACR, and telemetry.
+  Search, ACR, and telemetry.
 - The Hosted Agent uses its Foundry-created service principal only to request the
   `AgentTools.Invoke` application role.
 - Hosted gateway tokens must be application-only, contain the required role, and
@@ -133,9 +129,8 @@ content.
 
 - Azure-backed stores and runtimes are asynchronous and expose explicit
   initialize/close lifecycles.
-- Cosmos uses `azure.cosmos.aio.CosmosClient`.
-- PostgreSQL uses
-  `asyncpg.create_pool(..., min_size=2, max_size=10)`.
+- Cosmos history, profile, and semantic-memory stores use
+  `azure.cosmos.aio.CosmosClient`.
 - Runtime Azure SDK and HTTP clients are asynchronous.
 - Agent streams are consumed with `async for`.
 - Synchronous JWT/JWKS work is isolated from the event loop.
@@ -221,17 +216,16 @@ curl -H "Authorization: Bearer $TOKEN" \
 2. Provision Azure resources and RBAC with Terraform.
 3. Run `scripts/release_foundry_assets.sh all` to configure Search/Foundry IQ and
    publish the native Prompt Agent directly.
-4. Build backend, frontend, PostgreSQL bootstrap, and Hosted MAF images with ACR
-   Tasks; local Docker is not required.
-5. Run the VNet-integrated PostgreSQL bootstrap job.
-6. Deploy the Hosted MAF image to the Foundry project.
-7. Assign `AgentTools.Invoke` to the generated Hosted Agent principal and add that
+4. Build backend, frontend, and Hosted MAF images with ACR Tasks; local Docker is
+   not required.
+5. Deploy the Hosted MAF image to the Foundry project.
+6. Assign `AgentTools.Invoke` to the generated Hosted Agent principal and add that
    principal to the backend allowlist.
-8. Deploy backend/frontend images and enable agents only after readiness and live
+7. Deploy backend/frontend images and enable agents only after readiness and live
    acceptance pass.
 
-`scripts/deploy_images.sh` builds the application, PostgreSQL bootstrap, and Hosted
-MAF images through ACR and updates the Container Apps and PostgreSQL job.
+`scripts/deploy_images.sh` builds the application and Hosted MAF images through ACR
+and updates the Container Apps.
 `scripts/assign_hosted_agent_access.sh` idempotently assigns the Hosted application
 role.
 
@@ -253,7 +247,7 @@ agents/           Foundry Hosted Microsoft Agent Framework source
 backend/          Packaged FastAPI trust boundary, stores, gateway, and agent adapters
 frontend/         Componentized Vite + Lit SPA and constrained A2UI tool cards
 infra/            Terraform infrastructure, networking, identities, and RBAC
-setup/            Direct Foundry IQ/Prompt release code and PostgreSQL bootstrap
+setup/            Direct Foundry IQ and Prompt Agent release code
 scripts/          Entra, direct Foundry release, image deployment, and role assignment
 docs/             Current PRD and implementation delivery record
 ```

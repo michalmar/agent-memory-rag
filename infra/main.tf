@@ -10,17 +10,14 @@ locals {
     vnet              = "vnet-${var.name_prefix}-${local.suffix}"
     identity          = "id-${var.name_prefix}-${local.suffix}"
     frontend_identity = "id-${var.name_prefix}-frontend-${local.suffix}"
-    pg_identity       = "id-${var.name_prefix}-pgbootstrap-${local.suffix}"
     foundry_agents    = "${local.base}aif2"
     foundry_project   = "${var.name_prefix}-agents"
     cosmos            = "${local.base}cosmos"
-    postgres          = "${local.base}pgnc"
     search            = "${local.base}search"
     acr               = "${local.base}acr"
     aca_env           = "cae-${var.name_prefix}-${local.suffix}"
     backend_app       = "ca-${var.name_prefix}-backend"
     frontend_app      = "ca-${var.name_prefix}-frontend"
-    pg_setup_job      = "caj-${var.name_prefix}-pgsetup"
   }
 }
 
@@ -48,13 +45,6 @@ resource "azurerm_user_assigned_identity" "app" {
 
 resource "azurerm_user_assigned_identity" "frontend" {
   name                = local.names.frontend_identity
-  location            = azurerm_resource_group.main.location
-  resource_group_name = azurerm_resource_group.main.name
-  tags                = var.tags
-}
-
-resource "azurerm_user_assigned_identity" "postgres_bootstrap" {
-  name                = local.names.pg_identity
   location            = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
   tags                = var.tags

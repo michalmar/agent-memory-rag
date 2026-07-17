@@ -23,6 +23,48 @@ resource "azurerm_cosmosdb_account" "main" {
   }
 
   tags = var.tags
+
+  lifecycle {
+    ignore_changes = [capabilities]
+  }
+}
+
+resource "terraform_data" "cosmos_vector_search" {
+  triggers_replace = {
+    account_id = azurerm_cosmosdb_account.main.id
+    capability = "EnableNoSQLVectorSearch"
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      current="$(az cosmosdb show \
+        --resource-group '${azurerm_resource_group.main.name}' \
+        --name '${azurerm_cosmosdb_account.main.name}' \
+        --query 'capabilities[].name' \
+        --output tsv)"
+      if ! grep -qx 'EnableNoSQLVectorSearch' <<<"$current"; then
+        az cosmosdb update \
+          --resource-group '${azurerm_resource_group.main.name}' \
+          --name '${azurerm_cosmosdb_account.main.name}' \
+          --capabilities EnableServerless EnableNoSQLVectorSearch \
+          --output none
+      fi
+      updated="$(az cosmosdb show \
+        --resource-group '${azurerm_resource_group.main.name}' \
+        --name '${azurerm_cosmosdb_account.main.name}' \
+        --query 'capabilities[].name' \
+        --output tsv)"
+      grep -qx 'EnableServerless' <<<"$updated"
+      grep -qx 'EnableNoSQLVectorSearch' <<<"$updated"
+    EOT
+  }
+}
+
+resource "time_sleep" "cosmos_vector_search_propagation" {
+  depends_on      = [terraform_data.cosmos_vector_search]
+  create_duration = "15m"
 }
 
 resource "azurerm_cosmosdb_sql_database" "main" {
@@ -49,6 +91,61 @@ resource "azurerm_cosmosdb_sql_container" "profiles" {
   partition_key_version = 2
 }
 
+resource "azapi_resource" "cosmos_memories" {
+  type      = "Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-11-15"
+  name      = "memories"
+  parent_id = azurerm_cosmosdb_sql_database.main.id
+
+  body = {
+    properties = {
+      resource = {
+        id = "memories"
+        partitionKey = {
+          paths   = ["/user_id"]
+          kind    = "Hash"
+          version = 2
+        }
+        indexingPolicy = {
+          automatic    = true
+          indexingMode = "consistent"
+          includedPaths = [
+            {
+              path = "/*"
+            }
+          ]
+          excludedPaths = [
+            {
+              path = "/_etag/?"
+            },
+            {
+              path = "/embedding/*"
+            }
+          ]
+          vectorIndexes = [
+            {
+              path = "/embedding"
+              type = "quantizedFlat"
+            }
+          ]
+        }
+        vectorEmbeddingPolicy = {
+          vectorEmbeddings = [
+            {
+              path             = "/embedding"
+              dataType         = "float32"
+              distanceFunction = "cosine"
+              dimensions       = 3072
+            }
+          ]
+        }
+      }
+      options = {}
+    }
+  }
+
+  depends_on = [time_sleep.cosmos_vector_search_propagation]
+}
+
 resource "azurerm_private_endpoint" "cosmos" {
   name                = "pe-${local.names.cosmos}"
   location            = azurerm_resource_group.main.location
@@ -67,76 +164,6 @@ resource "azurerm_private_endpoint" "cosmos" {
     name                 = "cosmos"
     private_dns_zone_ids = [azurerm_private_dns_zone.zones["cosmos"].id]
   }
-}
-
-# =========================================================== PostgreSQL Flexible
-# Deployed in var.postgres_location (eastus2 is offer-restricted for Postgres on
-# this subscription). Public access disabled; reached from the eastus2 VNet via a
-# cross-region private endpoint (VNet injection can't span regions).
-resource "azurerm_postgresql_flexible_server" "main" {
-  name                          = local.names.postgres
-  location                      = var.postgres_location
-  resource_group_name           = azurerm_resource_group.main.name
-  version                       = "16"
-  storage_mb                    = 32768
-  sku_name                      = "B_Standard_B1ms"
-  public_network_access_enabled = false
-  tags                          = var.tags
-
-  authentication {
-    active_directory_auth_enabled = true
-    password_auth_enabled         = false
-    tenant_id                     = data.azurerm_client_config.current.tenant_id
-  }
-
-  lifecycle {
-    ignore_changes = [zone]
-  }
-}
-
-resource "azurerm_postgresql_flexible_server_active_directory_administrator" "bootstrap" {
-  server_name         = azurerm_postgresql_flexible_server.main.name
-  resource_group_name = azurerm_resource_group.main.name
-  tenant_id           = data.azurerm_client_config.current.tenant_id
-  object_id           = azurerm_user_assigned_identity.postgres_bootstrap.principal_id
-  principal_name      = azurerm_user_assigned_identity.postgres_bootstrap.name
-  principal_type      = "ServicePrincipal"
-}
-
-# Cross-region private endpoint in the eastus2 PE subnet targeting the Postgres server.
-resource "azurerm_private_endpoint" "postgres" {
-  name                = "pe-${local.names.postgres}"
-  location            = azurerm_resource_group.main.location
-  resource_group_name = azurerm_resource_group.main.name
-  subnet_id           = azurerm_subnet.pe.id
-  tags                = var.tags
-
-  private_service_connection {
-    name                           = "psc-postgres"
-    private_connection_resource_id = azurerm_postgresql_flexible_server.main.id
-    subresource_names              = ["postgresqlServer"]
-    is_manual_connection           = false
-  }
-
-  private_dns_zone_group {
-    name                 = "postgres"
-    private_dns_zone_ids = [azurerm_private_dns_zone.zones["postgres"].id]
-  }
-
-  depends_on = [azurerm_private_dns_zone_virtual_network_link.links]
-}
-
-resource "azurerm_postgresql_flexible_server_configuration" "extensions" {
-  name      = "azure.extensions"
-  server_id = azurerm_postgresql_flexible_server.main.id
-  value     = "VECTOR"
-}
-
-resource "azurerm_postgresql_flexible_server_database" "memory" {
-  name      = "memory"
-  server_id = azurerm_postgresql_flexible_server.main.id
-  collation = "en_US.utf8"
-  charset   = "UTF8"
 }
 
 # =========================================================== Azure AI Search

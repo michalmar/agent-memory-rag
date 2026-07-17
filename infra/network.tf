@@ -37,7 +37,6 @@ resource "azurerm_subnet" "pe" {
 locals {
   private_dns_zones = {
     cosmos   = "privatelink.documents.azure.com"
-    postgres = "privatelink.postgres.database.azure.com"
     acr      = "privatelink.azurecr.io"
     blob     = "privatelink.blob.core.windows.net"
     monitor  = "privatelink.monitor.azure.com"

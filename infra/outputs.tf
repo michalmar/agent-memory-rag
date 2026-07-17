@@ -38,10 +38,6 @@ output "cosmos_endpoint" {
   value = azurerm_cosmosdb_account.main.endpoint
 }
 
-output "postgres_fqdn" {
-  value = azurerm_postgresql_flexible_server.main.fqdn
-}
-
 output "search_endpoint" {
   value = "https://${azurerm_search_service.main.name}.search.windows.net"
 }
@@ -56,10 +52,6 @@ output "chat_deployment" {
 
 output "embedding_deployment" {
   value = azurerm_cognitive_deployment.foundry_agents_embedding.name
-}
-
-output "postgres_setup_job_name" {
-  value = azurerm_container_app_job.postgres_setup.name
 }
 
 output "application_insights_name" {

@@ -35,13 +35,13 @@ new conversation and immutable afterward.
 | Failover | No automatic cross-agent failover | A conversation remains bound to its original runtime and state |
 | Trust boundary | FastAPI owns authentication, authorization, persistence, tool policy, and public DTOs | Models and Hosted runtime identities never become application-data authorities |
 | Foundry state | Basic Setup platform-managed state | Avoids BYO Storage requirements that conflict with tenant policy |
-| Networking | Public Entra/RBAC-only Foundry and Search; dual-path public/private ACR; private Cosmos DB, PostgreSQL, and backend ingress | Supports non-VNet-injected Foundry runtimes while protecting application data |
+| Networking | Public Entra/RBAC-only Foundry and Search; dual-path public/private ACR; private Cosmos DB and backend ingress | Supports non-VNet-injected Foundry runtimes while protecting application data |
 | Backend identity | User-assigned managed identity | Avoids application secrets for Azure data-plane access and Foundry invocation |
 | Hosted identity | Foundry-created service principal | Hosted Agent preview does not support assigning the application UAMI |
 | Session coordination | Bounded in-memory cache and one backend replica | Redis is intentionally absent |
 | Infrastructure | Terraform manages Azure resources; Entra app registration remains manual | Separates subscription governance from directory governance |
 | Observability | One workspace-based Application Insights resource receives backend, Prompt, Hosted MAF, and Foundry telemetry | Provides a single operational view with RBAC-restricted, 30-day retention |
-| Release execution | Foundry IQ and Prompt publication run directly; only PostgreSQL bootstrap remains a Container Apps Job; Hosted MAF remains container-based | Removes unnecessary setup images while retaining private-network bootstrap and supported Hosted deployment |
+| Release execution | Foundry IQ and Prompt publication run directly; Hosted MAF remains container-based; no setup Container Apps Jobs remain | Removes unnecessary setup identities, jobs, and images while retaining the supported Hosted deployment |
 
 ## 3. Scope
 
@@ -49,7 +49,7 @@ new conversation and immutable afterward.
 
 - Challenge 01: current-conversation session memory.
 - Challenge 02: durable owner-partitioned conversation history.
-- Challenge 03: semantic conversation memory in PostgreSQL with pgvector.
+- Challenge 03: semantic conversation memory in Cosmos DB with vector search.
 - Challenge 04: durable user profile memory.
 - Challenge 05: grounded retrieval through Foundry IQ.
 - User-selectable native Prompt and Hosted MAF agents.
@@ -83,10 +83,8 @@ flowchart LR
     S -->|Search identity| M[Active Foundry model deployments]
     H -->|Hosted identity / app-only token| F
     F -->|Restricted reverse proxy| G[Internal Tool Gateway]
-    G -->|Application UAMI| C[(Cosmos History and Profile)]
-    G -->|Application UAMI| PG[(PostgreSQL Memory)]
+    G -->|Application UAMI| C[(Cosmos History, Profile, and Semantic Memory)]
     B -->|Application UAMI| C
-    B -->|Application UAMI| PG
     B -->|Application UAMI / public endpoint| M
     P --> O[Project Application Insights]
     H --> O
@@ -183,9 +181,8 @@ session ownership fields.
 
 | Principal | Required access |
 | --- | --- |
-| Backend application UAMI | ACR pull, active Foundry invocation, trusted user impersonation, remote conversation create/delete, chat/embedding model use, Cosmos data, PostgreSQL, Search read, and telemetry publish |
+| Backend application UAMI | ACR pull, active Foundry invocation, trusted user impersonation, remote conversation create/delete, chat/embedding model use, Cosmos data, Search read, and telemetry publish |
 | Frontend UAMI | ACR pull |
-| PostgreSQL bootstrap UAMI | ACR pull and PostgreSQL Entra administration used to grant the application principal least-privilege database access |
 | Foundry project managed identity | Foundry user, Search index read, ACR pull, Log Analytics read, and Foundry IQ connection authentication |
 | Hosted Agent service principal | Backend `AgentTools.Invoke` application role only |
 | Search system identity | Active Foundry model access required by the knowledge base |
@@ -209,7 +206,7 @@ create/delete operations to those actions.
 - Only allowlisted tool names can be dispatched.
 - The public frontend route has a bounded request body and rate limiting, then
   proxies to the internal backend.
-- The Hosted identity receives no Cosmos DB, PostgreSQL, Search, or other
+- The Hosted identity receives no Cosmos DB, Search, or other
   application-data role.
 
 ## 8. Networking
@@ -221,8 +218,7 @@ create/delete operations to those actions.
 | Foundry agent account/project and models | Public endpoint only | Entra/RBAC only; local auth disabled | Hosts both agents and all application/knowledge-base model deployments |
 | Azure AI Search / Foundry IQ | Public endpoint only | Entra/RBAC only; local auth disabled | Avoids private DNS that the non-injected Hosted runtime cannot resolve |
 | Azure Container Registry | Public endpoint plus private endpoint | Entra/RBAC only; admin and anonymous pull disabled | Hosted runtime pulls publicly; ACA resolves and pulls privately |
-| Cosmos DB | Private endpoint only | Application UAMI; local auth disabled | Protects history and profile data |
-| PostgreSQL Flexible Server | Private endpoint only | Entra managed identity; password auth disabled | Protects semantic memory |
+| Cosmos DB | Private endpoint only | Application UAMI; local auth disabled | Protects history, profile, and semantic-memory data |
 | Application Insights / Log Analytics | Public platform path plus private AMPLS path for ACA | Backend uses UAMI; Foundry project uses its App Insights connection | Unifies Prompt, Hosted, backend, and platform telemetry |
 
 Foundry uses Basic Setup without outbound VNet injection. Standard Setup with BYO
@@ -260,14 +256,15 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 
 ### F3 - Semantic conversation memory
 
-- Azure Database for PostgreSQL Flexible Server uses pgvector.
-- The async pool is created with
-  `asyncpg.create_pool(..., min_size=2, max_size=10)`.
-- Production authentication uses the backend UAMI and a nonblocking async token
-  refresh cache.
-- A private bootstrap job creates the principal, extension, schema, and
-  least-privilege grants.
-- Every query is parameterized and scoped to the authenticated user.
+- Cosmos DB stores one document per user and conversation in the `memories`
+  container, partitioned by `/user_id`.
+- Each document stores a 3,072-dimensional `float32` embedding and is indexed
+  with `quantizedFlat` cosine vector search.
+- Point operations always supply the authenticated partition key; list and vector
+  queries also include an explicit owner predicate.
+- Upserts use optimistic concurrency and preserve the original creation time.
+- Semantic-memory outages are reported as an optional degraded readiness
+  dependency and do not remove the backend from ingress.
 - Hosted MAF calls `check_memory` only when the user explicitly asks to recall a
   prior conversation.
 - The Prompt Agent has no semantic-memory tool.
@@ -332,13 +329,12 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 
 - Store and runtime methods are `async def`.
 - Stores and runtimes expose `initialize()`/`close()` or `connect()`/`close()`.
-- Cosmos uses `azure.cosmos.aio.CosmosClient`.
-- PostgreSQL uses `asyncpg`; no synchronous database client exists.
+- Cosmos stores use `azure.cosmos.aio.CosmosClient`.
 - Agent output is consumed with async iteration.
 - Runtime Azure SDK and HTTP clients are asynchronous.
 - Synchronous JWT/JWKS work is isolated with `asyncio.to_thread`.
 - No blocking network or database call runs on the event loop.
-- Shutdown closes clients, pools, credentials, and refresh tasks.
+- Shutdown closes clients, credentials, and refresh tasks.
 - Errors are surfaced; broad catches do not return success-shaped fallbacks.
 
 ## 12. Frontend requirements
@@ -392,12 +388,12 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 ## 14. Infrastructure, release, and operations
 
 - Terraform provisions networking, Container Apps, Foundry, model deployments,
-  Search, Cosmos DB, PostgreSQL, ACR, monitoring, managed identities, and RBAC.
+  Search, Cosmos DB, ACR, monitoring, managed identities, and RBAC.
 - The Entra SPA/API registration is created separately because it requires
   directory permissions distinct from subscription deployment permissions.
 - `scripts/release_foundry_assets.sh` runs Search/Foundry IQ setup and native Prompt
   Agent publication directly with the authenticated deployment principal.
-- The VNet-integrated PostgreSQL bootstrap is the only setup Container Apps Job.
+- No setup Container Apps Job or bootstrap identity is required.
 - Hosted MAF remains a container image in ACR and a Foundry Hosted Agent deployment.
 - Hosted Agent source-code deployment without a container is preview and remains a
   future simplification to reassess after general availability.
@@ -421,7 +417,7 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 - One Foundry Basic Setup project contains both logical agents.
 - No legacy Foundry account, Foundry/Search private endpoint, stale private DNS
   zone, setup UAMI/job, jump VM, or Bastion remains.
-- Only the PostgreSQL bootstrap Container Apps Job remains.
+- No setup Container Apps Job remains.
 - The Prompt Agent definition contains exactly one tool: Foundry IQ
   `knowledge_base_retrieve`.
 - Hosted MAF runs in Foundry and exposes Foundry IQ plus the four protected
@@ -435,7 +431,7 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 - Delegated tokens, missing roles, and non-allowlisted principals cannot invoke the
   Hosted tool gateway.
 - Cross-user isolation holds across frontend state, sessions, Foundry state,
-  Cosmos DB, PostgreSQL, and gateway dispatch.
+  Cosmos DB, and gateway dispatch.
 - Conversation routing is immutable and overlapping turns are rejected.
 - Strict schemas reject unknown tools, malformed input, extra fields, and identity
   injection.
@@ -448,7 +444,7 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 - Application-authored telemetry never contains owner information, profile data,
   memory content, or other sensitive payloads; RBAC-restricted Foundry full traces
   are the documented platform exception.
-- Cosmos DB, PostgreSQL, and backend ingress remain private.
+- Cosmos DB and backend ingress remain private.
 - Foundry, Search, and ACR public access remains Entra/RBAC-only, with local,
   admin, anonymous, and password authentication disabled as applicable.
 - The application remains async end to end and closes all resources cleanly.

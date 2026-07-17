@@ -10,10 +10,9 @@ from fastapi.responses import JSONResponse
 from agent_memory_backend import server
 
 
-def _settings(*, cosmos: bool = False, postgres: bool = False, search: bool = False):
+def _settings(*, cosmos: bool = False, search: bool = False):
     return SimpleNamespace(
         cosmos_configured=cosmos,
-        postgres_configured=postgres,
         search_configured=search,
         foundry_prompt_enabled=False,
         foundry_hosted_enabled=False,
@@ -45,25 +44,46 @@ class ServerHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["dependencies"]["cosmos_history"]["error"], "RuntimeError")
         self.assertEqual(payload["dependencies"]["cosmos_profile"]["error"], "RuntimeError")
 
-    async def test_dependency_failure_returns_503_and_success_returns_ready(self) -> None:
+    async def test_memory_failure_is_degraded_and_does_not_block_readiness(self) -> None:
         failing = AsyncMock(side_effect=ValueError("private database detail"))
         healthy = AsyncMock(return_value=None)
         with (
-            patch("agent_memory_backend.server.get_settings", return_value=_settings(postgres=True)),
+            patch(
+                "agent_memory_backend.server.get_settings",
+                return_value=_settings(cosmos=True),
+            ),
+            patch.object(server.history_store, "health_check", new=healthy),
+            patch.object(server.profile_store, "health_check", new=healthy),
             patch.object(server.memory_store, "health_check", new=failing),
         ):
-            failed_response = await server.health_ready()
+            degraded_response = await server.health_ready()
 
-        self.assertIsInstance(failed_response, JSONResponse)
-        failed_payload = json.loads(failed_response.body)
-        self.assertEqual(failed_payload["dependencies"]["postgres_memory"]["error"], "ValueError")
-        self.assertNotIn("private database", json.dumps(failed_payload))
+        self.assertEqual(degraded_response["status"], "ready")
+        self.assertEqual(
+            degraded_response["dependencies"]["cosmos_memory"]["error"],
+            "ValueError",
+        )
+        self.assertFalse(
+            degraded_response["dependencies"]["cosmos_memory"]["required"]
+        )
+        self.assertEqual(
+            degraded_response["degraded_dependencies"], ["cosmos_memory"]
+        )
+        self.assertNotIn("private database", json.dumps(degraded_response))
 
         with (
-            patch("agent_memory_backend.server.get_settings", return_value=_settings(postgres=True)),
+            patch(
+                "agent_memory_backend.server.get_settings",
+                return_value=_settings(cosmos=True),
+            ),
+            patch.object(server.history_store, "health_check", new=healthy),
+            patch.object(server.profile_store, "health_check", new=healthy),
             patch.object(server.memory_store, "health_check", new=healthy),
         ):
             ready_response = await server.health_ready()
 
         self.assertEqual(ready_response["status"], "ready")
-        self.assertEqual(ready_response["dependencies"]["postgres_memory"]["status"], "ok")
+        self.assertEqual(
+            ready_response["dependencies"]["cosmos_memory"]["status"], "ok"
+        )
+        self.assertEqual(ready_response["degraded_dependencies"], [])

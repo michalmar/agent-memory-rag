@@ -12,7 +12,7 @@ from typing import Any, Awaitable, Callable
 from ag_ui.core.events import RunErrorEvent, RunFinishedEvent, RunStartedEvent
 from ag_ui.encoder import EventEncoder
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -37,7 +37,11 @@ from .conversation_history import (
     ConversationHistoryStore,
     public_conversation_detail,
 )
-from .conversation_memory import ConversationMemoryStore, public_memory
+from .conversation_memory import (
+    ConversationMemoryStore,
+    MemoryStoreUnavailable,
+    public_memory,
+)
 from .conversation_registry import ConversationRegistry
 from .foundry_hosted_maf_runtime import FoundryHostedMafRuntime
 from .foundry_iq_health import FoundryIqHealthProbe
@@ -101,7 +105,7 @@ async def lifespan(app: FastAPI):
     components = (
         ("cosmos_history", history_store),
         ("cosmos_profile", profile_store),
-        ("postgres_memory", memory_store),
+        ("cosmos_memory", memory_store),
         ("foundry_iq", foundry_iq_health),
     )
     await asyncio.gather(
@@ -158,6 +162,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Agentic Memory Backend", lifespan=lifespan)
+
+
+@app.exception_handler(MemoryStoreUnavailable)
+async def memory_store_unavailable(
+    request: Request, exc: MemoryStoreUnavailable
+) -> JSONResponse:
+    del request, exc
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Semantic memory store unavailable"},
+    )
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -351,11 +368,12 @@ async def _gateway_health() -> None:
 async def health_ready():
     settings = get_settings()
     checks: dict[str, Callable[[], Awaitable[None]]] = {}
+    optional_checks: set[str] = set()
     if settings.cosmos_configured:
         checks["cosmos_history"] = history_store.health_check
         checks["cosmos_profile"] = profile_store.health_check
-    if settings.postgres_configured:
-        checks["postgres_memory"] = memory_store.health_check
+        checks["cosmos_memory"] = memory_store.health_check
+        optional_checks.add("cosmos_memory")
     if settings.search_configured:
         checks["foundry_iq"] = foundry_iq_health.health_check
     if settings.foundry_prompt_enabled:
@@ -383,10 +401,22 @@ async def health_ready():
         )
     )
     results = dict(completed)
-    ready = all(result["status"] == "ok" for result in results.values())
+    for name, result in results.items():
+        result["required"] = name not in optional_checks
+    ready = all(
+        result["status"] == "ok"
+        for name, result in results.items()
+        if name not in optional_checks
+    )
+    degraded = sorted(
+        name
+        for name in optional_checks
+        if results.get(name, {}).get("status") != "ok"
+    )
     payload = {
         "status": "ready" if ready else "not_ready",
         "dependencies": results,
+        "degraded_dependencies": degraded,
         "agents": {
             agent_type.value: agent_type in runtime_registry
             for agent_type in AgentType
@@ -535,6 +565,8 @@ class MemoryCreateRequest(BaseModel):
 async def create_memory(
     request: MemoryCreateRequest, user: User = Depends(get_current_user)
 ):
+    if not memory_store.enabled:
+        raise MemoryStoreUnavailable("Semantic memory store is not initialized")
     document = await history_store.get_conversation(
         request.conversation_id, user.user_id
     )
@@ -552,14 +584,12 @@ async def create_memory(
         source_title=request.title or document.get("title"),
         message_count=len(messages),
     )
-    if row is None:
-        raise HTTPException(status_code=503, detail="Memory store unavailable")
     return public_memory(row)
 
 
 class MemorySearchRequest(BaseModel):
     query: str
-    limit: int = 3
+    limit: int = Field(default=3, ge=1, le=50)
 
 
 @app.post("/memories/search")

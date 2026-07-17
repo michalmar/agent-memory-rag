@@ -1,13 +1,14 @@
 """Validated application tools executed under explicit trusted user context."""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from pydantic import ValidationError
 
 from agent_contracts import Citation, ToolResultEnvelope, tool_definition
 from .azure_clients import embed_text
-from .conversation_memory import ConversationMemoryStore
+from .conversation_memory import ConversationMemoryStore, MemoryStoreUnavailable
 from .telemetry import span
 from .user_profile_memory import UserProfileMemoryStore, profile_to_prompt_context
 
@@ -35,6 +36,8 @@ _STATUS_ICON = {
     "delivered": "check_circle",
     "not_found": "error",
 }
+
+logger = logging.getLogger("agent_tools")
 
 
 class ToolExecutionError(RuntimeError):
@@ -131,7 +134,11 @@ class ToolExecutor:
         if store is None or not store.enabled:
             return {"memories": [], "message": "No memories available."}
         embedding = await embed_text(query)
-        rows = await store.search(user_id, embedding, limit=3)
+        try:
+            rows = await store.search(user_id, embedding, limit=3)
+        except MemoryStoreUnavailable:
+            logger.warning("Semantic memory lookup unavailable; continuing without it")
+            return {"memories": [], "message": "No memories available."}
         return {
             "memories": [
                 {

@@ -27,14 +27,14 @@ uv pip install --python .venv/bin/python -e ../agent_contracts -e .
 | GET/PUT/DELETE | `/conversations*` | Owner-scoped durable history. |
 | POST | `/internal/agent-tools/{name}` | App-only Hosted Agent tool gateway. |
 | GET | `/health/live` | Process liveness; does not call dependencies. |
-| GET | `/health/ready` | Concurrent, bounded Cosmos/PostgreSQL/Search/Foundry IQ checks. |
+| GET | `/health/ready` | Concurrent, bounded Cosmos/Search/Foundry IQ checks. |
 | GET | `/health` | Compatibility alias for liveness. |
 
 ## End-user access
 
 Production uses Entra ID with the delegated `access_as_user` scope. The backend
 derives a tenant-scoped principal key (`tid:oid`) from the validated token and
-applies it to every session, Cosmos partition, and PostgreSQL predicate. Client
+applies it to every session and Cosmos partition. Client
 requests never supply their own `user_id`.
 
 Mock auth is local-only. The backend refuses `AUTH_MODE=mock` when
@@ -68,8 +68,8 @@ for new conversations and immutable afterward.
 - Conversation-history lists execute against the authenticated Cosmos partition;
   full documents and summaries never expose owner or Cosmos-internal fields.
 - Production uses the Container App user-assigned managed identity for Foundry,
-  AI Search, Cosmos DB, PostgreSQL, and Azure Monitor. Local password/key
-  settings remain available only for local development.
+  AI Search, Cosmos DB, and Azure Monitor. Local Cosmos key settings remain
+  available only for local development.
 - Foundry IQ is the only production retrieval architecture; there is no retrieval
   mode request field or fallback.
 - The native Prompt Agent exposes only Foundry IQ knowledge retrieval. The Hosted

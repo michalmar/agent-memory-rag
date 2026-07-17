@@ -13,7 +13,6 @@ dependencies = [
   "pydantic>=2.7.0",
   # --- Azure stores + LLM ---
   "aiohttp>=3.9.0",
-  "asyncpg>=0.30.0",
   "azure-cosmos>=4.9.0",
   "azure-ai-projects==2.3.0",
   "azure-identity>=1.19.0",

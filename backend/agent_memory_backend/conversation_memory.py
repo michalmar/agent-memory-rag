@@ -1,16 +1,42 @@
-"""Async PostgreSQL/pgvector conversation memory with passwordless Azure auth."""
+"""Owner-partitioned semantic conversation memory in Azure Cosmos DB."""
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
-from contextlib import suppress
+import math
+from datetime import datetime, timezone
 from typing import Any
+
+from azure.core.exceptions import ServiceRequestError, ServiceResponseError
+from azure.cosmos.exceptions import (
+    CosmosAccessConditionFailedError,
+    CosmosClientTimeoutError,
+    CosmosHttpResponseError,
+    CosmosResourceExistsError,
+    CosmosResourceNotFoundError,
+)
 
 from .config import get_settings
 from .telemetry import span
 
 logger = logging.getLogger("memory")
+
+EMBEDDING_DIMENSIONS = 3072
+_MEMORY_WRITE_ATTEMPTS = 3
+_MAX_QUERY_LIMIT = 50
+_COSMOS_AVAILABILITY_ERRORS = (
+    CosmosClientTimeoutError,
+    CosmosHttpResponseError,
+    ServiceRequestError,
+    ServiceResponseError,
+)
+
+
+class MemoryStoreUnavailable(RuntimeError):
+    """Known semantic-memory availability failure safe for degraded operation."""
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def public_memory(row: dict) -> dict:
@@ -28,155 +54,111 @@ def public_memory(row: dict) -> dict:
         )
         if key in row
     }
-_POSTGRES_SCOPE = "https://ossrdbms-aad.database.windows.net/.default"
 
 
-def _vec_literal(embedding: list[float]) -> str:
-    return "[" + ",".join(repr(float(value)) for value in embedding) + "]"
-
-
-class AzurePostgresTokenCache:
-    """Keep a nonblocking access token available for asyncpg's password callback."""
-
-    def __init__(
-        self,
-        credential: Any,
-        *,
-        refresh_margin_seconds: int = 300,
-        retry_seconds: int = 30,
-    ) -> None:
-        self._credential = credential
-        self._refresh_margin_seconds = refresh_margin_seconds
-        self._retry_seconds = retry_seconds
-        self._token = ""
-        self._expires_on = 0
-        self._refresh_task: asyncio.Task[None] | None = None
-        self._closed = asyncio.Event()
-
-    async def start(self) -> None:
-        await self._refresh()
-        self._refresh_task = asyncio.create_task(
-            self._refresh_loop(), name="postgres-token-refresh"
+def _validated_embedding(embedding: list[float]) -> list[float]:
+    if len(embedding) != EMBEDDING_DIMENSIONS:
+        raise ValueError(
+            f"Embedding must contain exactly {EMBEDDING_DIMENSIONS} values"
         )
+    normalized: list[float] = []
+    for value in embedding:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("Embedding values must be finite numbers")
+        normalized_value = float(value)
+        if not math.isfinite(normalized_value):
+            raise ValueError("Embedding values must be finite numbers")
+        normalized.append(normalized_value)
+    return normalized
 
-    def password(self) -> str:
-        """Return the cached token without network I/O or event-loop blocking."""
-        if not self._token or self._expires_on <= int(time.time()):
-            raise RuntimeError("PostgreSQL managed identity token is unavailable or expired")
-        return self._token
 
-    async def close(self) -> None:
-        self._closed.set()
-        if self._refresh_task is not None:
-            self._refresh_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._refresh_task
-            self._refresh_task = None
+def _validated_page(limit: int, offset: int = 0) -> tuple[int, int]:
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        raise ValueError("Memory query limit must be an integer")
+    if not isinstance(offset, int) or isinstance(offset, bool):
+        raise ValueError("Memory query offset must be an integer")
+    if not 1 <= limit <= _MAX_QUERY_LIMIT:
+        raise ValueError(f"Memory query limit must be between 1 and {_MAX_QUERY_LIMIT}")
+    if offset < 0:
+        raise ValueError("Memory query offset cannot be negative")
+    return limit, offset
 
-    async def _refresh(self) -> None:
-        access_token = await self._credential.get_token(_POSTGRES_SCOPE)
-        self._token = access_token.token
-        self._expires_on = access_token.expires_on
 
-    async def _refresh_loop(self) -> None:
-        while not self._closed.is_set():
-            refresh_at = self._expires_on - self._refresh_margin_seconds
-            delay = max(1, refresh_at - int(time.time()))
-            try:
-                await asyncio.wait_for(self._closed.wait(), timeout=delay)
-                return
-            except TimeoutError:
-                pass
-
-            try:
-                await self._refresh()
-                logger.info("PostgreSQL managed identity token refreshed")
-            except Exception:
-                logger.exception("PostgreSQL token refresh failed; retrying")
-                try:
-                    await asyncio.wait_for(
-                        self._closed.wait(), timeout=self._retry_seconds
-                    )
-                    return
-                except TimeoutError:
-                    pass
+def _unavailable(exc: Exception) -> MemoryStoreUnavailable:
+    return MemoryStoreUnavailable("Cosmos semantic memory is unavailable")
 
 
 class ConversationMemoryStore:
     def __init__(self) -> None:
-        self._pool: Any = None
-        self._token_cache: AzurePostgresTokenCache | None = None
+        self._client: Any = None
+        self._container: Any = None
 
     async def initialize(self) -> None:
         settings = get_settings()
-        if not settings.postgres_configured:
-            logger.warning("Postgres not configured; memory store disabled")
+        if not settings.cosmos_configured:
+            logger.warning("Cosmos not configured; semantic memory store disabled")
             return
 
-        import asyncpg
+        from azure.cosmos.aio import CosmosClient
 
-        password: str | Any
-        ssl: str
-        if settings.pg_auth_mode == "managed_identity":
+        if settings.cosmos_key:
+            self._client = CosmosClient(
+                settings.cosmos_endpoint, credential=settings.cosmos_key
+            )
+        else:
             from .azure_clients import get_credential
 
-            self._token_cache = AzurePostgresTokenCache(
-                get_credential(),
-                refresh_margin_seconds=settings.pg_token_refresh_margin_seconds,
+            self._client = CosmosClient(
+                settings.cosmos_endpoint, credential=get_credential()
             )
-            await self._token_cache.start()
-            password = self._token_cache.password
-            ssl = "require"
-        elif settings.pg_auth_mode == "password":
-            if not settings.pg_password:
-                raise RuntimeError("POSTGRES_PASSWORD is required for password auth")
-            password = settings.pg_password
-            ssl = "prefer"
-        else:
-            raise RuntimeError(f"Unsupported PG_AUTH_MODE: {settings.pg_auth_mode}")
-
-        try:
-            self._pool = await asyncpg.create_pool(
-                host=settings.pg_host,
-                port=settings.pg_port,
-                database=settings.pg_db,
-                user=settings.pg_user,
-                password=password,
-                ssl=ssl,
-                min_size=2,
-                max_size=10,
-            )
-            async with self._pool.acquire() as connection:
-                table_name = await connection.fetchval(
-                    "SELECT to_regclass('public.conversation_memory')"
-                )
-            if table_name is None:
-                raise RuntimeError(
-                    "conversation_memory schema is missing; run the bootstrap job"
-                )
-        except Exception:
-            await self.close()
-            raise
-        logger.info("Memory store initialized (pgvector)")
+        database = self._client.get_database_client(settings.cosmos_database)
+        self._container = database.get_container_client(
+            settings.cosmos_memory_container
+        )
+        logger.info(
+            "Semantic memory store initialized (%s)",
+            settings.cosmos_memory_container,
+        )
 
     async def close(self) -> None:
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
-        if self._token_cache is not None:
-            await self._token_cache.close()
-            self._token_cache = None
+        if self._client is not None:
+            await self._client.close()
+            self._client = None
+            self._container = None
 
     @property
     def enabled(self) -> bool:
-        return self._pool is not None
+        return self._container is not None
+
+    def _require_container(self) -> Any:
+        if self._container is None:
+            raise MemoryStoreUnavailable(
+                "Cosmos semantic memory is not initialized"
+            )
+        return self._container
 
     async def health_check(self) -> None:
-        if self._pool is None:
-            raise RuntimeError("PostgreSQL pool is not initialized")
-        value = await self._pool.fetchval("SELECT 1")
-        if value != 1:
-            raise RuntimeError("PostgreSQL readiness query returned an invalid result")
+        container = self._require_container()
+        try:
+            await container.read()
+        except _COSMOS_AVAILABILITY_ERRORS as exc:
+            raise _unavailable(exc) from exc
+
+    async def _read_memory(
+        self, conversation_id: str, user_id: str
+    ) -> dict[str, Any] | None:
+        container = self._require_container()
+        try:
+            document = await container.read_item(
+                conversation_id, partition_key=user_id
+            )
+        except CosmosResourceNotFoundError:
+            return None
+        except _COSMOS_AVAILABILITY_ERRORS as exc:
+            raise _unavailable(exc) from exc
+        if document.get("user_id") != user_id:
+            raise RuntimeError("Semantic memory isolation check failed")
+        return document
 
     async def create_memory(
         self,
@@ -186,86 +168,141 @@ class ConversationMemoryStore:
         embedding: list[float],
         source_title: str | None = None,
         message_count: int = 0,
-    ) -> dict | None:
-        if not self.enabled:
-            return None
-        vector = _vec_literal(embedding)
-        with span("store.postgres.upsert", {"db.system": "postgresql"}):
-            row = await self._pool.fetchrow(
-                """
-                INSERT INTO conversation_memory
-                  (conversation_id, user_id, summary, embedding, source_title, message_count)
-                VALUES ($1,$2,$3,$4::vector,$5,$6)
-                ON CONFLICT (conversation_id, user_id) DO UPDATE SET
-                  summary=EXCLUDED.summary, embedding=EXCLUDED.embedding,
-                  source_title=EXCLUDED.source_title,
-                  message_count=EXCLUDED.message_count, updated_at=now()
-                RETURNING id, conversation_id, user_id, summary, source_title,
-                          message_count, created_at, updated_at
-                """,
-                conversation_id,
-                user_id,
-                summary,
-                vector,
-                source_title,
-                message_count,
-            )
-        return dict(row) if row else None
+    ) -> dict:
+        from azure.core import MatchConditions
+
+        container = self._require_container()
+        vector = _validated_embedding(embedding)
+        for attempt in range(_MEMORY_WRITE_ATTEMPTS):
+            existing = await self._read_memory(conversation_id, user_id)
+            now = _now()
+            document = {
+                "id": conversation_id,
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "summary": summary,
+                "source_title": source_title,
+                "message_count": message_count,
+                "embedding": vector,
+                "created_at": (
+                    existing.get("created_at", now) if existing is not None else now
+                ),
+                "updated_at": now,
+            }
+            try:
+                with span(
+                    "store.cosmos.memory.upsert",
+                    {"db.system": "cosmosdb"},
+                ):
+                    if existing is None:
+                        result = await container.create_item(document)
+                    else:
+                        result = await container.replace_item(
+                            item=conversation_id,
+                            body=document,
+                            etag=existing.get("_etag"),
+                            match_condition=MatchConditions.IfNotModified,
+                        )
+                if result.get("user_id") != user_id:
+                    raise RuntimeError("Semantic memory isolation check failed")
+                return result
+            except (
+                CosmosAccessConditionFailedError,
+                CosmosResourceExistsError,
+            ) as exc:
+                if attempt == _MEMORY_WRITE_ATTEMPTS - 1:
+                    raise MemoryStoreUnavailable(
+                        "Cosmos semantic memory write contention did not resolve"
+                    ) from exc
+            except _COSMOS_AVAILABILITY_ERRORS as exc:
+                raise _unavailable(exc) from exc
+        raise RuntimeError("Semantic memory write retry limit exceeded")
 
     async def list_memories(
         self, user_id: str, limit: int = 50, offset: int = 0
     ) -> list[dict]:
-        if not self.enabled:
-            return []
-        rows = await self._pool.fetch(
-            "SELECT id, conversation_id, user_id, summary, source_title, message_count, "
-            "created_at, updated_at FROM conversation_memory WHERE user_id=$1 "
-            "ORDER BY created_at DESC OFFSET $2 LIMIT $3",
-            user_id,
-            offset,
-            limit,
+        limit, offset = _validated_page(limit, offset)
+        container = self._require_container()
+        query = (
+            "SELECT c.id, c.user_id, c.conversation_id, c.summary, "
+            "c.source_title, c.message_count, c.created_at, c.updated_at "
+            "FROM c WHERE c.user_id=@uid "
+            "ORDER BY c.created_at DESC OFFSET @offset LIMIT @limit"
         )
-        return [dict(row) for row in rows]
+        parameters = [
+            {"name": "@uid", "value": user_id},
+            {"name": "@offset", "value": offset},
+            {"name": "@limit", "value": limit},
+        ]
+        rows: list[dict] = []
+        try:
+            async for item in container.query_items(
+                query=query,
+                parameters=parameters,
+                partition_key=user_id,
+            ):
+                if item.get("user_id") != user_id:
+                    raise RuntimeError("Semantic memory isolation check failed")
+                rows.append(item)
+        except _COSMOS_AVAILABILITY_ERRORS as exc:
+            raise _unavailable(exc) from exc
+        return rows
 
     async def search(
         self, user_id: str, query_embedding: list[float], limit: int = 3
     ) -> list[dict]:
-        if not self.enabled:
-            return []
-        vector = _vec_literal(query_embedding)
-        with span("store.postgres.vector_search", {"db.system": "postgresql"}):
-            rows = await self._pool.fetch(
-                """
-                SELECT id, conversation_id, user_id, summary, source_title, message_count,
-                       created_at, 1 - (embedding <=> $1::vector) AS similarity
-                FROM conversation_memory
-                WHERE user_id=$2
-                ORDER BY embedding <=> $1::vector
-                LIMIT $3
-                """,
-                vector,
-                user_id,
-                limit,
-            )
-        return [dict(row) for row in rows]
+        limit, _ = _validated_page(limit)
+        vector = _validated_embedding(query_embedding)
+        container = self._require_container()
+        query = (
+            "SELECT TOP @limit c.id, c.user_id, c.conversation_id, c.summary, "
+            "c.source_title, c.message_count, c.created_at, c.updated_at, "
+            "VectorDistance(c.embedding, @embedding) AS distance "
+            "FROM c WHERE c.user_id=@uid "
+            "ORDER BY VectorDistance(c.embedding, @embedding)"
+        )
+        parameters = [
+            {"name": "@limit", "value": limit},
+            {"name": "@uid", "value": user_id},
+            {"name": "@embedding", "value": vector},
+        ]
+        rows: list[dict] = []
+        try:
+            with span(
+                "store.cosmos.memory.vector_search",
+                {"db.system": "cosmosdb"},
+            ):
+                async for item in container.query_items(
+                    query=query,
+                    parameters=parameters,
+                    partition_key=user_id,
+                ):
+                    if item.get("user_id") != user_id:
+                        raise RuntimeError("Semantic memory isolation check failed")
+                    distance = float(item.pop("distance"))
+                    item["similarity"] = 1.0 - distance
+                    rows.append(item)
+        except _COSMOS_AVAILABILITY_ERRORS as exc:
+            raise _unavailable(exc) from exc
+        return rows
 
     async def delete_memory(self, memory_id: str, user_id: str) -> bool:
-        if not self.enabled:
+        container = self._require_container()
+        try:
+            await container.delete_item(memory_id, partition_key=user_id)
+            return True
+        except CosmosResourceNotFoundError:
             return False
-        result = await self._pool.execute(
-            "DELETE FROM conversation_memory WHERE id=$1 AND user_id=$2",
-            memory_id,
-            user_id,
-        )
-        return result.endswith("1")
+        except _COSMOS_AVAILABILITY_ERRORS as exc:
+            raise _unavailable(exc) from exc
 
     async def delete_by_conversation(
         self, conversation_id: str, user_id: str
     ) -> None:
-        if not self.enabled:
+        container = self._require_container()
+        try:
+            await container.delete_item(conversation_id, partition_key=user_id)
+        except CosmosResourceNotFoundError:
             return
-        await self._pool.execute(
-            "DELETE FROM conversation_memory WHERE conversation_id=$1 AND user_id=$2",
-            conversation_id,
-            user_id,
-        )
+        except _COSMOS_AVAILABILITY_ERRORS as exc:
+            raise _unavailable(exc) from exc
