@@ -281,6 +281,11 @@ def _get_agent_token_validator() -> AgentTokenValidator:
     return _agent_token_validator
 
 
+def validate_agent_token(authorization: str | None) -> AgentCaller:
+    """Validate a Hosted Agent application token for non-FastAPI callers."""
+    return _get_agent_token_validator().validate(authorization)
+
+
 async def get_current_user(
     x_mock_user_id: str | None = Header(default=None, alias="X-Mock-User-ID"),
     authorization: str | None = Header(default=None, alias="Authorization"),
@@ -296,6 +301,4 @@ async def get_current_user(
 async def get_agent_caller(
     authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> AgentCaller:
-    return await asyncio.to_thread(
-        _get_agent_token_validator().validate, authorization
-    )
+    return await asyncio.to_thread(validate_agent_token, authorization)

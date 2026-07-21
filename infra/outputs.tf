@@ -110,6 +110,14 @@ output "agent_tool_gateway_scope" {
   value = "api://${var.entra_client_id}/.default"
 }
 
+output "foundry_application_tools_connection_name" {
+  value = azapi_resource.foundry_application_tools_connection.name
+}
+
+output "foundry_application_tools_mcp_endpoint" {
+  value = azapi_resource.foundry_application_tools_connection.body.properties.target
+}
+
 output "foundry_agents_project_principal_id" {
   value = azapi_resource.foundry_agents_project.output.identity.principalId
 }

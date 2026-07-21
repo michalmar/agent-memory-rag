@@ -6,36 +6,16 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from agent_contracts import Citation, ToolResultEnvelope, tool_definition
+from agent_contracts import (
+    Citation,
+    ToolResultEnvelope,
+    lookup_order_status,
+    tool_definition,
+)
 from .azure_clients import embed_text
 from .conversation_memory import ConversationMemoryStore, MemoryStoreUnavailable
 from .telemetry import span
 from .user_profile_memory import UserProfileMemoryStore, profile_to_prompt_context
-
-_MOCK_ORDERS: dict[str, dict[str, Any]] = {
-    "ORD-001": {
-        "status": "shipped",
-        "trackingNumber": "1Z999AA1",
-        "eta": "Jan 25, 2026",
-    },
-    "ORD-002": {
-        "status": "processing",
-        "trackingNumber": None,
-        "eta": "Jan 23, 2026",
-    },
-    "ORD-003": {
-        "status": "delivered",
-        "trackingNumber": None,
-        "eta": "Delivered Jan 20, 2026",
-    },
-}
-
-_STATUS_ICON = {
-    "shipped": "local_shipping",
-    "processing": "pending",
-    "delivered": "check_circle",
-    "not_found": "error",
-}
 
 logger = logging.getLogger("agent_tools")
 
@@ -76,7 +56,7 @@ class ToolExecutor:
             if name == "get_user_context":
                 return await self._get_user_context(user_id)
             if name == "get_order_status":
-                return self._get_order_status(validated["order_id"])
+                return lookup_order_status(validated["order_id"])
             if name == "check_memory":
                 return await self._check_memory(user_id, validated["query"])
             if name == "update_user_profile":
@@ -109,25 +89,6 @@ class ToolExecutor:
             return {"profile": {}}
         profile = await store.get_profile(user_id)
         return {"profile": profile_to_prompt_context(profile or {})}
-
-    @staticmethod
-    def _get_order_status(order_id: str) -> dict[str, Any]:
-        key = order_id.strip().upper()
-        order = _MOCK_ORDERS.get(key)
-        if order is None:
-            return {
-                "order_id": key,
-                "status": "not_found",
-                "message": "Order not found",
-                "currentStepIcon": _STATUS_ICON["not_found"],
-            }
-        return {
-            "order_id": key,
-            "status": order["status"],
-            "trackingNumber": order["trackingNumber"] or "Not yet assigned",
-            "eta": order["eta"],
-            "currentStepIcon": _STATUS_ICON.get(order["status"], "help"),
-        }
 
     async def _check_memory(self, user_id: str, query: str) -> dict[str, Any]:
         store = self._memory_store

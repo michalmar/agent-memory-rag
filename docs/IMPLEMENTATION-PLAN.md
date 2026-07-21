@@ -1,6 +1,7 @@
 # Implementation Plan - Selectable Dual Foundry Agents
 
-**Status:** Implemented, deployed, and accepted
+**Status:** Version 7 application and published-channel acceptance passed;
+Agent 365 Defender-table provisioning pending
 
 ## 1. Target
 
@@ -22,7 +23,7 @@ strict application tools and owner-scoped application data.
 | Retrieval | Foundry IQ only; no `classic`, `none`, or runtime RAG selector |
 | Trust boundary | FastAPI authenticates users, owns application data, persists routing, and emits AG-UI |
 | Prompt tools | Foundry IQ `knowledge_base_retrieve` only |
-| Hosted tools | Foundry IQ plus app-only backend gateway through the public frontend proxy |
+| Hosted tools | Foundry IQ plus Agent Identity-authenticated stateless MCP; profile/memory remain on the session-bound gateway |
 | Networking | Public Entra-only Foundry/Search/ACR endpoints; private backend and Cosmos |
 | Backend identity | Existing application UAMI |
 | Hosted identity | Foundry-created service principal; no UAMI support in preview |
@@ -74,6 +75,9 @@ strict application tools and owner-scoped application data.
 - [x] Validates user/session binding before dispatch.
 - [x] Uses shared async handlers under trusted context.
 - [x] Returns typed error envelopes without sensitive payload logging.
+- [x] Added a separate stateless MCP surface for app-wide order lookup.
+- [x] Reuses the same app-role, audience, issuer, tenant, and principal allowlist
+  policy for MCP and the session-bound gateway.
 
 ### Phase 4 - Policy-compliant hybrid Foundry infrastructure
 
@@ -95,8 +99,8 @@ strict application tools and owner-scoped application data.
 - [x] Added Hosted Agent source and Dockerfile.
 - [x] Uses `FoundryChatClient`, `Agent`, and `ResponsesHostServer`.
 - [x] Uses async Azure Identity.
-- [x] Uses Foundry IQ MCP plus async gateway wrappers routed through the public
-  frontend to the internal backend.
+- [x] Uses Foundry IQ MCP, Agent Identity-authenticated application MCP, and async
+  personal-data gateway wrappers routed through the public frontend.
 - [x] Reads Foundry request context for user/session/call IDs.
 - [x] Enforces five function-invocation iterations.
 - [x] Built and pushed the immutable image through public Entra/RBAC-only ACR.
@@ -169,6 +173,102 @@ strict application tools and owner-scoped application data.
 - [x] Removed the retired database, private endpoint/DNS, bootstrap identity/job,
   setup image, configuration, and deployment steps.
 
+### Phase 12 - Hosted Agent identity and Agent 365 remediation
+
+- [x] Reproduced the private `get_order_status` gateway `403` in both Foundry and
+  Microsoft 365 and separated it from the later Agent 365 exporter `403`.
+- [x] Deployed Hosted Agent version 3 and captured the failed acceptance trace:
+  local `get_order_status` selected correctly, but the attempted manual blueprint
+  exchange returned `401`.
+- [x] Confirmed the Foundry-created federated credential is for Agent Service's
+  platform exchange, not the Hosted container's ordinary managed identity.
+- [x] Confirmed direct published-channel calls have no frontend-created
+  user/session binding, so owner-scoped gateway dispatch is not a valid app-only
+  channel architecture.
+- [x] Removed the unsupported in-container `fmi_path` exchange and its custom
+  identity variables.
+- [x] Added `customer-support-tools-mcp` as a `RemoteTool` connection using
+  `AgenticIdentityToken` and the application API audience.
+- [x] Added an authenticated, stateless FastMCP endpoint exposing only
+  `get_order_status`; personal profile/memory tools remain session-bound.
+- [x] Deployed version 4 and reproduced the Responses API validation failure
+  caused by supplying `project_connection_id` without the separately required
+  MCP `server_url`.
+- [x] Added the public `/api/mcp/` URL to the Hosted MCP descriptor while
+  retaining the project connection for Agent Identity authentication, plus a
+  regression test for both fields.
+- [x] Deployed version 5 and confirmed the MCP connection reached the endpoint,
+  but direct Foundry execution used the shared project Agent Identity, which did
+  not yet have `AgentTools.Invoke`.
+- [x] Added the shared project Agent Identity to the strict MCP allowlist and
+  extended setup automation to grant it only `AgentTools.Invoke`; the published
+  identity retains its separate tool and Agent 365 grants.
+- [x] Set the MAF `Agent.id` from `FOUNDRY_AGENT_INSTANCE_CLIENT_ID` so Agent 365
+  export no longer partitions spans under the SDK-generated agent UUID.
+- [x] Added MCP discovery, order-result, and token-policy tests.
+- [x] Extended the identity setup script to grant `AgentTools.Invoke` and
+  `Agent365.Observability.OtelWrite` and configure the MCP connection in azd.
+- [x] Added and validated the Hosted Agent `agent.yaml` runtime contract.
+- [x] Made identity setup repair the concrete Foundry project endpoint so azd
+  cannot persist a self-referential `${FOUNDRY_PROJECT_ENDPOINT}` value; the
+  existing-project endpoint is explicit in the nested deployment manifest.
+- [x] Deployed backend MCP release `mcp-agent-id-20260720-r3`.
+- [x] Deployed corrected Hosted Agent release `mcp-agent-id-20260720-r4` as
+  version 5; the request reached MCP and isolated the shared-identity
+  authorization gap.
+- [x] Applied the shared project Agent Identity role and allowlist correction;
+  version 5 returns authoritative `ORD-003` data through MCP.
+- [x] Confirmed Agent 365 export no longer reports missing
+  `Agent365.Observability.OtelWrite`.
+- [x] Isolated the remaining Agent 365 drop: eligible `invoke_agent` spans have
+  the published agent ID but lack `microsoft.tenant.id`.
+- [x] Deployed release `mcp-agent-id-20260720-r5` as version 6 and confirmed
+  `ORD-003` remains authoritative.
+- [x] Confirmed version 6 still logs `No eligible genAI spans to export`: the
+  environment fallback is visible to Agent Server logging, but
+  `microsoft.tenant.id` is absent from the completed `invoke_agent` span when
+  Agent 365 filters it.
+- [x] Added request-scoped Agent 365 `BaggageBuilder` enrichment after inbound
+  trace-context extraction, using the resolved tenant and
+  `FOUNDRY_AGENT_INSTANCE_CLIENT_ID`.
+- [x] Added a regression test proving the resulting `invoke_agent` span reaches
+  `filter_and_partition_by_identity` under the published tenant/agent key.
+- [x] Deployed release `mcp-agent-id-20260720-r6` as version 7 and confirmed
+  authoritative order retrieval, grounded Foundry IQ, complete Agent 365 identity
+  attributes, successful exporter token acquisition, and no HTTP/export error.
+- [x] Audited the initial tenant subscriptions and confirmed that neither
+  Microsoft 365 E7 nor Microsoft Agent 365 was present. Microsoft 365 Copilot and
+  E5 assignments alone did not satisfy the documented ingestion prerequisite.
+- [x] Activated 25 `AGENT_365` seats and assigned both test users. The
+  `AGENT_365`, `DEFENDER_FOR_AI`, and `AUDIT_FOR_AGENTS` service plans report
+  successful provisioning.
+- [x] Verified the published package is unblocked, allowed tenant-wide, backed by
+  Agent Identity `a15ba753-8d64-45a3-a34c-5fb507ce34a8`, and supports both Teams
+  and Copilot.
+- [x] Retested `ORD-003` through the published channel. Trace
+  `0d83c8cfa56a5bc8d8d932ce4177d042` called `get_order_status` and returned
+  `delivered`, `Delivered Jan 20, 2026`.
+- [x] Retested Foundry IQ through the published channel. Trace
+  `d383ced605d6bd23a0112584a023bf70` called `knowledge_base_retrieve`, retrieved
+  three policy documents, and returned the grounded 30-day policy.
+- [x] Proved the similarly named `agent-framework-agent-foundry-` package was a
+  separate Hosted Agent in `rg-ai/demo-swe/demo-swe-prj`, not an earlier version
+  of `customer-support-maf-hosted`.
+- [x] Blocked legacy package `T_8f4394fb-7025-5b06-1413-b93e8d5e46b8`, force
+  deleted Hosted Agent `agent-framework-agent-foundry-skills-responses` and
+  versions 1-3, and deleted generated Bot Service
+  `agent-framework-agent-foun51016`.
+- [x] Verified the platform removed dedicated Agent Identity
+  `4c413efd-d9f4-4619-b27c-d86b3b05193f`, blueprint
+  `6e0057e9-ae01-4b2f-83a3-5c0241e93ae8`, and residual RBAC. Agent Registry
+  reconciliation removed the blocked package.
+- [x] Preserved the shared `demo-swe` project and its four unrelated agents.
+  `customer-support-maf-hosted` remains enabled on active version 7, and a
+  post-cleanup `ORD-003` request returned the authoritative delivered result.
+- [ ] Verify either published-channel trace in Defender `CloudAppEvents`. Graph
+  advanced hunting currently reports that the table does not exist, so tenant
+  Defender/Agent 365 backend provisioning remains incomplete.
+
 ## 4. Azure topology
 
 | Component | Region | Notes |
@@ -187,6 +287,10 @@ Interactive jumpboxes and Bastion are not part of the deployed topology.
   admin, and anonymous authentication disabled as applicable.
 - Use the Foundry project endpoint, not an unmanaged Hosted Agent URL.
 - Never grant the Hosted identity direct application-data roles.
+- Let Foundry Agent Service perform Agent Identity authentication for app-only
+  MCP tools; do not recreate the platform exchange inside the Hosted container.
+- Never use an app-only Agent Identity as owner context for profile or
+  conversation-memory access.
 - Never accept browser- or model-provided identity as authorization context.
 - Never expose private runtime IDs in API responses or telemetry.
 - Never silently reroute an existing conversation to another agent.
@@ -215,11 +319,18 @@ Interactive jumpboxes and Bastion are not part of the deployed topology.
 ### Live acceptance
 
 - Backend invokes both agents through the public Entra/RBAC-only project endpoint.
-- Hosted Agent reaches the app-only gateway through the public frontend proxy,
-  which forwards to the internal backend.
-- Both agents retrieve from the same Foundry IQ KB and return citations.
+- Hosted Agent reaches the app-role-protected MCP and session gateway through the
+  public frontend proxy, which forwards to the internal backend.
+- Both agents retrieve from the same Foundry IQ KB and return citations on
+  Foundry/application surfaces; published Microsoft 365 and Teams channels
+  currently suppress citation rendering.
+- Published channels can call stateless order MCP; personal profile/memory tools
+  require application binding or a future OAuth identity-passthrough connection.
 - Two users cannot access each other's application or Foundry state.
 - Delegated user tokens and wrong Hosted principals cannot call the gateway.
+- The Agent 365 exporter reaches its authenticated HTTP path independently of
+  Application Insights ingestion; downstream acceptance is verified separately
+  and requires an eligible tenant license assignment.
 - Persistence failures emit run errors before `RUN_FINISHED`.
 - Feature flags expose only runtimes that pass readiness.
 

@@ -16,6 +16,7 @@ from .models import (
     TurnContext,
     UsageEvent,
 )
+from .orders import lookup_order_status
 from .prompts import (
     FOUNDRY_PROMPT_VERSION,
     PROMPT_VERSION,
@@ -43,6 +44,7 @@ __all__ = [
     "ToolStartedEvent",
     "TurnContext",
     "UsageEvent",
+    "lookup_order_status",
     "render_foundry_prompt_instructions",
     "render_instructions",
     "tool_definition",

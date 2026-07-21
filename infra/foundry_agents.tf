@@ -123,6 +123,26 @@ resource "azapi_resource" "foundry_iq_connection" {
   }
 }
 
+resource "azapi_resource" "foundry_application_tools_connection" {
+  type                      = "Microsoft.CognitiveServices/accounts/projects/connections@2025-10-01-preview"
+  name                      = var.foundry_application_tools_connection_name
+  parent_id                 = azapi_resource.foundry_agents_project.id
+  schema_validation_enabled = false
+
+  body = {
+    properties = {
+      authType      = "AgenticIdentityToken"
+      category      = "RemoteTool"
+      target        = "https://${azurerm_container_app.frontend.ingress[0].fqdn}/api/mcp/"
+      isSharedToAll = false
+      audience      = "api://${var.entra_client_id}"
+      metadata = {
+        ApiType = "Azure"
+      }
+    }
+  }
+}
+
 resource "azurerm_role_assignment" "foundry_project_kb_reader" {
   scope                            = azurerm_search_service.main.id
   role_definition_name             = "Search Index Data Reader"

@@ -120,13 +120,13 @@ variable "foundry_hosted_agent_name" {
 
 variable "agent_release_id" {
   type    = string
-  default = "dual-foundry-001"
+  default = "mcp-agent-id-20260720-r6"
 }
 
 variable "hosted_agent_principal_ids" {
   type        = set(string)
   default     = []
-  description = "Foundry-created Hosted Agent principal IDs allowed to invoke the private tool gateway."
+  description = "Foundry project and published Agent Identity principal IDs allowed to invoke protected application tools."
 
   validation {
     condition = alltrue([
@@ -140,4 +140,9 @@ variable "hosted_agent_principal_ids" {
 variable "foundry_iq_connection_name" {
   type    = string
   default = "customer-support-kb-mcp"
+}
+
+variable "foundry_application_tools_connection_name" {
+  type    = string
+  default = "customer-support-tools-mcp"
 }

@@ -29,7 +29,7 @@ new conversation and immutable afterward.
 | Model hosting | The same active Foundry account serves agent models, backend chat/embedding calls, and Foundry IQ query planning | Eliminates the legacy duplicate AI account while retaining identity-scoped model access |
 | Agent implementations | Native Prompt Agent plus Foundry-hosted Microsoft Agent Framework | Compares native and code-based agents without moving the trust boundary |
 | Prompt Agent capability | Foundry IQ `knowledge_base_retrieve` only | Keeps the native agent knowledge-only and prevents application-tool access |
-| Hosted MAF capability | Foundry IQ plus order, profile, and memory tools | Supports application actions while keeping data access behind FastAPI |
+| Hosted MAF capability | Foundry IQ, stateless order MCP, and session-bound profile/memory tools | Uses Foundry-managed Agent Identity for app-only MCP calls while preserving owner binding for personal data |
 | Retrieval | Foundry IQ only | Removes classic RAG, no-retrieval modes, and runtime retrieval switching |
 | Agent selection | Explicit for new chats and immutable per conversation | Prevents silent behavior changes and state corruption |
 | Failover | No automatic cross-agent failover | A conversation remains bound to its original runtime and state |
@@ -81,8 +81,11 @@ flowchart LR
     H -->|Project connection / MCP| IQ
     IQ -->|Search identity| S[Public Entra-only AI Search]
     S -->|Search identity| M[Active Foundry model deployments]
-    H -->|Hosted identity / app-only token| F
-    F -->|Restricted reverse proxy| G[Internal Tool Gateway]
+    H -->|Agent Identity / Remote MCP| F
+    F -->|Authenticated MCP proxy| MT[Stateless MCP Tools]
+    H -->|Session-bound app token| F
+    F -->|Restricted reverse proxy| G[Personal Tool Gateway]
+    MT --> B
     G -->|Application UAMI| C[(Cosmos History, Profile, and Semantic Memory)]
     B -->|Application UAMI| C
     B -->|Application UAMI / public endpoint| M
@@ -123,16 +126,16 @@ Logical name: `customer-support-maf-hosted`
 - Runs inside Foundry with Hosted Responses protocol `2.0.0`.
 - Uses `agent-framework-foundry==1.10.1` and
   `agent-framework-foundry-hosting==1.0.0a260709`.
-- Uses the shared Foundry IQ MCP connection.
-- Exposes four async application tools:
-  - `get_user_context`;
-  - `get_order_status`;
-  - `check_memory`;
-  - `update_user_profile`.
+- Uses the shared Foundry IQ MCP connection and the
+  `customer-support-tools-mcp` `RemoteTool` connection.
+- Exposes stateless `get_order_status` through MCP with
+  `AgenticIdentityToken`.
+- Exposes `get_user_context`, `check_memory`, and `update_user_profile` as async
+  wrappers for application-created sessions only.
 - Reads trusted `user_id`, `session_id`, and `call_id` from Foundry request
-  context, never from model arguments.
-- Acquires an application token with its Foundry-created identity and calls the
-  protected gateway through the public frontend.
+  context for owner-scoped tools, never from model arguments.
+- Sets `Agent.id` from `FOUNDRY_AGENT_INSTANCE_CLIENT_ID` so telemetry uses the
+  deployed Agent Identity rather than an SDK-generated UUID.
 - Limits function invocation to five iterations.
 - Sets `store=False`; durable application routing and transcripts remain owned by
   the backend.
@@ -184,7 +187,7 @@ session ownership fields.
 | Backend application UAMI | ACR pull, active Foundry invocation, trusted user impersonation, remote conversation create/delete, chat/embedding model use, Cosmos data, Search read, and telemetry publish |
 | Frontend UAMI | ACR pull |
 | Foundry project managed identity | Foundry user, Search index read, ACR pull, Log Analytics read, and Foundry IQ connection authentication |
-| Hosted Agent service principal | Backend `AgentTools.Invoke` application role only |
+| Hosted Agent service principal | Backend `AgentTools.Invoke` plus `Agent365.Observability.OtelWrite`; no direct application-data role |
 | Search system identity | Active Foundry model access required by the knowledge base |
 | Deployment principal | Foundry project management, active model invocation, and Search service/index contribution used by direct IQ and Prompt releases |
 
@@ -193,17 +196,33 @@ endpoint interaction, trusted-user impersonation, and the Foundry `agents/write`
 and `agents/delete` data actions because Foundry maps runtime conversation
 create/delete operations to those actions.
 
-### 7.3 Hosted application-tool gateway
+### 7.3 Hosted application tools
 
-- The Hosted Agent obtains an application-only token for
-  `api://<application-client-id>/.default`.
+- `get_order_status` is a stateless MCP tool at `/mcp/`, exposed publicly only
+  through the frontend's `/api/mcp/` reverse proxy.
+- The Foundry project connection is category `RemoteTool`, uses
+  `AgenticIdentityToken`, and requests the application API audience.
+- The Hosted MCP definition supplies both `server_url` and
+  `project_connection_id`; the connection controls authentication but does not
+  replace the Responses API's required server address.
+- Agent Service performs the Agent Identity exchange and attaches the token to
+  MCP requests. The Hosted container does not implement a custom `fmi_path`
+  exchange or hold a blueprint secret.
 - Token validation expects the application client-ID GUID as the audience.
 - The token must contain `roles: ["AgentTools.Invoke"]`.
 - Tokens containing delegated `scp` claims are rejected.
 - The caller object ID must be in the Hosted Agent principal allowlist.
-- The gateway resolves the stored conversation using both trusted user ID and
-  Hosted session ID before dispatch.
-- Only allowlisted tool names can be dispatched.
+- Direct project/Foundry testing uses the project's shared Agent Identity;
+  published Microsoft 365 and Teams calls use the distinct published Agent
+  Identity. Both are granted and allowlisted only for `AgentTools.Invoke`.
+- The MCP surface exposes only stateless, app-wide operations and never treats
+  the app-only identity as an end user.
+- Profile and conversation-memory wrappers remain on
+  `/internal/agent-tools/{tool_name}`. That gateway resolves the stored
+  conversation using both trusted user ID and Hosted session ID before dispatch.
+- Direct Foundry, Microsoft 365 Copilot, and Teams conversations can use the
+  stateless MCP tool. Owner-scoped tools require OAuth identity passthrough or an
+  application-created binding and are not made available through app-only MCP.
 - The public frontend route has a bounded request body and rate limiting, then
   proxies to the internal backend.
 - The Hosted identity receives no Cosmos DB, Search, or other
@@ -213,8 +232,8 @@ create/delete operations to those actions.
 
 | Service | Exposure | Authentication | Decision |
 | --- | --- | --- | --- |
-| Frontend Container App | Public | Entra for user APIs; app-only Entra for Hosted tool route | Public application entry point |
-| Backend Container App | Internal ACA ingress | Validated frontend/user request or Hosted gateway token | Never directly internet-addressable |
+| Frontend Container App | Public | Entra for user APIs; app-only Entra for Hosted MCP/gateway routes | Public application and MCP entry point |
+| Backend Container App | Internal ACA ingress | Validated frontend/user request or Hosted app-only token | Never directly internet-addressable |
 | Foundry agent account/project and models | Public endpoint only | Entra/RBAC only; local auth disabled | Hosts both agents and all application/knowledge-base model deployments |
 | Azure AI Search / Foundry IQ | Public endpoint only | Entra/RBAC only; local auth disabled | Avoids private DNS that the non-injected Hosted runtime cannot resolve |
 | Azure Container Registry | Public endpoint plus private endpoint | Entra/RBAC only; admin and anonymous pull disabled | Hosted runtime pulls publicly; ACA resolves and pulls privately |
@@ -323,6 +342,8 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 - `/memories*` - owner-scoped semantic-memory operations.
 - `/health/live` - process liveness only.
 - `/health/ready` - bounded concurrent dependency and runtime checks.
+- `/mcp/` - stateless `get_order_status` MCP server, protected by Agent Identity
+  application role.
 - `/internal/agent-tools/{tool_name}` - app-only Hosted Agent gateway.
 
 ## 11. Async and lifecycle requirements
@@ -377,6 +398,25 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
   retention is 30 days.
 - Additional Agent Framework sensitive-data instrumentation remains disabled to
   avoid duplicate content capture.
+- Agent 365 is an independent export path. The Hosted Agent identity requires
+  `Agent365.Observability.OtelWrite`; a failure there must not be interpreted as
+  an Application Insights outage or an agent execution failure.
+- Agent 365 downstream ingestion requires tenant onboarding and at least one user
+  with Microsoft 365 E7 or Microsoft Agent 365 assigned. The SKU must be assigned,
+  not merely present. Microsoft 365 Copilot and E5 alone do not satisfy the
+  documented prerequisite. Without an eligible assignment, an export can return
+  HTTP `200` with `partialSuccess: null` and still be silently discarded.
+- Agent Framework spans use `FOUNDRY_AGENT_INSTANCE_CLIENT_ID` as
+  `gen_ai.agent.id`; exporter URL identity and token authorization must refer to
+  the same Agent Identity.
+- Agent 365-eligible spans also require `microsoft.tenant.id`. Agent Server uses
+  `FOUNDRY_AGENT_TENANT_ID` when the platform supplies it and otherwise receives
+  the deployment tenant through `ENTRA_TENANT_ID` before observability
+  initialization. Because exporter identity is evaluated on each completed
+  span, the create-response route must also establish Agent 365
+  `BaggageBuilder` context after inbound trace-context extraction. The baggage
+  carries the resolved tenant and published Agent Identity into `invoke_agent`
+  and its child spans without accepting either identity from the caller.
 - Dependency readiness checks run concurrently with bounded timeouts.
 - Readiness returns sanitized dependency names, status, duration, and error type.
 - Agent readiness validates configured clients and feature flags; it does not
@@ -401,12 +441,29 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 - Hosted images use release-ID tags. The deployment process must supply a unique
   `agent_release_id` for each release to prevent tag overwrite and preserve image
   rollback; the helper script does not enforce uniqueness.
+- `scripts/assign_hosted_agent_access.sh` grants the gateway and Agent 365
+  application roles, including discovery of the shared project Agent Identity,
+  and configures the application MCP connection plus concrete Foundry project
+  endpoint and tenant consumed by the Hosted Agent deployment. Agent 365 write
+  remains assigned only to the published identity.
+- Agent 365 role automation does not acquire licenses or accept tenant terms.
+  Release acceptance must separately confirm an eligible license assignment and
+  the resulting `invoke_agent` row in Defender after the ingestion delay.
+- The existing-project URL is explicit in the nested azd manifest, while
+  `FOUNDRY_PROJECT_ENDPOINT` remains the platform output/runtime contract. This
+  avoids a circular self-reference during `azd provision`.
 - The prior `customer-support-maf` repository is retained only as a Hosted Agent
   rollback artifact; active releases use `customer-support-maf-hosted`.
 - Prompt and Hosted prompt hashes are tracked independently.
 - Prior agent and Container App revisions are retained for rollback.
 - Feature flags control admission of new conversations to each agent.
 - Disabling an agent never reroutes an existing conversation.
+- Published-agent retirement must first map the exact Foundry source agent,
+  Microsoft 365 package, generated Bot Service, and dedicated Agent
+  Identity/blueprint. Block the package before irreversible deletion, delete only
+  the mapped agent application and Bot, and verify identity/RBAC cascade plus
+  Agent Registry reconciliation. Never delete a shared Foundry project, account,
+  registry, or monitoring resource as a shortcut.
 - Destructive removal of an active Foundry generation requires a separate approved
   cleanup after its rollback window.
 - Terraform plans must not replace or delete active application data services or
@@ -420,18 +477,25 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 - No setup Container Apps Job remains.
 - The Prompt Agent definition contains exactly one tool: Foundry IQ
   `knowledge_base_retrieve`.
-- Hosted MAF runs in Foundry and exposes Foundry IQ plus the four protected
-  application tools.
+- Hosted MAF runs in Foundry and exposes Foundry IQ, app-only order MCP, and three
+  owner-scoped application tools.
 - The backend has no production Agent Framework hosting dependency.
-- Both agents produce the same normalized AG-UI contract and grounded citations.
+- Both agents produce the same normalized AG-UI contract and grounded citations
+  on application and Foundry surfaces. Microsoft 365 Copilot and Teams publishing
+  currently suppress citation and streaming rendering.
 - Backend Foundry invocation uses managed identity against the public Entra-only
   endpoint.
 - Hosted application-tool traffic crosses only the documented public frontend
-  route and terminates at the internal backend.
+  MCP/gateway routes and terminates at the internal backend.
 - Delegated tokens, missing roles, and non-allowlisted principals cannot invoke the
   Hosted tool gateway.
 - Cross-user isolation holds across frontend state, sessions, Foundry state,
   Cosmos DB, and gateway dispatch.
+- Published Microsoft 365 Copilot and Teams invocations can call stateless MCP
+  tools but cannot infer an owner identity for profile or memory access.
+- No source agent, Bot Service, Agent Identity/blueprint, RBAC assignment, or
+  Microsoft 365 package remains for the retired
+  `agent-framework-agent-foundry-skills-responses` publication.
 - Conversation routing is immutable and overlapping turns are rejected.
 - Strict schemas reject unknown tools, malformed input, extra fields, and identity
   injection.

@@ -24,6 +24,11 @@ from agent_contracts import (
     ToolResultEvent,
     TurnContext,
     UsageEvent,
+    lookup_order_status,
+)
+from agent_memory_backend.agent_mcp import (
+    AgentMcpTokenVerifier,
+    application_tools_mcp,
 )
 from agent_memory_backend.agent_tool_gateway import AgentToolRequest, dispatch_agent_tool
 from agent_memory_backend.agent_tools import ToolExecutor
@@ -159,6 +164,59 @@ class AgentGatewayTests(unittest.IsolatedAsyncioTestCase):
                     "tenant_id": "attacker",
                 }
             )
+
+
+class AgentMcpTests(unittest.IsolatedAsyncioTestCase):
+    def test_shared_order_lookup_is_normalized_and_authoritative(self) -> None:
+        self.assertEqual(
+            lookup_order_status(" ord-003 "),
+            {
+                "order_id": "ORD-003",
+                "status": "delivered",
+                "trackingNumber": "Not yet assigned",
+                "eta": "Delivered Jan 20, 2026",
+                "currentStepIcon": "check_circle",
+            },
+        )
+
+    async def test_mcp_exposes_only_stateless_order_lookup(self) -> None:
+        tools = await application_tools_mcp.list_tools()
+
+        self.assertEqual([tool.name for tool in tools], ["get_order_status"])
+        self.assertTrue(application_tools_mcp.settings.stateless_http)
+        self.assertTrue(application_tools_mcp.settings.json_response)
+
+    async def test_mcp_token_verifier_reuses_gateway_policy(self) -> None:
+        settings = SimpleNamespace(
+            agent_gateway_required_role="AgentTools.Invoke"
+        )
+        with (
+            patch(
+                "agent_memory_backend.agent_mcp.validate_agent_token",
+                return_value=AgentCaller(
+                    principal_id="hosted-agent", tenant_id="tenant"
+                ),
+            ) as validate,
+            patch(
+                "agent_memory_backend.agent_mcp.get_settings",
+                return_value=settings,
+            ),
+        ):
+            access = await AgentMcpTokenVerifier().verify_token("token")
+
+        validate.assert_called_once_with("Bearer token")
+        self.assertIsNotNone(access)
+        self.assertEqual(access.client_id, "hosted-agent")
+        self.assertEqual(access.scopes, ["AgentTools.Invoke"])
+
+    async def test_mcp_token_verifier_rejects_invalid_tokens(self) -> None:
+        with patch(
+            "agent_memory_backend.agent_mcp.validate_agent_token",
+            side_effect=HTTPException(status_code=403),
+        ):
+            access = await AgentMcpTokenVerifier().verify_token("invalid")
+
+        self.assertIsNone(access)
 
 
 class AgentTokenPolicyTests(unittest.TestCase):

@@ -1,6 +1,6 @@
-# Azure Deployment Plan - Cosmos Semantic Memory Cutover
+# Azure Deployment Plan - Hosted Agent Identity and Telemetry Remediation
 
-> **Status:** Deployed and Verified
+> **Status:** Deployed and accepted - Agent 365 Defender provisioning pending
 
 Generated: 2026-07-15
 
@@ -969,6 +969,90 @@ Deletion order:
 - [x] Bash syntax checks passed for all deployment scripts.
 - [x] Python compilation passed for both direct setup modules.
 
+### Shared project Agent Identity authorization revalidation
+
+Validated at `2026-07-20` for the direct-Foundry MCP authorization correction:
+
+- Terraform `1.13.3` and Azure CLI `2.80.0` are installed;
+- authenticated subscription
+  `7bc68c68-f434-49ad-ab3e-b883ec39da86`, tenant
+  `a7b1484c-f66a-496a-b1cf-35631a50396c`, is enabled;
+- `terraform init -input=false`, `terraform fmt -check -recursive`, and
+  `terraform validate` pass;
+- Terraform state is accessible with 68 resources;
+- six visible policy assignments were reviewed; this update changes only an
+  existing Container App environment variable;
+- no unresolved `{{ .Env.* }}` placeholders exist in Terraform inputs;
+- saved Terraform plan
+  `/Users/mimarusa/.copilot/session-state/59bb6857-8149-485a-8e89-ee81ae64cde8/files/mcp-agent-id-r4-shared-identity.tfplan`
+  contains one update to `azurerm_container_app.backend`, with zero creates,
+  deletes, or replacements;
+- static application-role review confirms the shared project Agent Identity gets
+  only `AgentTools.Invoke`; only the published identity gets
+  `Agent365.Observability.OtelWrite`;
+- the backend suite passes all 58 tests;
+- the Hosted MCP descriptor regression test passes;
+- the frontend TypeScript/Vite production build passes with 180 modules;
+- Python compilation, setup-script syntax, and `git diff --check` pass;
+- `azd provision --preview --no-prompt` reports the existing Foundry project and
+  no provisioning action;
+- `azd ai agent doctor --no-prompt` reports 11 passed, 0 failed, and 2 skipped.
+
+### Agent 365 tenant enrichment r5 validation
+
+Validated at `2026-07-20`:
+
+- Terraform initialization, formatting, and validation pass;
+- Terraform state is accessible with 68 resources;
+- saved plan
+  `/Users/mimarusa/.copilot/session-state/59bb6857-8149-485a-8e89-ee81ae64cde8/files/agent365-tenant-r5.tfplan`
+  contains one in-place update to `azurerm_container_app.backend`, with zero
+  creates, deletes, or replacements;
+- the exact Terraform value change is
+  `AGENT_RELEASE_ID=mcp-agent-id-20260720-r4` to
+  `mcp-agent-id-20260720-r5`;
+- static role verification is unchanged: the published identity has the gateway
+  and Agent 365 write roles, while the shared identity has only the gateway role;
+- all four Hosted Agent tests and all 58 backend tests pass;
+- Python compilation, shell syntax, and `git diff --check` pass;
+- `azd provision --preview --no-prompt` makes no resource changes;
+- `azd ai agent doctor --no-prompt` reports 11 passed, 0 failed, and 2 skipped;
+- `azd package --no-prompt` resolves the immutable r5 Hosted Agent image.
+
+### Agent 365 request baggage r6 validation
+
+Validated at `2026-07-20T22:21:01Z`:
+
+- Terraform `1.13.3` and azd `1.27.1` are installed;
+- Azure authentication is active in enabled subscription
+  `7bc68c68-f434-49ad-ab3e-b883ec39da86`, tenant
+  `a7b1484c-f66a-496a-b1cf-35631a50396c`, and the nested azd environment
+  resolves `eastus2`;
+- `terraform init -input=false`, `terraform fmt -check -recursive`, and
+  `terraform validate` pass, with 68 resources accessible in state;
+- saved plan
+  `/Users/mimarusa/.copilot/session-state/59bb6857-8149-485a-8e89-ee81ae64cde8/files/agent365-baggage-r6.tfplan`
+  contains only one in-place `azurerm_container_app.backend` update from release
+  marker r5 to r6, with zero creates, deletes, or replacements;
+- no unresolved `{{ .Env.* }}` expressions exist in Terraform inputs;
+- the resource-group policy query returned no applicable assignments that block
+  this image/version-only deployment;
+- static role review is unchanged: the published Agent Identity receives
+  `AgentTools.Invoke` and `Agent365.Observability.OtelWrite`; the shared project
+  Agent Identity receives only `AgentTools.Invoke`; the backend allowlist
+  contains exactly those two principals;
+- all nine Hosted Agent tests pass, including the exact Agent 365 exporter
+  identity-partition regression;
+- all 58 backend tests and the frontend production build pass;
+- Hosted Agent compilation, setup-script syntax, and `git diff --check` pass;
+- `azd provision --preview --no-prompt` reports the existing Foundry project
+  with no provisioning action;
+- `azd ai agent doctor --no-prompt` reports 11 passed, 0 failed, and 2 skipped;
+- `azd package --no-prompt` resolves immutable image
+  `customer-support-maf-hosted:mcp-agent-id-20260720-r6`;
+- ACR build `ch1y` succeeded for Linux/amd64 and produced digest
+  `sha256:2c619513d6301a7d798d62101fb1076b83791c1057c13fc4c9e2758b391ee802`.
+
 ### Composer frontend release revalidation
 
 Validated at `2026-07-13T21:00:46+02:00` for a frontend-image-only
@@ -1699,3 +1783,694 @@ Verified at `2026-07-13T21:06:11+02:00`:
 Production URL:
 
 `https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io`
+
+## 18. Hosted Agent identity and Agent 365 remediation - 2026-07-20
+
+**Status:** Version 5 functional acceptance passed; Agent 365 tenant enrichment pending
+
+### 18.1 Objective and confirmed Azure context
+
+Correct two independently reproduced failures:
+
+1. `get_order_status("ORD-003")` acquires a plain App Service managed-identity
+   token and receives HTTP `403` from the private application-tool gateway.
+2. Agent 365 OpenTelemetry export receives HTTP `403` because the Hosted Agent
+   identity lacks `Agent365.Observability.OtelWrite`.
+
+The user confirmed reuse of:
+
+- subscription `ME-MngEnvMCAP372348-mimarusa-1`
+  (`7bc68c68-f434-49ad-ab3e-b883ec39da86`);
+- tenant `a7b1484c-f66a-496a-b1cf-35631a50396c`;
+- location `eastus2`;
+- resource group `rg-agent-memory-rag`;
+- Foundry account/project `agmem5df652aif2/agmem-agents`.
+
+This is an in-place modification. It creates no Azure resource and consumes no
+additional regional quota.
+
+### 18.2 Root cause and target authentication flow
+
+The existing local Python function tool calls `DefaultAzureCredential` directly
+for `api://dbf8eef6-d745-4b73-b3ac-edc93a15c339/.default`. In the Hosted Agent
+container that returns the host App Service managed-identity token, not the
+autonomous Entra Agent Identity resource token. The gateway correctly rejects
+that token even though the distinct Hosted Agent identity already has
+`AgentTools.Invoke`.
+
+Replace this with the documented autonomous Agent Identity flow:
+
+1. Acquire a managed-identity assertion for
+   `api://AzureADTokenExchange/.default`.
+2. Exchange it as blueprint
+   `19911443-d279-44ed-be9d-01869e9259a0`, with `fmi_path` set to Hosted Agent
+   identity `a15ba753-8d64-45a3-a34c-5fb507ce34a8`.
+3. Exchange the blueprint token for an app-only Agent Identity token scoped to
+   the private gateway.
+4. Reuse the resource token until its five-minute refresh window, then present it
+   to the existing gateway. Its documented `oid`, `roles`, audience, issuer, and
+   tenant claims satisfy the existing validator without weakening the trust
+   boundary.
+
+Required non-secret Hosted Agent environment values:
+
+- `ENTRA_AGENT_BLUEPRINT_CLIENT_ID`;
+- `ENTRA_AGENT_IDENTITY_CLIENT_ID`;
+- existing `AZURE_TENANT_ID`;
+- existing `APP_TOOL_GATEWAY_SCOPE`.
+
+No client secret, certificate, API key, delegated token, or broader application
+data role is introduced.
+
+### 18.3 Planned repository changes
+
+- Add a focused asynchronous Agent Identity token-exchange helper with
+  expiry-aware resource-token reuse.
+- Make `gateway_tools.py` use the exchanged Agent Identity token.
+- Add unit tests that assert both OAuth requests, `fmi_path`, target scope,
+  malformed token responses, token reuse, and failure propagation without
+  logging tokens.
+- Add the non-secret identity variables to the Hosted Agent manifests and add the
+  AgentSchema `agent.yaml` required by Hosted Agent diagnostics. Use the
+  application-owned `ENTRA_AGENT_*` namespace because Foundry reserves
+  `AGENT_*` and `FOUNDRY_*`.
+- Extend the idempotent Hosted Agent access script to:
+  - retain `AgentTools.Invoke`;
+  - discover and grant `Agent365.Observability.OtelWrite`;
+  - discover the identity blueprint and configure the Hosted Agent azd
+    environment;
+  - derive and set the concrete Foundry project endpoint instead of accepting a
+    self-referential azd value.
+- Use a unique Hosted Agent image/release tag and keep the backend release
+  descriptor consistent.
+- Update README, PRD, implementation guidance, and this deployment record with
+  the runtime exchange, Agent 365 prerequisite, published-channel citation
+  limitation, operational commands, and rollback procedure.
+
+### 18.4 Agent 365 authorization
+
+Idempotently grant:
+
+| Property | Value |
+|---|---|
+| Principal | `a15ba753-8d64-45a3-a34c-5fb507ce34a8` |
+| Resource service principal | `e3f5c87f-3614-4b0a-a264-e57409c477ff` |
+| Resource application | `9b975845-388f-4429-889e-eab1ef63949c` |
+| App role | `Agent365.Observability.OtelWrite` |
+| App role ID | `8f71190c-00c8-461d-a63b-f74abde9ba52` |
+
+The active administrator has Global Administrator and Global Reader. Allow
+2-5 minutes for assignment propagation before telemetry acceptance testing.
+Application Insights remains the independent Azure Monitor destination.
+
+### 18.5 Deployment recipe
+
+Use the existing Terraform/AzAPI, ACR, and nested Hosted Agent azd workflows:
+
+1. Grant and verify both application-role assignments.
+2. Set the non-secret Agent Identity values in the existing
+   `customer-support-maf-hosted-dev` azd environment.
+3. Run repository and infrastructure validation.
+4. Build only the Hosted Agent image through ACR with a unique immutable tag.
+5. Apply only the reviewed release-metadata Terraform update in the saved plan.
+6. Deploy a new Hosted Agent version with `azd deploy`.
+7. Keep the stable endpoint on `@latest` after acceptance.
+
+No frontend image, application API contract, database, search index, knowledge
+connection, networking resource, or Bot Service publication metadata changes.
+
+### 18.6 Verification and acceptance
+
+- Existing backend unit suite passes.
+- New token-exchange unit suite passes.
+- Shell scripts pass `bash -n`.
+- Terraform formatting, initialization, validation, and saved plan review pass.
+- `azd ai agent doctor` passes for the nested Hosted Agent project.
+- Live Graph verification shows both required application roles on the Hosted
+  Agent identity.
+- The new agent version reaches `active`.
+- A fresh Foundry conversation asking for `ORD-003` returns
+  `delivered` and `Delivered Jan 20, 2026`.
+- The operation trace shows `get_order_status` returning HTTP `200`, with no
+  gateway `403`.
+- Agent 365 export produces no
+  `Agent365.Observability.OtelWrite` authorization error after propagation.
+- Application Insights continues receiving request, dependency, trace, and
+  exception telemetry.
+
+### 18.7 Rollback
+
+- Keep current agent version `2` and image
+  `customer-support-maf-hosted:dual-foundry-001`.
+- If version `3` fails acceptance, pin the stable endpoint back to version `2`.
+- Revert only the release-metadata backend update if it was applied.
+- Retain the two least-privilege app-role assignments; removing either would
+  intentionally restore the corresponding gateway or Agent 365 failure.
+
+### 18.8 Execution checklist
+
+- [x] Diagnose and reproduce both failures
+- [x] Confirm subscription and location
+- [x] Confirm Global Administrator
+- [x] Finalize remediation design
+- [x] User approves this plan
+- [x] Implement token exchange and tests
+- [x] Update role/configuration automation and documentation
+- [x] Grant and verify Agent 365 role
+- [x] Set status to `Ready for Validation`
+- [x] Re-run `azure-validate` after endpoint-input correction
+- [ ] Invoke `azure-deploy`
+- [ ] Complete live Foundry and telemetry acceptance
+
+### 18.9 Validation proof
+
+Initially validated at `2026-07-20T22:16:10+02:00`, then revalidated after the
+identity-variable correction at `2026-07-20T22:24:07+02:00` and after the final
+endpoint correction at `2026-07-20T22:31:01+02:00`.
+
+- [x] All validation checks pass
+  - [x] Terraform `1.13.3` and Azure CLI `2.80.0` are installed.
+  - [x] Azure authentication resolves the confirmed subscription and tenant.
+  - [x] `terraform init -input=false`, recursive format check, and
+    `terraform validate` pass.
+  - [x] Terraform state is accessible with 67 tracked resources.
+  - [x] No unresolved `{{ .Env.* }}` expressions exist in Terraform inputs.
+  - [x] The saved Terraform plan contains `0` creates, `1` in-place update, and
+    `0` deletes.
+  - [x] The nested azd environment contains the confirmed subscription,
+    `eastus2`, tenant, Agent Identity, and blueprint values.
+  - [x] `azd provision --preview --no-prompt` succeeds with no resource
+    provisioning required.
+  - [x] `azd ai agent doctor --no-prompt` reports `11 passed`, `0 failed`, and
+    `2 skipped`.
+  - [x] `azd package --no-prompt` resolves the reviewed prebuilt Hosted Agent
+    image reference.
+  - [x] The Agent Identity unit suite passes with four tests, including proof
+    that two invocations reuse one unexpired resource token after only two
+    token-endpoint requests.
+  - [x] The backend suite passes with 54 tests.
+  - [x] Hosted Agent Python compilation, shell syntax, and diff checks pass.
+  - [x] Six inherited Microsoft Defender policy assignments were reviewed and
+    do not restrict this in-place release update.
+  - [x] Static role review confirms resource-scoped data-plane roles for the
+    backend, frontend, Foundry project, Search, Cosmos DB, ACR, and telemetry.
+    The Hosted Agent setup script grants only `AgentTools.Invoke` and
+    `Agent365.Observability.OtelWrite`; no application-data role is added.
+
+Applied replacement plan:
+
+`/Users/mimarusa/.copilot/session-state/59bb6857-8149-485a-8e89-ee81ae64cde8/files/agent-id-auth-r2.tfplan`
+
+The replacement plan contained exactly one in-place backend environment update
+from `agent-id-auth-20260720` to `agent-id-auth-20260720-r2`, with no creates or
+deletes, and applied successfully. The post-apply refresh plan at
+`/Users/mimarusa/.copilot/session-state/59bb6857-8149-485a-8e89-ee81ae64cde8/files/agent-id-auth-r2-postapply.tfplan`
+contains no changes.
+
+### 18.10 Deployment blocker corrections
+
+The first deployment attempt did not create a new agent version:
+
+- `azd deploy` initially failed before the request because the azd environment
+  stored the literal `${FOUNDRY_PROJECT_ENDPOINT}` as its endpoint value;
+- after setting the concrete project endpoint, Foundry rejected
+  `AGENT_IDENTITY_BLUEPRINT_CLIENT_ID` and `AGENT_IDENTITY_CLIENT_ID` because all
+  caller-defined `AGENT_*` variables are platform-reserved;
+- custom settings were renamed to `ENTRA_AGENT_*`, the setup script now repairs
+  the concrete endpoint, and the replacement immutable release tag is
+  `agent-id-auth-20260720-r2`;
+- image `agent-id-auth-20260720` remains an unused build artifact with digest
+  `sha256:07876c7ff556fad989a97dc1a6c2777dc2bd93103c673a68b253c09b60ef7bb1`;
+- the corrected Agent Identity tests, backend regression suite, Python
+  compilation, shell syntax, Terraform checks, Hosted Agent doctor, provision
+  preview, and package validation all pass;
+- the Foundry agents azd extension was upgraded from `1.0.0-beta.5` to
+  `1.0.0-beta.6`;
+- no caller-defined `AGENT_*` or `FOUNDRY_*` environment variable remains in
+  either Hosted Agent manifest;
+- replacement saved plan `agent-id-auth-r2.tfplan` applied only the matching
+  in-place release metadata update;
+- a subsequent real `azd provision` reproduced the endpoint failure by replacing
+  the repaired value with the circular reference from `azure.yaml`; the
+  confirmed existing-project URL is now explicit in the nested `azure.yaml`,
+  while `FOUNDRY_PROJECT_ENDPOINT` remains the platform output/runtime variable.
+- real provisioning now preserves the concrete project endpoint, Hosted Agent
+  diagnostics return `11 passed`, and the final Terraform refresh has no drift.
+
+### 18.11 Version 3 acceptance failure and supported r3 redesign
+
+Hosted Agent version 3 was deployed and reached `active`, but live acceptance
+failed:
+
+- prompt `What is the status of ORD-003?` selected `get_order_status`;
+- trace `381f619d2f5dabbfe66bd67717c73dab` shows the first custom blueprint
+  exchange returning HTTP `401`;
+- direct Foundry and published-channel calls do not have the frontend-created
+  history binding required by `/internal/agent-tools/{tool_name}`;
+- the Agent 365 exporter still returned HTTP `403`;
+- the inner Agent Framework `invoke_agent` span used generated agent ID
+  `c9b37de5-c64b-4bf3-8bd2-4f8ab69cd972` instead of deployed Agent Identity
+  `a15ba753-8d64-45a3-a34c-5fb507ce34a8`.
+
+The custom in-container `fmi_path` exchange is therefore removed. Foundry
+documentation limits platform Agent Identity authentication to supported MCP and
+A2A tools; Agent Service, not application code, performs that exchange.
+
+Release `mcp-agent-id-20260720-r3` uses the supported design:
+
+1. The backend exposes stateless `get_order_status` through FastMCP at `/mcp/`.
+2. The public frontend proxies `/api/mcp/` to the internal backend.
+3. Terraform creates project connection `customer-support-tools-mcp` with
+   category `RemoteTool`, authentication `AgenticIdentityToken`, and audience
+   `api://dbf8eef6-d745-4b73-b3ac-edc93a15c339`.
+4. The Hosted MAF agent references that project connection and no longer exposes
+   order lookup as a local HTTP wrapper.
+5. The MCP server reuses the existing strict JWT, application-role, tenant,
+   audience, and principal-allowlist validation.
+6. Personal profile and conversation-memory tools remain on the session-bound
+   application gateway. App-only Microsoft 365/Teams calls cannot use those tools
+   without OAuth identity passthrough.
+7. The MAF `Agent.id` is set from
+   `FOUNDRY_AGENT_INSTANCE_CLIENT_ID`, aligning Agent Framework span identity,
+   Agent 365 export URL, and the authorized Agent Identity.
+
+This release adds one Foundry project connection and one backend/Hosted Agent
+revision. It does not change Cosmos data, Search indexes, model deployments,
+network topology, the Entra app registration, or published-channel metadata.
+
+Predeployment validation:
+
+- backend suite: 58 tests passed;
+- MCP initialize, tools/list, and `get_order_status("ORD-003")` protocol calls:
+  HTTP `200`;
+- expected MCP result: `delivered`, `Delivered Jan 20, 2026`;
+- Python compilation, shell syntax, Terraform formatting, and Terraform
+  validation passed.
+
+Live acceptance remains pending until the r3 backend image, Foundry project
+connection, and Hosted Agent version are deployed.
+
+### 18.12 Release r3 validation proof
+
+Validated on 2026-07-20 for subscription
+`ME-MngEnvMCAP372348-mimarusa-1`
+(`7bc68c68-f434-49ad-ab3e-b883ec39da86`), tenant
+`a7b1484c-f66a-496a-b1cf-35631a50396c`, resource group
+`rg-agent-memory-rag`, and location `eastus2`.
+
+- [x] All validation checks pass.
+  - [x] Terraform `1.13.3`, Azure CLI `2.80.0`, and azd `1.27.1` are
+    installed.
+  - [x] Azure authentication resolves the enabled confirmed subscription and
+    tenant.
+  - [x] `terraform init -input=false`, recursive format check, and
+    `terraform validate` pass.
+  - [x] Terraform state is accessible with 67 tracked resources.
+  - [x] The saved plan contains exactly one create, one in-place update, zero
+    deletes, and zero replacements.
+  - [x] The create is only
+    `azapi_resource.foundry_application_tools_connection`, targeting
+    `/api/mcp/` with `AgenticIdentityToken` and the application audience.
+  - [x] The update changes only backend `AGENT_RELEASE_ID` from
+    `agent-id-auth-20260720-r2` to `mcp-agent-id-20260720-r3`; the image,
+    secrets, ingress, scaling, probes, and all other environment values are
+    unchanged.
+  - [x] Saved plan:
+    `/Users/mimarusa/.copilot/session-state/59bb6857-8149-485a-8e89-ee81ae64cde8/files/mcp-agent-id-r3.tfplan`.
+  - [x] No unresolved `{{ .Env.* }}` expressions exist in Terraform inputs.
+  - [x] No applicable Azure Policy assignment was returned for the target
+    resource-group scope.
+  - [x] Static role review confirms no Azure RBAC mutation. Existing
+    resource-scoped application, Foundry project, Search, Cosmos, ACR, and
+    telemetry assignments remain unchanged. The identity script grants only
+    `AgentTools.Invoke` and `Agent365.Observability.OtelWrite`.
+  - [x] Backend suite passes all 58 tests.
+  - [x] Agent contracts, backend, and Hosted Agent sources compile.
+  - [x] Frontend production build succeeds.
+  - [x] Updated shell scripts pass `bash -n`.
+  - [x] The nested azd environment contains
+    `APP_TOOLS_CONNECTION_ID=customer-support-tools-mcp`.
+  - [x] `azd provision --preview --no-prompt` reports the existing Foundry
+    project and no provisioning action.
+  - [x] `azd ai agent doctor --no-prompt` reports 10 passed, 0 failed, and 3
+    skipped.
+  - [x] `azd package --no-prompt` resolves immutable Hosted Agent image
+    `agmem5df652acr.azurecr.io/customer-support-maf-hosted:mcp-agent-id-20260720-r3`.
+
+### 18.13 Version 4 schema failure and r4 correction
+
+Release r3 infrastructure and backend deployment completed successfully:
+
+- project connection `customer-support-tools-mcp` was created;
+- backend image `backend:mcp-agent-id-20260720-r3`, digest
+  `sha256:8ca4b514eff82dc3a53edb02e9e1a8ca9b6f34bb480c7c0a91f52505ca0c67da`,
+  runs on healthy revision `ca-agmem-backend--0000032` with 100% traffic;
+- liveness and readiness return HTTP `200`;
+- anonymous MCP initialization returns HTTP `401`;
+- Hosted image `customer-support-maf-hosted:mcp-agent-id-20260720-r3`,
+  digest
+  `sha256:03d0fb16baa0d7d0673bea506f15dc3e8b611a8186a17d909b74d7eb44e6d058`,
+  was deployed as active agent version 4.
+
+Version 4 invocation failed before MCP discovery. Trace
+`0a32ed4bf8b29ebccc8c5c7f28bcdf5b` returned:
+
+`Missing mutually exclusive parameters: 'tools[1]'. Ensure you are providing
+exactly one of: 'server_url', 'connector_id', or 'tunnel_id'.`
+
+The `agent-framework-foundry==1.10.1` helper serializes
+`project_connection_id` as authentication metadata, but the Responses API still
+requires the MCP server address independently. Release r4 therefore supplies:
+
+- `server_url=https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io/api/mcp/`;
+- `project_connection_id=customer-support-tools-mcp`;
+- `allowed_tools=["get_order_status"]`;
+- `require_approval="never"`.
+
+The project connection remains responsible for Agent Identity token injection;
+no credential is moved into the Hosted container.
+
+Release r4 revalidation:
+
+- Hosted MCP schema regression test passes and asserts both the endpoint and
+  project connection;
+- backend regression suite passes all 58 tests;
+- Python compilation, shell syntax, Terraform formatting, and Terraform
+  validation pass;
+- the saved plan
+  `/Users/mimarusa/.copilot/session-state/59bb6857-8149-485a-8e89-ee81ae64cde8/files/mcp-agent-id-r4.tfplan`
+  contains zero creates, one in-place backend release-ID update, zero deletes,
+  and zero replacements;
+- `azd provision --preview --no-prompt` succeeds;
+- `azd ai agent doctor --no-prompt` reports 11 passed, 0 failed, and 2 skipped;
+- `azd package --no-prompt` resolves immutable Hosted Agent image
+  `customer-support-maf-hosted:mcp-agent-id-20260720-r4`.
+
+### 18.14 Version 5 authentication result and identity-scope correction
+
+Hosted Agent version 5 reached `active` and the corrected MCP descriptor reached
+the deployed `/api/mcp/` endpoint. Trace
+`3b1d8b84cd414c9013fc14592930a286` then failed with HTTP `401` during MCP
+authentication.
+
+Foundry identity inspection confirmed two separate principals:
+
+| Execution surface | Agent Identity | Required access |
+|---|---|---|
+| Direct project/Foundry testing | `5054c2c8-1110-4867-8762-7a44193084dd` | `AgentTools.Invoke` |
+| Published Microsoft 365/Teams application | `a15ba753-8d64-45a3-a34c-5fb507ce34a8` | `AgentTools.Invoke`, `Agent365.Observability.OtelWrite` |
+
+The published identity had both grants. The shared project Agent Identity had no
+application-role assignment and was not in the backend allowlist. Current
+Foundry documentation explicitly distinguishes the shared project identity used
+before publication from the distinct identity used by a published agent.
+
+The correction is deliberately narrow:
+
+- grant `AgentTools.Invoke` to the shared project Agent Identity;
+- add that principal to `HOSTED_AGENT_PRINCIPAL_IDS`;
+- keep delegated tokens rejected;
+- do not grant Agent 365, Cosmos, Search, model, or other application-data roles
+  to the shared identity;
+- retain the published identity's existing grants unchanged.
+
+The setup script now discovers the project Agent Identity from
+`properties.agentIdentity.agentIdentityId` and applies the gateway role
+idempotently to both principals.
+
+Validation proof:
+
+- `bash -n scripts/assign_hosted_agent_access.sh` passes;
+- Terraform formatting and validation pass, the backend suite reports 58 tests
+  passing, the Hosted MCP regression test passes, and the frontend production
+  build succeeds;
+- `azd provision --preview --no-prompt` makes no changes and
+  `azd ai agent doctor --no-prompt` reports 11 passed, 0 failed, and 2 skipped;
+- saved plan
+  `/Users/mimarusa/.copilot/session-state/59bb6857-8149-485a-8e89-ee81ae64cde8/files/mcp-agent-id-r4-shared-identity.tfplan`
+  contains zero creates, one in-place backend allowlist update, zero deletes,
+  and zero replacements;
+- the only planned value change adds
+  `5054c2c8-1110-4867-8762-7a44193084dd` to
+  `HOSTED_AGENT_PRINCIPAL_IDS`.
+
+### 18.15 Version 5 functional acceptance and Agent 365 eligibility gap
+
+The shared-identity correction was applied with zero creates and zero destroys:
+
+- `AgentTools.Invoke` was granted to project Agent Identity
+  `5054c2c8-1110-4867-8762-7a44193084dd`;
+- backend revision `ca-agmem-backend--0000034` is healthy and allowlists exactly
+  the shared and published Agent Identities;
+- anonymous MCP initialization still returns HTTP `401`;
+- the published identity retains `AgentTools.Invoke` and
+  `Agent365.Observability.OtelWrite`, while the shared identity has only
+  `AgentTools.Invoke`.
+
+Hosted Agent version 5 live acceptance now passes:
+
+| Test | Operation ID | Result |
+|---|---|---|
+| `What is the status of ORD-003?` | `b472b2af4f3197de222eafa10253873a` | MCP `get_order_status` completed; `delivered`, `Delivered Jan 20, 2026` |
+| `What is the return policy for products?` | `edcd9f38fdad26ba2a2db86a4173ff95` | Foundry IQ retrieved four documents and returned the grounded 30-day policy |
+
+Application Insights records both `invoke_agent` operations as successful under
+agent ID `a15ba753-8d64-45a3-a34c-5fb507ce34a8`, proving its independent export
+path is healthy.
+
+The Agent 365 permission error is resolved: neither successful session emitted
+HTTP `401`, HTTP `403`, or a missing `Agent365.Observability.OtelWrite` error.
+However, the Agent 365 exporter logged `No eligible genAI spans to export;
+nothing exported.` for both sessions.
+
+Exporter inspection and current Microsoft Agent 365 documentation confirm that
+an eligible span needs:
+
+- `gen_ai.operation.name` in the exporter allowlist;
+- `gen_ai.agent.id`;
+- `microsoft.tenant.id`.
+
+The successful `invoke_agent` spans contain the eligible operation and correct
+agent ID but not `microsoft.tenant.id`. Agent Server resolves that attribute from
+the reserved `FOUNDRY_AGENT_TENANT_ID`, which the current Hosted Agent runtime did
+not populate.
+
+Release `mcp-agent-id-20260720-r5`:
+
+1. preserves a platform-provided `FOUNDRY_AGENT_TENANT_ID` when present;
+2. otherwise copies the deployment's custom `ENTRA_TENANT_ID` to the reserved
+   Agent Server key before `ResponsesHostServer` initializes observability;
+3. fails startup explicitly if neither value exists;
+4. adds regression tests for platform precedence, fallback, and missing tenant;
+5. deploys a new immutable Hosted Agent image/version without changing data,
+   networking, MCP permissions, or application APIs.
+
+Preparation proof:
+
+- all four Hosted Agent tests pass;
+- all 58 backend regression tests pass;
+- Python compilation, shell syntax, Terraform formatting and validation, and
+  `git diff --check` pass;
+- the nested azd environment contains
+  `ENTRA_TENANT_ID=a7b1484c-f66a-496a-b1cf-35631a50396c`;
+- `azd provision --preview --no-prompt` reports the existing Foundry project and
+  no provisioning action;
+- `azd ai agent doctor --no-prompt` reports 11 passed, 0 failed, and 2 skipped;
+- `azd package --no-prompt` resolves immutable image
+  `customer-support-maf-hosted:mcp-agent-id-20260720-r5`.
+
+Validation proof:
+
+- saved plan
+  `/Users/mimarusa/.copilot/session-state/59bb6857-8149-485a-8e89-ee81ae64cde8/files/agent365-tenant-r5.tfplan`
+  has zero creates, one release-metadata update, zero deletes, and zero
+  replacements;
+- all repository and Hosted Agent validation checks listed above pass.
+
+### 18.16 Version 6 acceptance and Agent 365 request baggage r6
+
+Hosted Agent version 6 is active on immutable image
+`customer-support-maf-hosted:mcp-agent-id-20260720-r5`, digest
+`sha256:b16668a4dc4523139fc36fbac4d945c86cc5688c4195050caadb3741c32abc7f`.
+The request `70cfa5ffe28809e9e1bf4e6968202a8b` returned the authoritative
+`ORD-003` result (`delivered`, `Delivered Jan 20, 2026`), so the MCP correction
+remains healthy.
+
+Application Insights captured the successful `invoke_agent` span with:
+
+- `gen_ai.operation.name=invoke_agent`;
+- `gen_ai.agent.id=a15ba753-8d64-45a3-a34c-5fb507ce34a8`;
+- no `microsoft.tenant.id`.
+
+Agent 365 emitted no authorization error, but still logged `No eligible genAI
+spans to export; nothing exported.` This proves the r5 role grant and token are
+valid while the environment-only tenant fallback does not place the tenant on
+the completed span before Agent 365 eligibility filtering.
+
+Release `mcp-agent-id-20260720-r6` adds identity at the request boundary:
+
+1. retain the reserved-environment fallback before Agent Server initializes;
+2. require `FOUNDRY_AGENT_INSTANCE_CLIENT_ID` whenever the Foundry hosted
+   environment is active;
+3. wrap the single `create_response` route with an Agent 365
+   `BaggageBuilder` scope after Agent Server extracts inbound trace context;
+4. stamp the authoritative deployment tenant and platform-provided published
+   Agent Identity, never caller-supplied identity;
+5. fail startup if the expected create route is absent or ambiguous;
+6. keep the MCP, Foundry IQ, networking, data, and RBAC architecture unchanged.
+
+Preparation evidence:
+
+- nine Hosted Agent tests pass;
+- the Agent 365 regression creates an `invoke_agent` span through
+  `A365SpanProcessor` and verifies that
+  `filter_and_partition_by_identity` returns the expected
+  `(deployment tenant, published agent)` partition;
+- the pinned `microsoft-opentelemetry==1.3.5` dependency matches the deployed
+  Agent Server observability stack;
+- all 58 backend tests and the frontend production build pass;
+- Terraform formatting and validation, Hosted Agent Python compilation, setup
+  script syntax, and `git diff --check` pass;
+- `azd provision --preview --no-prompt` reports the existing Foundry project
+  with no provisioning action;
+- `azd ai agent doctor --no-prompt` reports 11 passed, 0 failed, and 2 skipped.
+
+Validation proof is recorded in Section 14 under
+`Agent 365 request baggage r6 validation`.
+
+### 18.17 Version 7 application acceptance and Agent 365 tenant blocker
+
+The validated Terraform plan was applied on 2026-07-21 with zero creates, one
+in-place release-marker update, zero deletes, and zero replacements. Backend
+revision `ca-agmem-backend--0000036` is healthy, its ACR pull assignment is
+present, and Hosted Agent version 7 is active on immutable image
+`customer-support-maf-hosted:mcp-agent-id-20260720-r6`, digest
+`sha256:2c619513d6301a7d798d62101fb1076b83791c1057c13fc4c9e2758b391ee802`.
+
+Version 7 live application acceptance passes:
+
+| Test | Trace ID | Result |
+|---|---|---|
+| `What is the status of ORD-003?` | `6865ecdad96dde3e61de2689f6f637c2` | MCP returned `delivered`, `Delivered Jan 20, 2026` |
+| Return-policy retrieval | `d7bedbf4050cc24cc976a6968703afa4` | Foundry IQ returned four grounded policy documents |
+
+Both completed `invoke_agent` spans are successful in Application Insights and
+contain the full Agent 365 eligibility tuple:
+
+- `gen_ai.operation.name=invoke_agent`;
+- `gen_ai.agent.id=a15ba753-8d64-45a3-a34c-5fb507ce34a8`;
+- `microsoft.tenant.id=a7b1484c-f66a-496a-b1cf-35631a50396c`.
+
+The exporter acquired an MSI token after each eligible span at
+`2026-07-21T08:03:20Z` and `2026-07-21T08:03:47Z`. Token resolution occurs only
+after the exporter finds a non-empty eligible identity partition. No Agent 365
+authorization, token-resolution, HTTP, chunk, or export error followed. This
+proves the r6 span reaches the authenticated exporter HTTP path; unrelated
+`No eligible genAI spans` messages are from separate non-GenAI batches.
+
+Live application-role verification remains least privilege:
+
+| Identity | Roles |
+|---|---|
+| Published Agent Identity `a15ba753-8d64-45a3-a34c-5fb507ce34a8` | `AgentTools.Invoke`, `Agent365.Observability.OtelWrite` |
+| Shared project Agent Identity `5054c2c8-1110-4867-8762-7a44193084dd` | `AgentTools.Invoke` |
+
+Downstream Agent 365 acceptance is blocked by tenant licensing, not by the
+deployed code or role grants. The 2026-07-21 Microsoft Graph subscription audit
+found only:
+
+| SKU | Enabled | Assigned |
+|---|---:|---:|
+| Microsoft 365 Copilot | 5 | 2 |
+| Microsoft 365 E5 (no Teams) | 50 | 2 |
+| Microsoft Teams Enterprise | 50 | 2 |
+
+Neither Microsoft 365 E7 nor Microsoft Agent 365 is present to assign. Official
+Agent 365 guidance requires at least one tenant user with either eligible license
+assigned; without it, HTTP `200` with `partialSuccess: null` can silently discard
+the complete request. Defender advanced hunting could not be queried from the
+current Azure CLI client because its delegated token lacks `AdvancedQuery.Read`;
+in any case, the missing license prevents downstream acceptance from being a
+valid deployment assertion.
+
+Remaining acceptance work is tenant/channel scoped:
+
+1. acquire and assign Microsoft 365 E7 or Microsoft Agent 365 to at least one
+   tenant user and complete Agent 365 onboarding;
+2. wait about five minutes, then verify published agent ID
+   `a15ba753-8d64-45a3-a34c-5fb507ce34a8` in Defender `CloudAppEvents`;
+3. retest `ORD-003` and Foundry IQ in Microsoft 365 Copilot and Teams.
+
+### 18.18 Agent 365 activation and published-channel acceptance
+
+The tenant licensing prerequisite was completed later on 2026-07-21:
+
+- SKU `AGENT_365` (`796a6fb4-740b-4d36-bf56-9c12ca7fa069`) is enabled with
+  25 seats and two assignments;
+- `admin@MngEnvMCAP372348.onmicrosoft.com` and
+  `mimarusa@MngEnvMCAP372348.onmicrosoft.com` both have the SKU assigned;
+- `AGENT_365`, `DEFENDER_FOR_AI`, and `AUDIT_FOR_AGENTS` report
+  `provisioningStatus=Success`.
+
+The Microsoft 365 Agent Registry confirms the Foundry publication:
+
+| Property | Live value |
+|---|---|
+| Package | `T_6bf1c88d-27eb-3e26-4b03-9d8308d3867f` |
+| Display name | `customer-support-maf-hosted` |
+| State | Unblocked; `allowedForAll` |
+| Hosts | Teams, Copilot |
+| Platform | Foundry |
+| Bot / Agent Identity | `a15ba753-8d64-45a3-a34c-5fb507ce34a8` |
+| Published source | `customer-support-maf-hosted` in `agmem-agents` |
+
+The stable Foundry endpoint routes 100% of traffic to `@latest`, currently
+version 7. It exposes the `activity` and `responses` protocols with `Entra` and
+`BotServiceRbac` authorization.
+
+Published-channel acceptance now passes:
+
+| Test | Trace ID | Result |
+|---|---|---|
+| `What is the status of ORD-003?` | `0d83c8cfa56a5bc8d8d932ce4177d042` | `get_order_status` returned `delivered`, `Delivered Jan 20, 2026` |
+| `What is the return policy for products?` | `d383ced605d6bd23a0112584a023bf70` | `knowledge_base_retrieve` returned three grounded documents and the 30-day policy |
+
+Both successful `invoke_agent` spans contain the published Agent Identity and
+deployment tenant. After each completed run, the Agent 365 exporter acquired a
+managed-identity token and logged no authorization, HTTP, chunk, or export error.
+
+Downstream telemetry remains an external onboarding item. Microsoft Graph
+advanced hunting accepts the temporary verifier's `ThreatHunting.Read.All`
+permission, but its KQL engine reports that `CloudAppEvents` does not exist in
+this tenant. Therefore the application, publication, and exporter acceptance
+gates pass, while Defender appearance cannot be asserted until the newly
+licensed tenant's Agent 365/Defender backend provisions that table.
+
+### 18.19 Independent legacy Foundry publication deprovisioning
+
+The similarly named Microsoft 365 package `agent-framework-agent-foundry-` was
+mapped before deletion and proved to be an independent Hosted Agent in the
+shared `rg-ai/demo-swe/demo-swe-prj` project, not an earlier version of
+`customer-support-maf-hosted`.
+
+| Layer | Deprovisioned legacy resource |
+|---|---|
+| Agent Registry package | `T_8f4394fb-7025-5b06-1413-b93e8d5e46b8` |
+| Foundry Hosted Agent | `agent-framework-agent-foundry-skills-responses`, versions 1-3 |
+| Azure Bot Service | `agent-framework-agent-foun51016` |
+| Agent Identity | `4c413efd-d9f4-4619-b27c-d86b3b05193f` |
+| Identity blueprint | `6e0057e9-ae01-4b2f-83a3-5c0241e93ae8` |
+
+After explicit destructive confirmation, the package was blocked through the
+Package Management API. The first Foundry delete was rejected because active
+sessions remained; the service-directed `force=true` retry terminated only
+those sessions and returned `agent.deleted=true`. The generated Bot Service was
+then deleted. Foundry automatically removed the dedicated Agent Identity,
+blueprint application/service principal, and RBAC assignment. Agent Registry
+reconciliation removed the blocked package from tenant inventory.
+
+The shared Foundry account, project, ACR, monitoring resources, and four
+unrelated `demo-swe-prj` agents were preserved. Post-cleanup verification shows
+`customer-support-maf-hosted` enabled on active version 7 with package
+`T_6bf1c88d-27eb-3e26-4b03-9d8308d3867f` unblocked. A direct Responses request
+for `ORD-003` completed successfully and returned `delivered`.

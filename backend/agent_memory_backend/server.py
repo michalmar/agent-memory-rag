@@ -26,6 +26,7 @@ from agent_contracts import (
     render_instructions,
 )
 from .agent_tools import ToolExecutor
+from .agent_mcp import application_tools_mcp_app
 from .agent_runtime_contracts import AgentRuntime
 from .agent_tool_gateway import AgentToolRequest, dispatch_agent_tool
 from .agui_adapter import to_agui_events
@@ -100,8 +101,7 @@ async def _initialize_runtime(agent_type: AgentType, runtime: AgentRuntime) -> N
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    del app
+async def _backend_lifespan():
     components = (
         ("cosmos_history", history_store),
         ("cosmos_profile", profile_store),
@@ -161,7 +161,18 @@ async def lifespan(app: FastAPI):
     conversation_registry.close()
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    del app
+    async with application_tools_mcp_app.router.lifespan_context(
+        application_tools_mcp_app
+    ):
+        async with _backend_lifespan():
+            yield
+
+
 app = FastAPI(title="Agentic Memory Backend", lifespan=lifespan)
+app.mount("/mcp", application_tools_mcp_app)
 
 
 @app.exception_handler(MemoryStoreUnavailable)

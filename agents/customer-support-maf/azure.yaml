@@ -7,12 +7,12 @@ name: customer-support-maf-hosted
 services:
     ai-project:
         host: azure.ai.project
-        endpoint: ${FOUNDRY_PROJECT_ENDPOINT}
+        endpoint: https://agmem5df652aif2.services.ai.azure.com/api/projects/agmem-agents
     customer-support-maf-hosted:
         project: src/customer-support-maf
         host: azure.ai.agent
         language: docker
-        image: agmem5df652acr.azurecr.io/customer-support-maf-hosted:dual-foundry-001
+        image: agmem5df652acr.azurecr.io/customer-support-maf-hosted:mcp-agent-id-20260720-r6
         docker:
             remoteBuild: true
         uses:
@@ -33,6 +33,10 @@ services:
               value: ${APP_TOOL_GATEWAY_URL}
             - name: APP_TOOL_GATEWAY_SCOPE
               value: ${APP_TOOL_GATEWAY_SCOPE}
+            - name: APP_TOOLS_CONNECTION_ID
+              value: ${APP_TOOLS_CONNECTION_ID}
+            - name: ENTRA_TENANT_ID
+              value: ${ENTRA_TENANT_ID}
         kind: hosted
         name: customer-support-maf-hosted
         protocols:
