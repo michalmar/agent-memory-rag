@@ -3,7 +3,9 @@ import type {
   MandatoryStatus,
 } from './client.js';
 
-const CITATION_MARKER = /【(\d+):([^†】]+)†([^】]+)】/g;
+const CITATION_MARKER =
+  /【(\d+):([^†】]+)†([^】]+)】|cite([^]+)/g;
+const FOUNDRY_CITATION_SEPARATOR = '';
 const MERGEABLE_CITATION_FIELDS = [
   'url',
   'search_idx',
@@ -23,7 +25,7 @@ const MERGEABLE_CITATION_FIELDS = [
 ] as const;
 
 export interface CitationMarker {
-  searchIndex: number;
+  searchIndex?: number;
   refId: string;
   sourceName: string;
 }
@@ -245,12 +247,40 @@ export function replaceCitationMarkers(
 ): string {
   return text.replace(
     CITATION_MARKER,
-    (_marker, searchIndex: string, refId: string, sourceName: string) =>
-      replacement({
+    (
+      marker,
+      searchIndex: string | undefined,
+      refId: string | undefined,
+      sourceName: string | undefined,
+      foundryRefIds: string | undefined,
+    ) => {
+      if (foundryRefIds !== undefined) {
+        const references = foundryRefIds
+          .split(FOUNDRY_CITATION_SEPARATOR)
+          .map((reference) => reference.trim())
+          .filter(Boolean);
+        if (references.length === 0) return marker;
+        return references
+          .map((reference) =>
+            replacement({
+              refId: reference,
+              sourceName: reference,
+            }))
+          .join('');
+      }
+      if (
+        searchIndex === undefined
+        || refId === undefined
+        || sourceName === undefined
+      ) {
+        return marker;
+      }
+      return replacement({
         searchIndex: Number(searchIndex),
         refId,
         sourceName,
-      }),
+      });
+    },
   );
 }
 
@@ -269,6 +299,7 @@ export function findCitationBySearchIndex(
   citations: CitationSource[],
   marker: CitationMarker,
 ): number {
+  if (marker.searchIndex === undefined) return -1;
   return citations.findIndex(
     (citation) => citation.search_idx === marker.searchIndex,
   );

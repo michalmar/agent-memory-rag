@@ -1,6 +1,6 @@
 # Azure Deployment Plan - Hosted Agent Identity and Telemetry Remediation
 
-> **Status:** Validated - stateful directive continuation release 2026-07-24
+> **Status:** Deployed and verified - directive citation-link release 2026-07-24
 
 Generated: 2026-07-15
 
@@ -1679,6 +1679,101 @@ Verified at `2026-07-12T21:25:24+02:00`:
   index read, backend Foundry OpenAI use, and backend Cosmos data contribution;
 - PostgreSQL bootstrap job image and all agents remain unchanged;
 - the post-release full-refresh Terraform plan returned `0` with no drift.
+
+Production URL:
+
+`https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io`
+
+## 24. Directive citation-link frontend release - 2026-07-24
+
+> **Status:** Deployed and verified
+
+### 24.1 Scope and confirmed Azure context
+
+- Deploy only the Foundry-style citation marker parsing change in `frontend/`.
+- Build `frontend/Dockerfile` through the established ACR Tasks workflow and
+  update only Container App `ca-agmem-frontend`.
+- Preserve Terraform-managed infrastructure, backend revisions, Hosted Agents,
+  jobs, data services, identities, networking, runtime configuration, and
+  traffic mode.
+- The user confirmed subscription `ME-MngEnvMCAP372348-mimarusa-1`
+  (`7bc68c68-f434-49ad-ab3e-b883ec39da86`) and the existing `eastus2` region.
+- Resource group: `rg-agent-memory-rag`.
+- Registry: `agmem5df652acr`.
+- Production endpoint:
+  `https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io`.
+
+### 24.2 Validation proof
+
+Validated at `2026-07-24T19:26:59Z`:
+
+- [x] All validation checks pass.
+  - [x] Frontend unit suite passes with 15 tests.
+  - [x] TypeScript compilation and the Vite production build pass with 183
+    transformed modules.
+  - [x] `git diff --check -- frontend` passes.
+  - [x] Docker is unavailable locally, so the image build remains assigned to
+    the established server-side ACR Task.
+  - [x] Terraform `1.13.3` and Azure CLI `2.80.0` are installed.
+  - [x] Azure CLI resolves the confirmed subscription, tenant, and interactive
+    user identity.
+  - [x] `terraform init -input=false`, recursive format check, and
+    `terraform validate` pass.
+  - [x] Terraform state is accessible with 94 tracked resources.
+  - [x] No unresolved `{{ .Env.* }}` expressions exist in Terraform inputs.
+  - [x] The full live-refresh Terraform plan reports no changes.
+  - [x] Applicable management-group and subscription policy assignments were
+    reviewed for the in-place frontend revision update.
+  - [x] Static RBAC review confirms the frontend identity receives
+    resource-scoped `AcrPull` on the existing ACR.
+  - [x] Live RBAC verification confirms principal
+    `2d5ffcf5-89b7-4689-816c-ccc5c62c98bf` has `AcrPull` on
+    `agmem5df652acr`.
+  - [x] Resource group `rg-agent-memory-rag`, Container Apps environment
+    `cae-agmem-5df652`, ACR `agmem5df652acr`, and
+    `ca-agmem-frontend` are provisioned successfully.
+  - [x] ACR admin access and anonymous pull remain disabled.
+  - [x] Production root, `/config.js`, `/api/health/live`, and
+    `/api/health/ready` return successfully; readiness reports `ready`.
+- Saved no-change Terraform plan:
+  `/Users/mimarusa/.copilot/session-state/cb9fd353-0eaf-48c5-b9a8-aa60bef10375/files/citation-links-20260724T192659Z.tfplan`.
+
+### 24.3 Deployment and rollback
+
+- Build a frontend-only image with a unique immutable `citation-links-*` tag.
+- Update only `ca-agmem-frontend` to the new ACR image.
+- Do not run `terraform apply`.
+- Verify the new revision is healthy, is latest-ready, and receives 100%
+  traffic.
+- Verify the public root, runtime configuration, liveness, readiness, deployed
+  bundle, and inline citation-link assets.
+- Rollback target: revision `ca-agmem-frontend--0000020`, image
+  `agmem5df652acr.azurecr.io/frontend:citation-ux-align-20260724112242`.
+
+### 24.4 Deployment result
+
+Verified on 2026-07-24:
+
+- ACR build `ch32` published
+  `agmem5df652acr.azurecr.io/frontend:citation-links-20260724192830`.
+- Immutable image digest:
+  `sha256:9c745e7c3b6fb3b1d08e2442463173826b89aeeb5815aa8501b540dd79b3eac9`.
+- Frontend revision `ca-agmem-frontend--0000021` is active, healthy,
+  latest-ready, running, and receives 100% traffic in single-revision mode.
+- The deployed Container App references the expected immutable release image.
+- Production root, `/config.js`, `/api/health/live`, and
+  `/api/health/ready` return successfully; readiness reports `ready` with no
+  degraded dependencies.
+- Runtime configuration remains Entra-only.
+- The served `assets/index-G8K3uoMP.js` bundle contains the Foundry citation
+  marker parser used to render directive citations as inline links.
+- Live role verification confirms the frontend identity retains
+  resource-scoped `AcrPull` on `agmem5df652acr`.
+- The post-release full-refresh Terraform plan reports no drift:
+  `/Users/mimarusa/.copilot/session-state/cb9fd353-0eaf-48c5-b9a8-aa60bef10375/files/post-citation-links-20260724T193930Z.tfplan`.
+- Terraform-managed infrastructure, backend revisions, Hosted Agents, jobs,
+  data services, identities, networking, and runtime configuration were not
+  changed.
 
 Production URL:
 

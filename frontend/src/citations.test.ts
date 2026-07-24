@@ -72,6 +72,39 @@ describe('citation utilities', () => {
     expect(replaced).toBe('See [1].');
   });
 
+  it('replaces Foundry citation markers using directive reference IDs', () => {
+    const refId =
+      '30336958:v1:s0003-3-authorization-and-driver-competence';
+    const citations = [
+      {
+        ref_id: refId,
+        source_name: 'Company car driver safety requirements',
+      },
+    ];
+    const text = `Stop driving if your licence becomes invalid. cite${refId}`;
+
+    const replaced = replaceCitationMarkers(text, (marker) => {
+      expect(marker).toEqual({
+        refId,
+        sourceName: refId,
+      });
+      expect(findCitationByIdentity(citations, marker)).toBe(0);
+      expect(findCitationBySearchIndex(citations, marker)).toBe(-1);
+      return '[1]';
+    });
+
+    expect(replaced).toBe(
+      'Stop driving if your licence becomes invalid. [1]',
+    );
+
+    expect(
+      replaceCitationMarkers(
+        `Compare cite${refId}related-section`,
+        (marker) => `[${marker.refId}]`,
+      ),
+    ).toBe(`Compare [${refId}][related-section]`);
+  });
+
   it('preserves directive lineage and does not collapse distinct sections', () => {
     const parsed = parseCitations([
       {
