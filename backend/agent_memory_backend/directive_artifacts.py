@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import urlparse
 
@@ -81,6 +82,29 @@ class DirectiveArtifactRepository:
                 "Directive JSON artifact must be an object"
             )
         return value
+
+    async def stream_bytes(
+        self,
+        catalog_blob_name: str,
+    ) -> AsyncIterator[bytes]:
+        blob_name = _validated_catalog_blob_name(catalog_blob_name)
+        try:
+            download = await self._require_container().download_blob(blob_name)
+        except AzureError as exc:
+            raise DirectiveDataUnavailable(
+                "Directive artifact unavailable"
+            ) from exc
+
+        async def chunks() -> AsyncIterator[bytes]:
+            try:
+                async for chunk in download.chunks():
+                    yield bytes(chunk)
+            except AzureError as exc:
+                raise DirectiveDataUnavailable(
+                    "Directive artifact unavailable"
+                ) from exc
+
+        return chunks()
 
     def _require_container(self) -> Any:
         if self._container is None:

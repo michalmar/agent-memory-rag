@@ -1,6 +1,6 @@
 # Azure Deployment Plan - Hosted Agent Identity and Telemetry Remediation
 
-> **Status:** Deployed and verified - directive citation-link release 2026-07-24
+> **Status:** Deployed and verified - directive document viewer release 2026-07-24
 
 Generated: 2026-07-15
 
@@ -1778,6 +1778,110 @@ Verified on 2026-07-24:
 Production URL:
 
 `https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io`
+
+## 25. Directive document viewer release - 2026-07-24
+
+> **Status:** Deployed and verified
+
+### 25.1 Scope and confirmed Azure context
+
+- Deploy the authenticated exact-version directive document API and the
+  Markdown-first frontend viewer with lazy Original PDF loading.
+- Build immutable backend and frontend images through the established ACR Tasks
+  workflow and update only `ca-agmem-backend` and `ca-agmem-frontend`.
+- Preserve Terraform-managed infrastructure, Hosted Agents, jobs, data, Search,
+  identities, networking, runtime configuration, and single-revision traffic.
+- The user confirmed subscription `ME-MngEnvMCAP372348-mimarusa-1`
+  (`7bc68c68-f434-49ad-ab3e-b883ec39da86`) and the existing `eastus2` region.
+- Resource group: `rg-agent-memory-rag`.
+- Registry: `agmem5df652acr`.
+- Production endpoint:
+  `https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io`.
+
+### 25.2 Validation proof
+
+Validated at `2026-07-24T20:41:35Z`:
+
+- [x] All validation checks pass.
+  - [x] Backend suite passes with 139 tests and 11 subtests.
+  - [x] Frontend suite passes with 22 tests; TypeScript and Vite production build
+    succeed with 188 transformed modules.
+  - [x] Independent five-axis review approved the final implementation with no
+    significant findings.
+  - [x] `git diff --check` and `bash -n scripts/deploy_images.sh` pass.
+  - [x] Terraform `1.13.3` and Azure CLI `2.80.0` are installed.
+  - [x] Azure CLI resolves the confirmed enabled subscription and tenant.
+  - [x] `terraform init -input=false`, recursive format check, and
+    `terraform validate` pass.
+  - [x] Terraform state is accessible with 94 tracked resources.
+  - [x] No unresolved `{{ .Env.* }}` expressions exist in Terraform inputs.
+  - [x] The full live-refresh Terraform plan reports no changes.
+  - [x] Inherited management-group and subscription policy assignments were
+    reviewed; this release creates no Terraform resource and retains the existing
+    compliant Container Apps, ACR, identity, and network configuration.
+  - [x] Static RBAC review confirms the backend application identity retains
+    container-scoped `Storage Blob Data Reader`, and both application identities
+    retain registry-scoped `AcrPull`; no role mutation is required.
+  - [x] The existing Container Apps environment, ACR, backend app, and frontend
+    app are provisioned successfully in East US 2. ACR admin access and anonymous
+    pull remain disabled.
+- Saved no-change Terraform plan:
+  `/Users/mimarusa/.copilot/session-state/cb9fd353-0eaf-48c5-b9a8-aa60bef10375/files/directive-viewer-validation.tfplan`.
+
+### 25.3 Deployment and rollback
+
+- Build backend and frontend images with one unique immutable
+  `directive-viewer-*` release tag.
+- Update the backend first, verify protected document and PDF endpoints, then
+  update the frontend and complete end-to-end acceptance.
+- Do not run `terraform apply`; the reviewed plan contains no infrastructure
+  changes.
+- Backend rollback target: revision `ca-agmem-backend--0000052`, image
+  `agmem5df652acr.azurecr.io/backend:directive-stateful-20260724-r2`.
+- Frontend rollback target: revision `ca-agmem-frontend--0000021`, image
+  `agmem5df652acr.azurecr.io/frontend:citation-links-20260724192830`.
+
+### 25.4 Deployment result
+
+Deployment completed and was verified at `2026-07-24T20:58:11Z`.
+
+- No Terraform apply was run because the validated infrastructure plan contained
+  no changes.
+- ACR Tasks built both immutable application images successfully:
+  - backend run `ch33`:
+    `agmem5df652acr.azurecr.io/backend:directive-viewer-20260724204135`
+    (`sha256:40d0b750bec0c59065c060d9d14afb414f55a314c2075d52480ac8bea63c2ade`);
+  - frontend run `ch34`:
+    `agmem5df652acr.azurecr.io/frontend:directive-viewer-20260724204135`
+    (`sha256:85450b746344b017b3a02604e4c937b91d1a425eca969e249b778c5eaa9a5613`).
+- The backend was deployed and verified before the frontend:
+  - backend revision `ca-agmem-backend--0000053` is healthy, ready, and receives
+    100% of backend traffic;
+  - frontend revision `ca-agmem-frontend--0000022` is healthy, ready, and
+    receives 100% of frontend traffic.
+- Production verification passed:
+  - root, runtime config, `/api/health/live`, and `/api/health/ready` succeed;
+  - the deployed asset `/assets/index-BlTM4Qx7.js` contains the directive
+    document viewer and Original PDF UI;
+  - anonymous exact-version document access returns HTTP `401`;
+  - authenticated `30336958:v1` Markdown returns the expected title, version,
+    four-page metadata, and canonical content;
+  - the authenticated source endpoint returns a valid `%PDF-` body with
+    `application/pdf`, private immutable caching, an inline safe filename, ETag,
+    and `nosniff` headers.
+- Live role verification passed:
+  - backend identity → `AcrPull` on `agmem5df652acr`;
+  - frontend identity → `AcrPull` on `agmem5df652acr`;
+  - backend identity → `Storage Blob Data Reader` on the private
+    `directive-artifacts` container.
+- A full refreshed post-deployment Terraform plan reports no changes. Saved
+  proof:
+  `/Users/mimarusa/.copilot/session-state/cb9fd353-0eaf-48c5-b9a8-aa60bef10375/files/directive-viewer-postdeploy.tfplan`.
+- Rollback remains available to backend revision
+  `ca-agmem-backend--0000052` and frontend revision
+  `ca-agmem-frontend--0000021`.
+- Verified production endpoint:
+  `https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io`.
 
 ## GitHub Actions CI/CD design proposal - 2026-07-24
 

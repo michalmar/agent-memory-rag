@@ -1,8 +1,6 @@
-import DOMPurify from 'dompurify';
 import { html, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
-import { marked } from 'marked';
 
 import '../a2ui/surface-renderer.js';
 import { agentIcon, agentLabel } from '../agent-presentation.js';
@@ -20,6 +18,11 @@ import type {
   CitationSource,
   TokenUsage,
 } from '../client.js';
+import {
+  toDirectiveDocumentReference,
+  type DirectiveDocumentReference,
+} from '../directive-documents.js';
+import { renderSafeMarkdown } from '../markdown.js';
 import { LightDomElement } from './light-dom-element.js';
 
 const NUMBER_FORMATTER = new Intl.NumberFormat();
@@ -27,6 +30,10 @@ const NUMBER_FORMATTER = new Intl.NumberFormat();
 export interface ChatTranscriptActions {
   copy: (turn: ChatTurn) => void;
   setFeedback: (turn: ChatTurn, feedback: 'up' | 'down') => void;
+  openDocument: (
+    reference: DirectiveDocumentReference,
+    trigger?: HTMLElement,
+  ) => void;
 }
 
 @customElement('chat-transcript')
@@ -242,9 +249,23 @@ export class ChatTranscript extends LightDomElement {
       details,
       'article',
     );
+    const directiveReference = toDirectiveDocumentReference(citation);
     return html`
       <li class="message-document-item">
-        ${url
+        ${directiveReference
+          ? html`<button
+              class="message-document"
+              type="button"
+              aria-haspopup="dialog"
+              title=${title}
+              aria-label=${`Open document ${index + 1}: ${name}`}
+              @click=${(event: Event) =>
+                this.actions.openDocument(
+                  directiveReference,
+                  event.currentTarget as HTMLElement,
+                )}
+            >${content}</button>`
+          : url
           ? html`<a
               class="message-document"
               href=${url}
@@ -498,8 +519,7 @@ export class ChatTranscript extends LightDomElement {
 
   private renderMarkdown(text: string, turn: ChatTurn) {
     const linked = this.linkCitationMarkers(text, turn);
-    const raw = marked.parse(linked, { async: false }) as string;
-    return unsafeHTML(DOMPurify.sanitize(raw));
+    return unsafeHTML(renderSafeMarkdown(linked));
   }
 
   private onMessageBodyClick = (event: MouseEvent): void => {

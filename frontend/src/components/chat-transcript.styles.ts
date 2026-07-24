@@ -373,6 +373,14 @@ export const chatTranscriptStyles = css`
     text-decoration: none;
   }
 
+  button.message-document {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+    text-align: left;
+  }
+
   .message-source-text {
     display: flex;
     min-width: 0;
@@ -392,6 +400,7 @@ export const chatTranscriptStyles = css`
   }
 
   a.message-document .message-source-name,
+  button.message-document .message-source-name,
   a.message-source .message-source-name {
     text-decoration: underline;
     text-decoration-color: var(--border-strong);
@@ -399,11 +408,13 @@ export const chatTranscriptStyles = css`
   }
 
   a.message-document:hover,
+  button.message-document:hover,
   a.message-source:hover {
     color: var(--accent);
   }
 
   a.message-document:hover .message-source-name,
+  button.message-document:hover .message-source-name,
   a.message-source:hover .message-source-name {
     text-decoration-color: currentColor;
   }

@@ -17,7 +17,8 @@ export const baseStyles = css`
   memory-rail,
   chat-transcript,
   chat-composer,
-  profile-drawer {
+  profile-drawer,
+  directive-document-viewer {
     display: contents;
   }
 

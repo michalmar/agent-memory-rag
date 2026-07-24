@@ -23,6 +23,7 @@ from .conversation_memory import ConversationMemoryStore
 from .conversation_registry import ConversationRegistry
 from .directive_artifacts import DirectiveArtifactRepository
 from .directive_catalog import DirectiveCatalogRepository
+from .directive_documents import DirectiveDocumentService
 from .directive_mandates import DirectiveMandateRepository
 from .directive_search import DirectiveSearchRepository
 from .directive_tools import DirectiveToolExecutor
@@ -69,6 +70,7 @@ class BackendServices:
     tool_executor: ToolExecutor
     directive_catalog: DirectiveCatalogRepository
     directive_artifacts: DirectiveArtifactRepository
+    directive_documents: DirectiveDocumentService
     directive_search: DirectiveSearchRepository
     directive_mandates: DirectiveMandateRepository
     directive_tool_executor: DirectiveToolExecutor
@@ -114,6 +116,10 @@ class BackendServices:
             tool_executor=tool_executor,
             directive_catalog=directive_catalog,
             directive_artifacts=directive_artifacts,
+            directive_documents=DirectiveDocumentService(
+                directive_catalog,
+                directive_artifacts,
+            ),
             directive_search=directive_search,
             directive_mandates=directive_mandates,
             directive_tool_executor=directive_tool_executor,

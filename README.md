@@ -36,6 +36,7 @@ flowchart LR
     D -->|Agent Identity / directive gateway| F
     F -->|Authenticated MCP and restricted API proxy| B
     B --> C[(Private Cosmos DB: history, profile, semantic memory)]
+    B --> R[(Private directive catalog and artifacts)]
     B --> M[Active Foundry Models]
     P --> O[Project Application Insights]
     H --> O
@@ -58,7 +59,8 @@ channel tools.
 - **Backend** (`backend/`) - FastAPI application with AG-UI SSE chat, owner-scoped
   conversation/profile/memory APIs, remote Foundry adapters, an app-role-protected
   stateless MCP endpoint, a session-bound Hosted tool gateway, privacy-safe
-  telemetry, and bounded liveness/readiness endpoints.
+  telemetry, protected exact-version directive document/PDF endpoints, and
+  bounded liveness/readiness endpoints.
 - **Agent contracts** (`agent_contracts/`) - separate versioned prompts, strict
   application-tool schemas, runtime state, citation/result envelopes, and
   normalized agent events.
@@ -78,13 +80,41 @@ channel tools.
   `store=true` continuation without replaying prior outer history after
   bootstrap.
 - **Frontend** (`frontend/`) - Vite + Lit SPA with a login-first Entra gate,
-  immutable agent selection, Markdown/citation streaming, and a constrained A2UI
-  subset for internal tool cards.
+  immutable agent selection, Markdown/citation streaming, an accessible
+  Markdown-first directive document viewer with authenticated original-PDF
+  loading, and a constrained A2UI subset for internal tool cards.
 - **Infrastructure** (`infra/`) - Terraform for Foundry Basic Setup, Container Apps,
   Search, Cosmos DB, ACR, private endpoints, monitoring, managed
   identities, and least-privilege RBAC.
 - **Direct Foundry release** (`scripts/release_foundry_assets.sh`) - configures
   Search/Foundry IQ and publishes the Prompt Agent without setup containers.
+
+### Directive source documents
+
+Directive entries in an answer's **Documents** section open the exact published
+version in a responsive side drawer. The default **Document** tab renders the
+canonical Markdown with a shared `marked` + DOMPurify policy. Relative references
+to another directive PDF are converted into authenticated viewer actions instead
+of direct storage links.
+
+The **Original PDF** tab is loaded only on demand. The SPA fetches the PDF through
+the delegated-token API, creates a short-lived browser Blob URL, and supports the
+native viewer, open-in-new-tab, and download flows. Citation page metadata adds a
+`#page=` fragment when available. Closing or replacing the document aborts stale
+requests, revokes Blob URLs, and restores focus to the triggering document entry.
+
+The backend resolves only an exact published catalog version and exposes:
+
+- `GET /directives/{directive_id}/versions/{directive_version_id}/document` for
+  canonical Markdown and safe document metadata;
+- `GET /directives/{directive_id}/versions/{directive_version_id}/source` for the
+  streamed original PDF.
+
+Both routes require the same Entra delegated authentication as other browser
+APIs. Blob names and storage URLs remain private, public Blob access stays
+disabled, and the browser receives neither a SAS token nor direct Blob
+coordinates. Document entries restored from conversation history retain the same
+viewer behavior.
 
 ## Five memory layers
 
@@ -111,6 +141,7 @@ session coordination is not part of this implementation.
 | Azure AI Search / Foundry IQ | Public only | Entra/RBAC only; local auth disabled |
 | Azure Container Registry | Public plus private endpoint | Entra/RBAC only; admin and anonymous pull disabled |
 | Cosmos DB | Private endpoint only | Application UAMI; local auth disabled |
+| Directive artifact Storage | Private endpoint only | Backend UAMI reads published Markdown/PDF artifacts; shared keys and public Blob access disabled |
 | Application Insights / Log Analytics | Public Foundry platform path plus private AMPLS path for ACA | Foundry project connection; backend UAMI |
 
 The public Foundry, Search, and ACR endpoints are required by non-VNet-injected

@@ -2,6 +2,7 @@ import { html, nothing, type PropertyValues } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 import type { ProfileDoc } from '../client.js';
+import { trapFocusWithin } from './focus-trap.js';
 import { LightDomElement } from './light-dom-element.js';
 
 export interface ProfileDrawerActions {
@@ -58,25 +59,7 @@ export class ProfileDrawer extends LightDomElement {
     ) return;
     const drawer = this.querySelector<HTMLElement>('.profile-drawer');
     if (!drawer) return;
-    const focusable = Array.from(
-      drawer.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])',
-      ),
-    );
-    const first = focusable[0];
-    const last = focusable.at(-1);
-    if (!first || !last) return;
-
-    const root = this.getRootNode();
-    const active =
-      root instanceof ShadowRoot ? root.activeElement : document.activeElement;
-    if (event.shiftKey && (active === first || !drawer.contains(active))) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && active === last) {
-      event.preventDefault();
-      first.focus();
-    }
+    trapFocusWithin(event, drawer);
   };
 
   render() {

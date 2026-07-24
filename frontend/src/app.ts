@@ -17,9 +17,18 @@ import {
   type AgentOption,
   type AgentType,
   type ConversationSummary,
+  type DirectiveDocument,
   type MemoryRow,
   type ProfileDoc,
 } from './client.js';
+import {
+  isAbortError,
+  LatestRequest,
+  pdfUrlForPage,
+  type DirectiveDocumentLoadStatus,
+  type DirectiveDocumentReference,
+  type DirectiveDocumentTab,
+} from './directive-documents.js';
 import {
   AUTH_REQUIRED_EVENT,
   type AuthSession,
@@ -34,6 +43,7 @@ import { appStyles } from './app.styles.js';
 import './components/chat-composer.js';
 import './components/chat-transcript.js';
 import './components/conversation-sidebar.js';
+import './components/directive-document-viewer.js';
 import './components/memory-rail.js';
 import './components/profile-drawer.js';
 import { uiLogger } from './ui-logger.js';
@@ -75,6 +85,16 @@ export class NativeApp extends LitElement {
   @state() private profileOpen = false;
   @state() private profile: ProfileDoc | null = null;
   @state() private profileDraft = '';
+  @state() private directiveDocumentReference:
+    DirectiveDocumentReference | null = null;
+  @state() private directiveDocument: DirectiveDocument | null = null;
+  @state() private directiveDocumentStatus:
+    DirectiveDocumentLoadStatus = 'idle';
+  @state() private directiveDocumentError = '';
+  @state() private directiveDocumentTab: DirectiveDocumentTab = 'document';
+  @state() private directivePdfStatus: DirectiveDocumentLoadStatus = 'idle';
+  @state() private directivePdfError = '';
+  @state() private directivePdfUrl: string | null = null;
   @state() private toast: string | null = null;
 
   private client = new AGUIClient();
@@ -82,6 +102,13 @@ export class NativeApp extends LitElement {
   private surfaceSeq = 0;
   private toastTimer?: number;
   private profileTrigger?: HTMLElement;
+  private directiveDocumentTrigger?: HTMLElement;
+  private directiveDocumentAbort?: AbortController;
+  private directivePdfAbort?: AbortController;
+  private directivePdfObjectUrl?: string;
+  private directiveDocumentRequests = new LatestRequest();
+  private directivePdfRequests = new LatestRequest();
+  private profileLoadGeneration = 0;
   private authGeneration = 0;
   private identityGeneration = 0;
   private chatGeneration = 0;
@@ -124,6 +151,10 @@ export class NativeApp extends LitElement {
     copy: (turn: ChatTurn) => void this.copyTurn(turn),
     setFeedback: (turn: ChatTurn, feedback: 'up' | 'down') =>
       this.setFeedback(turn, feedback),
+    openDocument: (
+      reference: DirectiveDocumentReference,
+      trigger?: HTMLElement,
+    ) => this.openDirectiveDocument(reference, trigger),
   };
   private profileActions = {
     close: () => this.closeProfile(),
@@ -131,6 +162,17 @@ export class NativeApp extends LitElement {
     save: () => void this.saveProfile(),
     generate: () => void this.generateProfile(),
     clear: () => void this.clearProfile(),
+  };
+  private directiveDocumentActions = {
+    close: () => this.closeDirectiveDocument(),
+    selectTab: (tab: DirectiveDocumentTab) =>
+      this.selectDirectiveDocumentTab(tab),
+    openLinkedDocument: (
+      reference: DirectiveDocumentReference,
+      trigger?: HTMLElement,
+    ) => this.openDirectiveDocument(reference, trigger),
+    retryDocument: () => void this.loadDirectiveDocument(),
+    retryPdf: () => void this.loadDirectivePdf(),
   };
   private onThreadRailBreakpointChange = (event: MediaQueryListEvent): void => {
     this.sidebarOpen = event.matches;
@@ -172,6 +214,7 @@ export class NativeApp extends LitElement {
     window.removeEventListener(AUTH_REQUIRED_EVENT, this.onAuthRequired);
     ++this.authGeneration;
     this.chatAbort?.abort();
+    this.closeDirectiveDocument(false);
     if (this.toastTimer) clearTimeout(this.toastTimer);
   }
 
@@ -367,6 +410,8 @@ export class NativeApp extends LitElement {
   }
 
   private clearUserScopedState(): void {
+    ++this.profileLoadGeneration;
+    this.closeDirectiveDocument(false);
     this.conversationId = null;
     this.turns = [];
     this.conversations = [];
@@ -457,6 +502,10 @@ export class NativeApp extends LitElement {
 
   private onAppKeydown(e: KeyboardEvent): void {
     if (e.key !== 'Escape') return;
+    if (this.directiveDocumentReference) {
+      this.closeDirectiveDocument();
+      return;
+    }
     if (this.profileOpen) {
       this.closeProfile();
       return;
@@ -468,6 +517,164 @@ export class NativeApp extends LitElement {
     if (this.sidebarOpen && !THREAD_RAIL_DESKTOP.matches) {
       this.sidebarOpen = false;
     }
+  }
+
+  // ----------------------------------------------------- directive documents
+  private openDirectiveDocument(
+    reference: DirectiveDocumentReference,
+    trigger?: HTMLElement,
+  ): void {
+    if (
+      this.directiveDocumentReference?.directiveId === reference.directiveId
+      && this.directiveDocumentReference.directiveVersionId
+        === reference.directiveVersionId
+    ) {
+      this.selectDirectiveDocumentTab('pdf');
+      requestAnimationFrame(() => {
+        this.renderRoot
+          .querySelector<HTMLElement>('#directive-pdf-tab')
+          ?.focus();
+      });
+      return;
+    }
+    const returnTrigger = this.directiveDocumentTrigger ?? trigger;
+    ++this.profileLoadGeneration;
+    this.closeDirectiveDocument(false);
+    const activeElement = this.shadowRoot?.activeElement;
+    this.directiveDocumentTrigger =
+      returnTrigger
+      ?? (activeElement instanceof HTMLElement ? activeElement : undefined);
+    this.directiveDocumentReference = reference;
+    this.directiveDocument = null;
+    this.directiveDocumentStatus = 'loading';
+    this.directiveDocumentError = '';
+    this.directiveDocumentTab = 'document';
+    this.directivePdfStatus = 'idle';
+    this.directivePdfError = '';
+    this.profileOpen = false;
+    void this.loadDirectiveDocument();
+  }
+
+  private async loadDirectiveDocument(): Promise<void> {
+    const reference = this.directiveDocumentReference;
+    if (!reference) return;
+
+    const request = this.directiveDocumentRequests.begin();
+    this.directiveDocumentAbort?.abort();
+    const controller = new AbortController();
+    this.directiveDocumentAbort = controller;
+    this.directiveDocumentStatus = 'loading';
+    this.directiveDocumentError = '';
+    try {
+      const document = await this.client.getDirectiveDocument(
+        reference.directiveId,
+        reference.directiveVersionId,
+        controller.signal,
+      );
+      if (!this.directiveDocumentRequests.isCurrent(request)) return;
+      this.directiveDocument = document;
+      this.directiveDocumentStatus = 'ready';
+    } catch (error) {
+      if (
+        !this.directiveDocumentRequests.isCurrent(request)
+        || isAbortError(error)
+      ) return;
+      uiLogger.error('directive document load failed', error);
+      this.directiveDocumentStatus = 'error';
+      this.directiveDocumentError =
+        'The published directive document is temporarily unavailable.';
+    } finally {
+      if (this.directiveDocumentRequests.isCurrent(request)) {
+        this.directiveDocumentAbort = undefined;
+      }
+    }
+  }
+
+  private selectDirectiveDocumentTab(tab: DirectiveDocumentTab): void {
+    this.directiveDocumentTab = tab;
+    if (tab === 'pdf' && this.directivePdfStatus === 'idle') {
+      void this.loadDirectivePdf();
+    }
+  }
+
+  private async loadDirectivePdf(): Promise<void> {
+    const reference = this.directiveDocumentReference;
+    if (!reference) return;
+
+    const request = this.directivePdfRequests.begin();
+    this.directivePdfAbort?.abort();
+    const controller = new AbortController();
+    this.directivePdfAbort = controller;
+    this.revokeDirectivePdfUrl();
+    this.directivePdfStatus = 'loading';
+    this.directivePdfError = '';
+    try {
+      const pdf = await this.client.getDirectiveSourcePdf(
+        reference.directiveId,
+        reference.directiveVersionId,
+        controller.signal,
+      );
+      if (!this.directivePdfRequests.isCurrent(request)) return;
+      const objectUrl = URL.createObjectURL(pdf);
+      this.directivePdfObjectUrl = objectUrl;
+      this.directivePdfUrl = pdfUrlForPage(objectUrl, reference.pageFrom);
+      this.directivePdfStatus = 'ready';
+    } catch (error) {
+      if (
+        !this.directivePdfRequests.isCurrent(request)
+        || isAbortError(error)
+      ) return;
+      uiLogger.error('directive PDF load failed', error);
+      this.directivePdfStatus = 'error';
+      this.directivePdfError =
+        'The original PDF is temporarily unavailable.';
+    } finally {
+      if (this.directivePdfRequests.isCurrent(request)) {
+        this.directivePdfAbort = undefined;
+      }
+    }
+  }
+
+  private closeDirectiveDocument(restoreFocus = true): void {
+    const trigger = this.directiveDocumentTrigger;
+    this.directiveDocumentRequests.invalidate();
+    this.directivePdfRequests.invalidate();
+    this.abortDirectiveDocumentRequests();
+    this.revokeDirectivePdfUrl();
+    this.directiveDocumentReference = null;
+    this.directiveDocument = null;
+    this.directiveDocumentStatus = 'idle';
+    this.directiveDocumentError = '';
+    this.directiveDocumentTab = 'document';
+    this.directivePdfStatus = 'idle';
+    this.directivePdfError = '';
+    this.directiveDocumentTrigger = undefined;
+
+    if (!restoreFocus) return;
+    void this.updateComplete.then(() => {
+      const fallback =
+        this.renderRoot.querySelector<HTMLElement>('.thread-toggle');
+      if (trigger?.isConnected && trigger.getClientRects().length > 0) {
+        trigger.focus();
+      } else {
+        fallback?.focus();
+      }
+    });
+  }
+
+  private abortDirectiveDocumentRequests(): void {
+    this.directiveDocumentAbort?.abort();
+    this.directivePdfAbort?.abort();
+    this.directiveDocumentAbort = undefined;
+    this.directivePdfAbort = undefined;
+  }
+
+  private revokeDirectivePdfUrl(): void {
+    if (this.directivePdfObjectUrl) {
+      URL.revokeObjectURL(this.directivePdfObjectUrl);
+      this.directivePdfObjectUrl = undefined;
+    }
+    this.directivePdfUrl = null;
   }
 
   // ---------------------------------------------------------------- history
@@ -580,19 +787,31 @@ export class NativeApp extends LitElement {
 
   // ---------------------------------------------------------------- profile
   private openProfile = async (trigger?: HTMLElement): Promise<void> => {
-    const generation = this.identityGeneration;
+    if (this.directiveDocumentReference) return;
+    const identityGeneration = this.identityGeneration;
+    const loadGeneration = ++this.profileLoadGeneration;
     const activeElement = this.shadowRoot?.activeElement;
     this.profileTrigger =
       trigger ?? (activeElement instanceof HTMLElement ? activeElement : undefined);
     try {
       const profile = await this.client.getProfile();
-      if (generation !== this.identityGeneration) return;
+      if (
+        identityGeneration !== this.identityGeneration
+        || loadGeneration !== this.profileLoadGeneration
+        || this.directiveDocumentReference
+      ) return;
       this.profile = profile;
       this.profileDraft = JSON.stringify(this.profileToSections(profile), null, 2);
       this.profileOpen = true;
       if (!THREAD_RAIL_DESKTOP.matches) this.sidebarOpen = false;
     } catch {
-      if (generation === this.identityGeneration) this.showToast('Could not load profile');
+      if (
+        identityGeneration === this.identityGeneration
+        && loadGeneration === this.profileLoadGeneration
+        && !this.directiveDocumentReference
+      ) {
+        this.showToast('Could not load profile');
+      }
     }
   };
 
@@ -964,6 +1183,18 @@ export class NativeApp extends LitElement {
           .draft=${this.profileDraft}
           .actions=${this.profileActions}
         ></profile-drawer>
+        <directive-document-viewer
+          .open=${this.directiveDocumentReference !== null}
+          .reference=${this.directiveDocumentReference}
+          .document=${this.directiveDocument}
+          .documentStatus=${this.directiveDocumentStatus}
+          .documentError=${this.directiveDocumentError}
+          .activeTab=${this.directiveDocumentTab}
+          .pdfStatus=${this.directivePdfStatus}
+          .pdfError=${this.directivePdfError}
+          .pdfUrl=${this.directivePdfUrl}
+          .actions=${this.directiveDocumentActions}
+        ></directive-document-viewer>
         ${this.toast
           ? html`<div class="toast" role="status" aria-live="polite">${this.toast}</div>`
           : nothing}

@@ -169,10 +169,27 @@ export const responsiveStyles = css`
       width: 100%;
     }
 
-    .profile-drawer {
+    .profile-drawer,
+    .document-viewer {
       width: 100%;
       max-width: none;
       border-left: 0;
+    }
+
+    .document-viewer-header {
+      padding-left: 14px;
+    }
+
+    .document-viewer-tabs {
+      padding: 0 14px;
+    }
+
+    .document-markdown {
+      padding: 22px 16px 40px;
+    }
+
+    .document-pdf {
+      padding: 10px;
     }
 
     .drawer-body {

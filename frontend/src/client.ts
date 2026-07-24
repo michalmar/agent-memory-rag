@@ -1,5 +1,9 @@
 // client.ts — REST + AG-UI SSE client (§B3/B4 contract).
 import { getAuthHeaders, getConfig } from './auth.js';
+import {
+  directiveDocumentPath,
+  directiveSourcePath,
+} from './directive-documents.js';
 import { uiLogger } from './ui-logger.js';
 
 export interface AGUIEvent {
@@ -146,6 +150,17 @@ export interface ProfileDoc {
   updated_at?: string;
 }
 
+export interface DirectiveDocument {
+  directive_id: string;
+  directive_version_id: string;
+  title: string;
+  version_label: string;
+  effective_from: string;
+  source_filename: string;
+  total_pages: number;
+  markdown: string;
+}
+
 export class AGUIClient {
   private base = getConfig().apiBaseUrl;
 
@@ -154,7 +169,10 @@ export class AGUIClient {
   }
 
   // ------------------------------------------------------------------ REST helpers
-  private async req<T>(path: string, init: RequestInit = {}): Promise<T> {
+  private async response(
+    path: string,
+    init: RequestInit = {},
+  ): Promise<Response> {
     const headers = {
       ...(await getAuthHeaders()),
       ...(init.body ? { 'Content-Type': 'application/json' } : {}),
@@ -162,9 +180,26 @@ export class AGUIClient {
     };
     const res = await fetch(`${this.base}${path}`, { ...init, headers });
     if (!res.ok) throw new Error(`${path} ${res.status}`);
+    return res;
+  }
+
+  private async req<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const res = await this.response(path, init);
     if (res.status === 204) return undefined as T;
     const text = await res.text();
     return (text ? JSON.parse(text) : undefined) as T;
+  }
+
+  private async reqBlob(
+    path: string,
+    init: RequestInit = {},
+  ): Promise<Blob> {
+    const res = await this.response(path, init);
+    const mediaType = res.headers.get('Content-Type')?.split(';', 1)[0];
+    if (mediaType !== 'application/pdf') {
+      throw new Error(`${path} returned ${mediaType ?? 'no content type'}`);
+    }
+    return res.blob();
   }
 
   // Conversation history (Cosmos)
@@ -223,6 +258,29 @@ export class AGUIClient {
   }
   deleteProfile(): Promise<unknown> {
     return this.req('/profile', { method: 'DELETE' });
+  }
+
+  // Published directive documents
+  getDirectiveDocument(
+    directiveId: string,
+    directiveVersionId: string,
+    signal?: AbortSignal,
+  ): Promise<DirectiveDocument> {
+    return this.req(
+      directiveDocumentPath(directiveId, directiveVersionId),
+      { headers: { Accept: 'application/json' }, signal },
+    );
+  }
+
+  getDirectiveSourcePdf(
+    directiveId: string,
+    directiveVersionId: string,
+    signal?: AbortSignal,
+  ): Promise<Blob> {
+    return this.reqBlob(
+      directiveSourcePath(directiveId, directiveVersionId),
+      { headers: { Accept: 'application/pdf' }, signal },
+    );
   }
 
   /** POST /chat and stream AG-UI events to the handler. */

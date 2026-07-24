@@ -3,6 +3,7 @@ import { navigationStyles } from './styles/navigation.styles.js';
 import { chatTranscriptStyles } from './components/chat-transcript.styles.js';
 import { chatComposerStyles } from './components/chat-composer.styles.js';
 import { memoryProfileStyles } from './components/memory-profile.styles.js';
+import { directiveDocumentViewerStyles } from './components/directive-document-viewer.styles.js';
 import { responsiveStyles } from './styles/responsive.styles.js';
 
 export const appStyles = [
@@ -11,5 +12,6 @@ export const appStyles = [
   chatTranscriptStyles,
   chatComposerStyles,
   memoryProfileStyles,
+  directiveDocumentViewerStyles,
   responsiveStyles,
 ];

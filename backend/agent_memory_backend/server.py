@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
+from typing import Annotated
+from urllib.parse import quote
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Path, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 load_dotenv()
@@ -39,6 +41,8 @@ from .conversation_memory import (
     MemoryStoreUnavailable,
     public_memory,
 )
+from .directive_documents import DirectiveDocumentResponse
+from .directive_errors import DirectiveDataUnavailable
 from .telemetry import configure_telemetry
 from .user_profile_memory import public_profile
 
@@ -126,6 +130,74 @@ class ChatRequest(BaseModel):
 @app.get("/me")
 async def me(user: User = Depends(get_current_user)):
     return user.to_dict()
+
+
+DirectiveId = Annotated[str, Path(pattern=r"^\d{8}$")]
+DirectiveVersionId = Annotated[
+    str,
+    Path(pattern=r"^\d{8}:v\d+(?:\.\d+)?$"),
+]
+
+
+@app.get(
+    "/directives/{directive_id}/versions/{directive_version_id}/document",
+    response_model=DirectiveDocumentResponse,
+)
+async def get_directive_document(
+    directive_id: DirectiveId,
+    directive_version_id: DirectiveVersionId,
+    _user: User = Depends(get_current_user),
+):
+    try:
+        document = await services.directive_documents.get_document(
+            directive_id,
+            directive_version_id,
+        )
+    except DirectiveDataUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Directive document is temporarily unavailable",
+        ) from exc
+    if document is None:
+        raise HTTPException(status_code=404, detail="Directive version not found")
+    return document
+
+
+@app.get(
+    "/directives/{directive_id}/versions/{directive_version_id}/source",
+)
+async def get_directive_source(
+    directive_id: DirectiveId,
+    directive_version_id: DirectiveVersionId,
+    _user: User = Depends(get_current_user),
+):
+    try:
+        source = await services.directive_documents.get_source(
+            directive_id,
+            directive_version_id,
+        )
+    except DirectiveDataUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Directive document is temporarily unavailable",
+        ) from exc
+    if source is None:
+        raise HTTPException(status_code=404, detail="Directive version not found")
+
+    encoded_filename = quote(source.source_filename, safe="")
+    return StreamingResponse(
+        source.chunks,
+        media_type="application/pdf",
+        headers={
+            "Cache-Control": "private, max-age=3600, immutable",
+            "Content-Disposition": (
+                f'inline; filename="{directive_id}.pdf"; '
+                f"filename*=UTF-8''{encoded_filename}"
+            ),
+            "ETag": f'"{source.source_hash}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.get("/prompts/customer-support")

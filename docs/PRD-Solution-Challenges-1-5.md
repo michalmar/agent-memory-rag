@@ -34,6 +34,7 @@ for a new conversation and immutable afterward.
 | Prompt Agent capability | Foundry IQ `knowledge_base_retrieve` only | Keeps the native agent knowledge-only and prevents application-tool access |
 | Hosted MAF capability | Support uses Foundry IQ, stateless order MCP, and session-bound profile/memory tools; directive uses eight strict backend directive tools | Uses Foundry-managed Agent Identity for app-only calls while keeping personal and directive data policy in FastAPI |
 | Retrieval | Support knowledge uses Foundry IQ; directive knowledge uses strict backend gateway tools over the directive data plane | Removes classic RAG, no-retrieval modes, and runtime retrieval switching while preserving purpose-built directive policy |
+| Directive source documents | A document citation opens the exact published version as sanitized canonical Markdown, with the original PDF fetched lazily through the authenticated backend | Makes primary evidence inspectable without exposing private Blob coordinates, enabling public storage, or losing cited-version fidelity |
 | Agent selection | Explicit for new chats and immutable per conversation | Prevents silent behavior changes and state corruption |
 | Failover | No automatic cross-agent failover | A conversation remains bound to its original runtime and state |
 | Trust boundary | FastAPI owns authentication, authorization, persistence, tool policy, and public DTOs | Models and Hosted runtime identities never become application-data authorities |
@@ -57,7 +58,8 @@ for a new conversation and immutable afterward.
 - Challenge 05: grounded retrieval through Foundry IQ.
 - User-selectable native Prompt, support Hosted MAF, and directive Hosted MAF
   agents.
-- AG-UI streaming, Markdown/citation rendering, and constrained A2UI tool cards.
+- AG-UI streaming, Markdown/citation rendering, exact-version directive document
+  viewing, authenticated original-PDF access, and constrained A2UI tool cards.
 - Entra user authentication and application-only Hosted Agent authorization.
 - Terraform-managed Azure infrastructure and RBAC.
 - Privacy-safe telemetry, readiness, release, and rollback controls.
@@ -109,6 +111,11 @@ application tools.
 
 The frontend is public. The backend uses internal Container Apps ingress and is
 reachable from the frontend environment, not directly from the internet.
+
+The directive document viewer follows the same delegated-token path. FastAPI
+resolves the exact published catalog version, reads only manifest-owned Markdown
+or PDF artifacts with the application UAMI, and returns content without exposing
+Blob names, storage URLs, or SAS tokens.
 
 ## 5. Agent architecture
 
@@ -220,6 +227,10 @@ timeouts remain explicitly agent-specific.
 - The connection uses `ProjectManagedIdentity` and the Search audience.
 - Grounded claims include citations returned by Foundry IQ or the strict
   directive tools.
+- Each directive entry in the response's Documents section retains its
+  directive/version identity so the user can inspect the exact published source.
+  Canonical Markdown is the default view; the immutable source PDF is available
+  through a separate authenticated, lazy-loaded view.
 - Missing or failed retrieval is surfaced; the system never silently falls back to
   another retrieval path.
 - The Prompt Agent's lack of application tools is a capability boundary, not a
@@ -296,7 +307,7 @@ create/delete operations to those actions.
 | Azure AI Search / Foundry IQ | Public endpoint only | Entra/RBAC only; local auth disabled | Serves support Foundry IQ and the directive index without private DNS that the non-injected Hosted runtime cannot resolve |
 | Azure Container Registry | Public endpoint plus private endpoint | Entra/RBAC only; admin and anonymous pull disabled | Hosted runtime pulls publicly; ACA resolves and pulls privately |
 | Cosmos DB | Private endpoint only | Application UAMI; local auth disabled | Protects history, profile, semantic-memory, directive catalog, and mandate data |
-| Directive artifact Storage | Private endpoint only | Application UAMI; shared keys and public Blob access disabled | Protects canonical directive content and generated artifacts |
+| Directive artifact Storage | Private endpoint only | Application UAMI; shared keys and public Blob access disabled | Protects canonical Markdown, immutable source PDFs, and generated artifacts |
 | Application Insights / Log Analytics | Public platform path plus private AMPLS path for ACA | Backend uses UAMI; Foundry project uses its App Insights connection | Unifies Prompt, Hosted, backend, and platform telemetry |
 
 Foundry uses Basic Setup without outbound VNet injection. Standard Setup with BYO
@@ -386,8 +397,8 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 }
 ```
 
-`agent_type` is required and accepts only `foundry-prompt` or
-`agent-framework`. There is no retrieval-mode field.
+`agent_type` is required and accepts `foundry-prompt`, `agent-framework`, or
+`directive-rag`. There is no retrieval-mode field.
 
 ### Chat behavior
 
@@ -412,6 +423,12 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 - `/mcp/` - stateless `get_order_status` MCP server, protected by Agent Identity
   application role.
 - `/internal/agent-tools/{tool_name}` - app-only Hosted Agent gateway.
+- `/directives/{directive_id}/versions/{directive_version_id}/document` -
+  delegated-user endpoint returning safe metadata and canonical Markdown for an
+  exact published version.
+- `/directives/{directive_id}/versions/{directive_version_id}/source` -
+  delegated-user endpoint streaming the original PDF with private immutable
+  caching, ETag, inline filename, and `nosniff` headers.
 
 ## 11. Async and lifecycle requirements
 
@@ -444,6 +461,19 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 - Ignore late async results from a previous identity.
 - Render Markdown and citations directly; use the constrained A2UI subset only for
   normalized internal tool cards.
+- Render directive entries in the Documents section as dialog-opening buttons
+  keyed by exact directive/version identity; preserve ordinary links for
+  non-directive sources.
+- Open a responsive, accessible side drawer with sanitized canonical Markdown as
+  the default tab and a lazy **Original PDF** tab.
+- Fetch PDF bytes through the authenticated API, create a short-lived Blob URL,
+  append a cited-page fragment when available, and support native viewing,
+  open-in-new-tab, download, retry, and unsupported-viewer fallback states.
+- Route relative directive-PDF references inside canonical Markdown back through
+  the authenticated viewer rather than allowing direct navigation.
+- Abort stale document/PDF requests, revoke Blob URLs on close or replacement,
+  trap keyboard focus, support Escape and tab-arrow navigation, and restore focus
+  to the triggering Documents entry.
 
 ## 13. Observability and readiness
 
@@ -560,6 +590,11 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
   and directive responses retain their source-specific citations on application
   and Foundry surfaces. Microsoft 365 Copilot and Teams publishing currently
   suppress citation and streaming rendering.
+- Every directive entry in the application Documents section opens the exact
+  published version, including for restored conversation history. Canonical
+  Markdown is sanitized and readable, and the original PDF can be viewed,
+  opened, or downloaded without public Blob access, SAS exposure, or leaked Blob
+  coordinates.
 - Backend Foundry invocation uses managed identity against the public Entra-only
   endpoint.
 - Hosted application-tool traffic crosses only the documented public frontend
