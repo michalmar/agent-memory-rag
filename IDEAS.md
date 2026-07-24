@@ -18,18 +18,6 @@ Store uploaded directive PDFs in a dedicated `directive-source` container in the
 
 <sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** No</sub>
 
-## Improve citation readability with documents and collapsible sources
-
-Add a `Documents` section above `Sources` that lists the parent documents used for an answer. Keep the current chunk-level sources for detailed evidence, but show them in a collapsible panel that is collapsed by default to avoid overwhelming users when many chunks are returned.
-
-<sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** No</sub>
-
-## Fix source list row layout
-
-Fix the source-display layout so every source is rendered as one complete item in one row. Keep the document title, version, page or section details, and status badge together; do not split, wrap, or misalign source items across columns or rows.
-
-<sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** No</sub>
-
 ## Explain directive agents and document ingestion in plain English
 
 Document in detail, using plain English, how directive agents work with documents: how documents are added, ingested, chunked or indexed, retrieved, and used to produce answers.
@@ -121,3 +109,15 @@ Redesign the UI with inspiration from Linear and Stripe.com.
 When an unauthenticated user accesses the frontend URL, show a login screen before allowing access to the application. Entra ID is the only authentication provider.
 
 <sub>**Date:** 2026-07-11 · **Author:** Unknown · **Implemented:** Yes · **Implemented date:** 2026-07-12</sub>
+
+## Improve citation readability with documents and collapsible sources
+
+Add a `Documents` section above `Sources` that lists the parent documents used for an answer. Keep the current chunk-level sources for detailed evidence, but show them in a collapsible panel that is collapsed by default to avoid overwhelming users when many chunks are returned.
+
+<sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** Yes · **Implemented date:** 2026-07-24</sub>
+
+## Fix source list row layout
+
+Fix the source-display layout so every source is rendered as one complete item in one row. Keep the document title, version, page or section details, and status badge together; do not split, wrap, or misalign source items across columns or rows.
+
+<sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** Yes · **Implemented date:** 2026-07-24</sub>
