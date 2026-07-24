@@ -286,12 +286,12 @@ export const chatTranscriptStyles = css`
     display: grid;
     min-width: 0;
     align-items: start;
-    grid-template-columns: max-content minmax(0, 1fr);
-    gap: 6px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
   }
 
   .message-citations-label {
-    padding-top: 3px;
+    padding-top: 0;
   }
 
   .message-document-list,

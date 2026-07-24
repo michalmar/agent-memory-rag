@@ -1,6 +1,6 @@
 # Azure Deployment Plan - Hosted Agent Identity and Telemetry Remediation
 
-> **Status:** Deployed and verified - MAF Hosted Agent consolidation active
+> **Status:** Deployed and verified - Citation UX document alignment follow-up
 
 Generated: 2026-07-15
 
@@ -1882,6 +1882,77 @@ Verified on 2026-07-24:
   identities, networking, and Terraform-managed infrastructure were unchanged.
 - The unrelated full-plan backend environment drift remains intentionally
   unapplied.
+
+Production URL:
+
+`https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io`
+
+### 23.5 Document list alignment follow-up
+
+> **Status:** Deployed and verified
+
+Validated on 2026-07-24:
+
+- [x] The user reconfirmed subscription
+  `ME-MngEnvMCAP372348-mimarusa-1`
+  (`7bc68c68-f434-49ad-ab3e-b883ec39da86`) and the existing `eastus2`
+  deployment.
+- [x] Release scope is one frontend CSS layout correction: render the document
+  list below the `Documents` label and align it with the `Sources` control.
+- [x] The unrelated
+  `agents/directive-rag-maf/tests/test_dependencies.py` working-tree change is
+  outside the frontend ACR build context and excluded from this deployment.
+- [x] Frontend unit suite passes with 14 tests.
+- [x] TypeScript compilation and the Vite production build pass.
+- [x] `git diff --check -- frontend` passes.
+- [x] Terraform `1.13.3` and Azure CLI `2.80.0` are installed.
+- [x] `terraform init -input=false`, recursive format check, and
+  `terraform validate` pass.
+- [x] Terraform state is accessible with 94 tracked resources.
+- [x] No unresolved `{{ .Env.* }}` expressions exist in Terraform inputs.
+- [x] The full live-refresh Terraform plan reports no changes.
+- [x] Six inherited Microsoft Defender policy assignments remain compatible
+  with an in-place frontend image update.
+- [x] Static and live RBAC verification confirm the frontend identity retains
+  resource-scoped `AcrPull` on `agmem5df652acr`.
+- [x] ACR and its managed-identity registry link are healthy; admin access and
+  anonymous pull remain disabled.
+- [x] Resource group `rg-agent-memory-rag`, Container Apps environment
+  `cae-agmem-5df652`, and `ca-agmem-frontend` are provisioned successfully.
+- [x] Production root, `/config.js`, `/api/health/live`, and
+  `/api/health/ready` return successfully; readiness reports `ready`.
+
+Deployment and rollback:
+
+- Build a frontend-only image with a unique immutable
+  `citation-ux-align-*` tag.
+- Update only `ca-agmem-frontend`; do not run `terraform apply`.
+- Verify the new revision is latest-ready and receives 100% traffic.
+- Rollback target: revision `ca-agmem-frontend--0000019`, image
+  `agmem5df652acr.azurecr.io/frontend:citation-ux-20260724085259`.
+
+Deployment result, verified on 2026-07-24:
+
+- ACR build `ch2x` published
+  `agmem5df652acr.azurecr.io/frontend:citation-ux-align-20260724112242`.
+- Immutable image digest:
+  `sha256:1b1a82b3465033eb98be52d33d164719175722cf2e986be15fd881c8f05729d9`.
+- Frontend revision `ca-agmem-frontend--0000020` is healthy, running,
+  latest-ready, and receives 100% traffic.
+- The deployed Container App references the expected release image.
+- Production root, `/config.js`, `/api/health/live`, and
+  `/api/health/ready` return HTTP `200`; readiness reports `ready`.
+- Runtime configuration remains Entra-only.
+- The served `assets/index-2c8eFV-V.js` bundle contains the corrected
+  single-column `.message-documents` layout, 4 px row gap, and zero label top
+  padding.
+- Live role verification confirms frontend identity principal
+  `2d5ffcf5-89b7-4689-816c-ccc5c62c98bf` retains resource-scoped `AcrPull`
+  on `agmem5df652acr`.
+- A post-release frontend-targeted Terraform plan reports no configuration
+  differences.
+- Backend, agents, jobs, data services, identities, networking, and
+  Terraform-managed infrastructure were not updated.
 
 Production URL:
 
