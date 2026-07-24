@@ -1,4 +1,4 @@
-import { html, nothing } from 'lit';
+import { html, nothing, type PropertyValues } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 import type { ProfileDoc } from '../client.js';
@@ -18,6 +18,66 @@ export class ProfileDrawer extends LightDomElement {
   @property({ attribute: false }) profile: ProfileDoc | null = null;
   @property() draft = '';
   @property({ attribute: false }) actions!: ProfileDrawerActions;
+
+  private keydownRoot?: Document | ShadowRoot;
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.removeFocusTrap();
+  }
+
+  protected updated(changed: PropertyValues): void {
+    if (!changed.has('open')) return;
+    if (this.open) {
+      this.installFocusTrap();
+      this.querySelector<HTMLElement>('.profile-close')?.focus();
+    } else {
+      this.removeFocusTrap();
+    }
+  }
+
+  private installFocusTrap(): void {
+    this.removeFocusTrap();
+    const root = this.getRootNode();
+    if (root instanceof Document || root instanceof ShadowRoot) {
+      this.keydownRoot = root;
+      root.addEventListener('keydown', this.onRootKeydown);
+    }
+  }
+
+  private removeFocusTrap(): void {
+    this.keydownRoot?.removeEventListener('keydown', this.onRootKeydown);
+    this.keydownRoot = undefined;
+  }
+
+  private onRootKeydown = (event: Event): void => {
+    if (
+      !this.open ||
+      !(event instanceof KeyboardEvent) ||
+      event.key !== 'Tab'
+    ) return;
+    const drawer = this.querySelector<HTMLElement>('.profile-drawer');
+    if (!drawer) return;
+    const focusable = Array.from(
+      drawer.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])',
+      ),
+    );
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (!first || !last) return;
+
+    const root = this.getRootNode();
+    const active =
+      root instanceof ShadowRoot ? root.activeElement : document.activeElement;
+    if (event.shiftKey && (active === first || !drawer.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
 
   render() {
     if (!this.open) return nothing;

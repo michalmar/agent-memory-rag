@@ -9,6 +9,10 @@ export COPILOT_HOME="${COPILOT_HOME:-$HOME/.copilot}"
 PRINCIPAL_ID=""
 API_APP_ID=""
 AZD_PROJECT_DIR=""
+AGENT_TYPE="support"
+APP_TOOLS_CONNECTION_ID="customer-support-tools-mcp"
+SET_APP_TOOLS_CONNECTION=true
+CONNECTION_OPTION_SET=false
 AGENT365_APP_ID="${AGENT365_OBSERVABILITY_APP_ID:-9b975845-388f-4429-889e-eab1ef63949c}"
 AGENT365_ROLE_ID="8f71190c-00c8-461d-a63b-f74abde9ba52"
 
@@ -17,12 +21,31 @@ while [[ $# -gt 0 ]]; do
     --principal-id) PRINCIPAL_ID="$2"; shift 2;;
     --api-app-id) API_APP_ID="$2"; shift 2;;
     --azd-project-dir) AZD_PROJECT_DIR="$2"; shift 2;;
+    --agent-type) AGENT_TYPE="$2"; shift 2;;
+    --app-tools-connection-id)
+      APP_TOOLS_CONNECTION_ID="$2"
+      SET_APP_TOOLS_CONNECTION=true
+      CONNECTION_OPTION_SET=true
+      shift 2
+      ;;
+    --no-app-tools-connection)
+      SET_APP_TOOLS_CONNECTION=false
+      CONNECTION_OPTION_SET=true
+      shift
+      ;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
 
 [[ -n "$PRINCIPAL_ID" ]] || { echo "ERROR: --principal-id is required" >&2; exit 2; }
 [[ -n "$API_APP_ID" ]] || { echo "ERROR: --api-app-id is required" >&2; exit 2; }
+[[ "$AGENT_TYPE" == "support" || "$AGENT_TYPE" == "directive" ]] || {
+  echo "ERROR: --agent-type must be support or directive" >&2
+  exit 2
+}
+if [[ "$AGENT_TYPE" == "directive" && "$CONNECTION_OPTION_SET" == "false" ]]; then
+  SET_APP_TOOLS_CONNECTION=false
+fi
 
 az ad sp show --id "$PRINCIPAL_ID" --query id -o none
 
@@ -147,9 +170,20 @@ if [[ -n "$AZD_PROJECT_DIR" ]]; then
 
   (
     cd "$AZD_PROJECT_DIR"
-    azd env set APP_TOOLS_CONNECTION_ID "customer-support-tools-mcp"
+    if [[ "$SET_APP_TOOLS_CONNECTION" == "true" ]]; then
+      azd env set APP_TOOLS_CONNECTION_ID "$APP_TOOLS_CONNECTION_ID"
+    fi
     azd env set ENTRA_TENANT_ID "$TENANT_ID"
     azd env set FOUNDRY_PROJECT_ENDPOINT "$PROJECT_ENDPOINT"
   )
-  echo "Configured MCP, tenant, and Foundry project values in ${AZD_PROJECT_DIR}."
+  if [[ "$SET_APP_TOOLS_CONNECTION" == "true" ]]; then
+    echo "Configured MCP, tenant, and Foundry project values in ${AZD_PROJECT_DIR}."
+  else
+    echo "Configured tenant and Foundry project values in ${AZD_PROJECT_DIR}."
+  fi
+  if [[ "$AGENT_TYPE" == "directive" ]]; then
+    echo "Register ${PRINCIPAL_ID} and ${PROJECT_AGENT_PRINCIPAL_ID} in directive_hosted_agent_principal_ids before enabling the directive agent."
+  else
+    echo "Register ${PRINCIPAL_ID} and ${PROJECT_AGENT_PRINCIPAL_ID} in support_hosted_agent_principal_ids (or the legacy hosted_agent_principal_ids) before enabling the support agent."
+  fi
 fi

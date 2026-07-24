@@ -22,6 +22,8 @@ from agent_contracts import (
     ToolResultEvent,
     ToolStartedEvent,
     UsageEvent,
+    WorkflowHeartbeatEvent,
+    WorkflowProgressEvent,
 )
 
 
@@ -52,15 +54,36 @@ def to_agui_events(event: NormalizedAgentEvent) -> Iterable[object]:
         return (
             CustomEvent(
                 name="agent_citations",
-                value=[
-                    {
-                        "ref_id": citation.ref_id,
-                        "source_name": citation.source_name,
-                        "search_idx": citation.search_idx,
-                        "url": citation.url,
-                    }
-                    for citation in event.citations
-                ],
+                value=[citation.to_dict() for citation in event.citations],
+            ),
+        )
+    if isinstance(event, WorkflowProgressEvent):
+        value: dict[str, object] = {
+            "stage": event.stage.value,
+            "status": event.status.value,
+        }
+        if event.message:
+            value["message"] = event.message
+        if event.completed_count is not None:
+            value["completed_count"] = event.completed_count
+        if event.total_count is not None:
+            value["total_count"] = event.total_count
+        return (
+            CustomEvent(
+                name="agent_progress",
+                value=value,
+            ),
+        )
+    if isinstance(event, WorkflowHeartbeatEvent):
+        return (
+            CustomEvent(
+                name="agent_progress",
+                value={
+                    "stage": event.stage.value,
+                    "status": "in_progress",
+                    "message": event.message,
+                    "heartbeat": True,
+                },
             ),
         )
     if isinstance(event, UsageEvent):

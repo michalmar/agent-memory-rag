@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 import jwt
 from fastapi import Header, HTTPException
@@ -57,9 +58,6 @@ MOCK_USERS: dict[str, User] = {
     "user-charlie": User("user-charlie", "Charlie Lee", "charlie@example.com", "CL"),
 }
 
-AUTH_MODE = get_settings().auth_mode.lower()
-
-
 def _validate_auth_configuration(auth_mode: str, app_environment: str) -> None:
     if auth_mode == "mock" and app_environment == "production":
         raise RuntimeError(
@@ -67,7 +65,12 @@ def _validate_auth_configuration(auth_mode: str, app_environment: str) -> None:
         )
 
 
-_validate_auth_configuration(AUTH_MODE, get_settings().app_environment)
+_startup_settings = get_settings()
+_validate_auth_configuration(
+    _startup_settings.auth_mode.lower(),
+    _startup_settings.app_environment,
+)
+del _startup_settings
 
 
 def _resolve_mock_user(x_mock_user_id: str | None) -> User:
@@ -83,6 +86,49 @@ def _resolve_mock_user(x_mock_user_id: str | None) -> User:
 def _split_list(value: str) -> set[str]:
     """Parse a space/comma-delimited env value into a set of tokens."""
     return {t for t in value.replace(",", " ").split() if t}
+
+
+def _extract_bearer_token(authorization: str | None) -> str:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    return authorization.split(" ", 1)[1].strip()
+
+
+def _decode_rs256_token(
+    token: str,
+    jwk_client: PyJWKClient,
+    *,
+    audience: str,
+    issuer: str | None = None,
+    required_claims: tuple[str, ...],
+    verify_issuer: bool = True,
+    invalid_log_message: str,
+    jwks_log_message: str,
+) -> dict[str, Any]:
+    try:
+        signing_key = jwk_client.get_signing_key_from_jwt(token)
+        return jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=audience,
+            issuer=issuer,
+            options={
+                "require": list(required_claims),
+                "verify_iss": verify_issuer,
+            },
+        )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError as exc:
+        logger.warning(invalid_log_message, exc)
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
+    except Exception as exc:
+        logger.exception(jwks_log_message)
+        raise HTTPException(
+            status_code=401,
+            detail="Token validation error",
+        ) from exc
 
 
 class EntraValidator:
@@ -106,29 +152,16 @@ class EntraValidator:
         self._jwk_client = PyJWKClient(self.jwks_uri, cache_keys=True)
 
     def validate(self, authorization: str | None) -> User:
-        if not authorization or not authorization.lower().startswith("bearer "):
-            raise HTTPException(status_code=401, detail="Missing bearer token")
-        token = authorization.split(" ", 1)[1].strip()
-        try:
-            signing_key = self._jwk_client.get_signing_key_from_jwt(token)
-            claims = jwt.decode(
-                token,
-                signing_key.key,
-                algorithms=["RS256"],
-                audience=self.audience,
-                issuer=self.issuer,
-                options={"require": ["exp", "iat", "aud", "iss"]},
-            )
-        except jwt.ExpiredSignatureError:
-            raise HTTPException(status_code=401, detail="Token expired")
-        except jwt.InvalidTokenError as exc:
-            logger.warning("[auth] token validation failed: %s", exc)
-            raise HTTPException(status_code=401, detail="Invalid token")
-        except HTTPException:
-            raise
-        except Exception as exc:  # noqa: BLE001 — JWKS fetch / network
-            logger.exception("[auth] JWKS validation error")
-            raise HTTPException(status_code=401, detail="Token validation error") from exc
+        token = _extract_bearer_token(authorization)
+        claims = _decode_rs256_token(
+            token,
+            self._jwk_client,
+            audience=self.audience,
+            issuer=self.issuer,
+            required_claims=("exp", "iat", "aud", "iss"),
+            invalid_log_message="[auth] token validation failed: %s",
+            jwks_log_message="[auth] JWKS validation error",
+        )
 
         user = self._build_user(claims)
         self._enforce_scopes_and_roles(claims)
@@ -217,31 +250,18 @@ class AgentTokenValidator:
         self._jwk_client = PyJWKClient(jwks_uri, cache_keys=True)
 
     def validate(self, authorization: str | None) -> AgentCaller:
-        if not authorization or not authorization.lower().startswith("bearer "):
-            raise HTTPException(status_code=401, detail="Missing bearer token")
-        token = authorization.split(" ", 1)[1].strip()
-        try:
-            signing_key = self._jwk_client.get_signing_key_from_jwt(token)
-            claims = jwt.decode(
-                token,
-                signing_key.key,
-                algorithms=["RS256"],
-                audience=self.audience,
-                options={
-                    "require": ["exp", "iat", "aud", "iss", "tid"],
-                    "verify_iss": False,
-                },
-            )
-        except jwt.ExpiredSignatureError:
-            raise HTTPException(status_code=401, detail="Token expired")
-        except jwt.InvalidTokenError as exc:
-            logger.warning("[auth] agent token validation failed: %s", exc)
-            raise HTTPException(status_code=401, detail="Invalid token") from exc
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.exception("[auth] agent token JWKS validation error")
-            raise HTTPException(status_code=401, detail="Token validation error") from exc
+        token = _extract_bearer_token(authorization)
+        claims = _decode_rs256_token(
+            token,
+            self._jwk_client,
+            audience=self.audience,
+            required_claims=("exp", "iat", "aud", "iss", "tid"),
+            verify_issuer=False,
+            invalid_log_message=(
+                "[auth] agent token validation failed: %s"
+            ),
+            jwks_log_message="[auth] agent token JWKS validation error",
+        )
 
         if claims.get("iss") not in self.allowed_issuers:
             raise HTTPException(status_code=401, detail="Token issuer mismatch")
@@ -291,11 +311,12 @@ async def get_current_user(
     authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> User:
     """FastAPI dependency resolving the authenticated user."""
-    if AUTH_MODE == "mock":
+    auth_mode = get_settings().auth_mode.lower()
+    if auth_mode == "mock":
         return _resolve_mock_user(x_mock_user_id)
-    if AUTH_MODE == "entra":
+    if auth_mode == "entra":
         return await asyncio.to_thread(_resolve_entra_user, authorization)
-    raise HTTPException(status_code=500, detail=f"Invalid AUTH_MODE: {AUTH_MODE}")
+    raise HTTPException(status_code=500, detail=f"Invalid AUTH_MODE: {auth_mode}")
 
 
 async def get_agent_caller(

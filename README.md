@@ -1,8 +1,8 @@
-# Agentic AI Memory - Dual Foundry Support Chat
+# Agentic AI Memory - Foundry Agent Chat
 
-Reference implementation of a secure customer-support chat application with five
-memory layers, Foundry IQ retrieval, and two user-selectable agents hosted in one
-Microsoft Foundry project.
+Reference implementation of a secure agent chat application with five memory
+layers, Foundry IQ retrieval, two support agents, and a separately deployed
+directive RAG agent in one Microsoft Foundry project.
 
 The current product and architecture source of truth is
 [`docs/PRD-Solution-Challenges-1-5.md`](docs/PRD-Solution-Challenges-1-5.md).
@@ -15,10 +15,13 @@ not an alternative architecture.
 | --- | --- | --- |
 | **Foundry Prompt Agent** | Native Foundry Prompt Agent | Foundry IQ `knowledge_base_retrieve` only |
 | **Hosted Agent Framework** | Foundry Hosted Agent using Microsoft Agent Framework | Foundry IQ, an Agent Identity-authenticated order MCP tool, and app-session profile/memory tools |
+| **Directive Assistant** | Separate Foundry Hosted Agent using Microsoft Agent Framework | Eight strict backend directive tools for discovery, long-form content, comparisons, linked directives, and mandatory-status labeling; enabled for the current internal pilot |
 
-Agent selection is required for a new conversation and immutable afterward. Both
-agents emit the same normalized AG-UI stream, but they intentionally have different
-application capabilities.
+Agent selection is required for a new conversation and immutable afterward. All
+configured agents emit the same normalized AG-UI stream, but they intentionally
+have different application capabilities. The Directive Assistant is visible in
+the current pilot environment; its independent enablement and visibility gates
+remain the rollback controls.
 
 ```mermaid
 flowchart LR
@@ -26,9 +29,11 @@ flowchart LR
     F --> B[Internal FastAPI ACA]
     B -->|Application UAMI| P[Native Prompt Agent]
     B -->|Application UAMI| H[Hosted MAF Agent]
+    B -->|Application UAMI| D[Directive Hosted MAF Agent]
     P --> IQ[Foundry IQ]
     H --> IQ
     H -->|AgenticIdentityToken / Remote MCP| F
+    D -->|Agent Identity / directive gateway| F
     F -->|Authenticated MCP and restricted API proxy| B
     B --> C[(Private Cosmos DB: history, profile, semantic memory)]
     B --> M[Active Foundry Models]
@@ -62,6 +67,9 @@ channel tools.
 - **Hosted MAF agent** (`agents/customer-support-maf/`) - uses
   `FoundryChatClient`, `Agent`, and `ResponsesHostServer` with Hosted Responses
   protocol `2.0.0`.
+- **Directive Hosted MAF agent** (`agents/directive-rag-maf/`) - separately
+  packaged GPT-5.6 agent with exactly eight RequestContext-backed gateway tools
+  and no support IQ, order, profile, memory, or direct data-plane access.
 - **Frontend** (`frontend/`) - Vite + Lit SPA with a login-first Entra gate,
   immutable agent selection, Markdown/citation streaming, and a constrained A2UI
   subset for internal tool cards.
@@ -144,9 +152,10 @@ and
   token to `/api/mcp/`. The Hosted MCP descriptor supplies both the server URL
   and project connection ID; application code does not implement `fmi_path`
   exchange.
-- The shared project Agent Identity and published Agent Identity each have only
-  `AgentTools.Invoke` for stateless application MCP calls. Only the published
-  identity has `Agent365.Observability.OtelWrite`.
+- The shared project Agent Identity has only `AgentTools.Invoke`. Each published
+  Hosted Agent identity is granted its own `AgentTools.Invoke` and
+  `Agent365.Observability.OtelWrite` assignments. The directive identity has no
+  direct Search, Cosmos, Blob, mandate, or model data-plane role.
 - Hosted MCP and gateway tokens must be application-only, contain the required role, and
   come from an allowlisted principal. Delegated `scp` tokens are rejected.
 - Stateless order lookup is exposed through MCP without impersonating a user.
@@ -278,11 +287,19 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 `scripts/deploy_images.sh` builds the application and Hosted MAF images through ACR
 and updates the Container Apps.
+`scripts/build_hosted_agent_image.sh --agent directive --tag <release>` builds
+the directive image independently; the deployment script's default support-agent
+behavior is unchanged.
 `scripts/assign_hosted_agent_access.sh` idempotently assigns `AgentTools.Invoke`
 to both the shared project and published Agent Identities, assigns
 `Agent365.Observability.OtelWrite` only to the published identity, then configures
 the nested Hosted Agent azd environment with the application MCP connection ID and
 tenant ID plus the concrete Foundry project endpoint required by `azd deploy`.
+Use `--no-app-tools-connection` for the directive package because its local
+function wrappers call the authenticated gateway and do not use the support MCP
+connection. Pass `--agent-type directive`; before enablement, add both the
+published principal and shared project Agent Identity to Terraform variable
+`directive_hosted_agent_principal_ids`.
 This role assignment does not license or onboard the tenant for Agent 365
 ingestion. Verify that an eligible Microsoft 365 E7 or Microsoft Agent 365 license
 is assigned to at least one tenant user before treating downstream telemetry as a

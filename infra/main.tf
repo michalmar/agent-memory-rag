@@ -5,19 +5,23 @@ locals {
   base = "${var.name_prefix}${local.suffix}"
 
   names = {
-    log_analytics     = "log-${var.name_prefix}-${local.suffix}"
-    app_insights      = "appi-${var.name_prefix}-${local.suffix}"
-    vnet              = "vnet-${var.name_prefix}-${local.suffix}"
-    identity          = "id-${var.name_prefix}-${local.suffix}"
-    frontend_identity = "id-${var.name_prefix}-frontend-${local.suffix}"
-    foundry_agents    = "${local.base}aif2"
-    foundry_project   = "${var.name_prefix}-agents"
-    cosmos            = "${local.base}cosmos"
-    search            = "${local.base}search"
-    acr               = "${local.base}acr"
-    aca_env           = "cae-${var.name_prefix}-${local.suffix}"
-    backend_app       = "ca-${var.name_prefix}-backend"
-    frontend_app      = "ca-${var.name_prefix}-frontend"
+    log_analytics      = "log-${var.name_prefix}-${local.suffix}"
+    app_insights       = "appi-${var.name_prefix}-${local.suffix}"
+    vnet               = "vnet-${var.name_prefix}-${local.suffix}"
+    identity           = "id-${var.name_prefix}-${local.suffix}"
+    frontend_identity  = "id-${var.name_prefix}-frontend-${local.suffix}"
+    ingestion_identity = "id-${var.name_prefix}-ingestion-${local.suffix}"
+    foundry_agents     = "${local.base}aif2"
+    foundry_project    = "${var.name_prefix}-agents"
+    cosmos             = "${local.base}cosmos"
+    search             = "${local.base}search"
+    acr                = "${local.base}acr"
+    directive_storage  = "${local.base}docs"
+    directive_docint   = "${local.base}docint"
+    aca_env            = "cae-${var.name_prefix}-${local.suffix}"
+    backend_app        = "ca-${var.name_prefix}-backend"
+    frontend_app       = "ca-${var.name_prefix}-frontend"
+    directive_job      = "job-${var.name_prefix}-directive-ingest"
   }
 }
 
@@ -45,6 +49,13 @@ resource "azurerm_user_assigned_identity" "app" {
 
 resource "azurerm_user_assigned_identity" "frontend" {
   name                = local.names.frontend_identity
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  tags                = var.tags
+}
+
+resource "azurerm_user_assigned_identity" "directive_ingestion" {
+  name                = local.names.ingestion_identity
   location            = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
   tags                = var.tags

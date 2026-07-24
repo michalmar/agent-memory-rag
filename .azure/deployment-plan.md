@@ -1,6 +1,6 @@
 # Azure Deployment Plan - Hosted Agent Identity and Telemetry Remediation
 
-> **Status:** Deployed and accepted - Agent 365 Defender provisioning pending
+> **Status:** Deployed - Directive RAG follow-up hotfix r2; internal pilot active
 
 Generated: 2026-07-15
 
@@ -969,6 +969,51 @@ Deletion order:
 - [x] Bash syntax checks passed for all deployment scripts.
 - [x] Python compilation passed for both direct setup modules.
 
+#### Directive Phase 3 validation steps
+
+- [x] Confirm authenticated subscription, tenant, and deployed Phase 2 baseline.
+- [x] Confirm `gpt-5-nano` `2025-08-07` GA availability and quota in East US 2.
+- [x] Run directive ingestion unit tests and Python compilation.
+- [x] Run backend, support Hosted Agent, and frontend regression suites/build.
+- [x] Run shell syntax, Terraform formatting, initialization, and validation.
+- [x] Review exact UAMI ARM and Cosmos role names/scopes statically.
+- [x] Generate and inspect a saved Terraform plan with zero deletes or
+  replacements.
+- [x] Run the mandatory Azure deployment preflight and record all evidence below.
+
+Validated at `2026-07-23T13:05:19Z`:
+
+- Azure CLI is authenticated to enabled subscription
+  `7bc68c68-f434-49ad-ab3e-b883ec39da86` and tenant
+  `a7b1484c-f66a-496a-b1cf-35631a50396c`; Terraform initialized successfully
+  and can read 84 resources from state.
+- East US 2 reports `gpt-5-nano` `2025-08-07` as Generally Available with
+  Global Standard support. Subscription usage is 0 of 5,000 thousand-token
+  capacity units; the plan requests capacity 10.
+- All 18 directive ingestion tests pass, including non-publishing preflight,
+  generation/idempotency, relations, quarantine, mandates, and Search schema.
+  Python compilation passes.
+- All 85 backend tests plus five subtests, all nine support Hosted Agent tests,
+  and all six frontend tests pass. The frontend production build completes with
+  183 modules.
+- `terraform fmt -check -recursive`, `terraform validate`, shell syntax,
+  `git diff --check`, and runtime bearer-header assertions pass.
+- Static role review proves the exact six ARM role name/scope pairs and Cosmos
+  built-in Data Contributor role scoped only to `/dbs/directives`.
+- Saved plan
+  `/Users/mimarusa/.copilot/session-state/9cf0ea64-6411-41dc-a6e6-349d986e6f79/files/phase3-final.tfplan`
+  contains 10 creates, two in-place updates, and zero deletes or replacements.
+  Creates are only the ingestion UAMI/job, seven role assignments, and the
+  dedicated planner deployment. Updates only reconcile Storage and Document
+  Intelligence public access from enabled to disabled.
+- ACR Task build `ch23` successfully built
+  `directive-ingestion:phase3-validation-20260723` from the checked-in
+  Dockerfile and fixtures.
+- The deployed application `/api/health` endpoint remains healthy; unauthenticated
+  `/api/agents` access correctly returns 401.
+- Independent multi-model review found no remaining deployment-blocking issue
+  and approved the change.
+
 ### Shared project Agent Identity authorization revalidation
 
 Validated at `2026-07-20` for the direct-Foundry MCP authorization correction:
@@ -1623,6 +1668,1197 @@ Verified at `2026-07-12T21:25:24+02:00`:
 Production URL:
 
 `https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io`
+
+## 22. Directive follow-up hotfix r2 - 2026-07-23
+
+**Status:** Deployed and verified
+
+### 22.1 Incident and correction
+
+The first Directive Assistant turn succeeds, but a later turn in the same
+conversation fails inside the Hosted Agent with
+`ChatClientInvalidRequestException`. The inner model client performs stateless
+history replay and rejects a complete reasoning/tool-call group when its opaque
+`reasoning.encrypted_content` payload is missing.
+
+The deployed
+`agent-framework-foundry-hosting==1.0.0a260709` package drops that payload while
+converting Agent Framework reasoning content to and from Hosted Responses
+output items. Version `1.0.0b260722` preserves the payload in both streaming
+emission and replay ingestion. The directive image now pins the corrected
+hosting package. `default_options={"store": False}` remains intentional because
+the Hosting layer supplies full conversation history rather than an inner
+model `previous_response_id`; changing only `store` would not establish
+service-side continuation.
+
+The immutable image and backend release metadata advance from
+`directive-rag-20260723-r1` to `directive-rag-20260723-r2`. Neither support
+agent, Search resource, directive data store, prompt, tool contract, networking
+rule, nor RBAC declaration changes.
+
+### 22.2 All validation checks pass
+
+Validated at `2026-07-23T19:45:00Z` for subscription
+`ME-MngEnvMCAP372348-mimarusa-1`
+(`7bc68c68-f434-49ad-ab3e-b883ec39da86`), tenant
+`a7b1484c-f66a-496a-b1cf-35631a50396c`, resource group
+`rg-agent-memory-rag`, and existing location `eastus2`.
+
+- [x] Azure CLI `2.80.0`, azd `1.28.1`, and Terraform `1.13.3` are installed.
+- [x] Azure CLI and azd resolve the current user credential
+  `admin@MngEnvMCAP372348.onmicrosoft.com` in the confirmed subscription.
+- [x] The directive `azure.yaml` passes the official stable schema validator.
+- [x] `azd provision --preview --no-prompt` reuses the existing Foundry project
+  and proposes no resource provisioning.
+- [x] `azd ai agent doctor --no-prompt` reports 11 passed, 0 failed, and 2
+  skipped.
+- [x] `azd package directive-rag-maf-hosted --no-prompt` validates the declared
+  prebuilt container package. Deployment will use the established
+  `--from-package` image path.
+- [x] `terraform fmt -check -recursive` and `terraform validate` pass.
+- [x] The saved Terraform plan has 0 additions, 1 in-place update, and 0
+  destroys. It changes only backend
+  `DIRECTIVE_AGENT_RELEASE_ID` from `directive-rag-20260723-r1` to
+  `directive-rag-20260723-r2`.
+- [x] Static role verification finds no RBAC resource change. Existing
+  resource-scoped Agent Tools, observability, ACR, and shared-project grants
+  remain intact.
+- [x] The Python 3.13 directive-agent suite passes all 6 tests. Its regression
+  probe verifies that opaque encrypted reasoning survives both Hosted Responses
+  streaming emission and replay ingestion.
+- [x] Python compilation, release-script syntax, and `git diff --check` pass.
+- [x] Independent correctness, dependency, architecture, security, and
+  performance review approved the version upgrade and retained stateless
+  configuration after the complete round-trip test was added.
+
+Saved validation artifacts:
+
+- `directive-followup-r2.tfplan`
+- `directive-followup-r2-plan.txt`
+- `directive-followup-r2-plan.json`
+
+### 22.3 Deployment and rollback
+
+1. Build only
+   `directive-rag-maf-hosted:directive-rag-20260723-r2` through ACR Tasks.
+2. Deploy a new version of only `directive-rag-maf-hosted`; do not rebuild or
+   republish either support agent.
+3. Confirm the active image digest and published Agent Identity. If the
+   identity changes, assign the existing least-privilege application roles and
+   replace the saved metadata plan with a reviewed plan that preserves both
+   old and new directive principals during acceptance.
+4. Apply only the reviewed release-metadata Terraform plan.
+5. Verify a real first turn and follow-up through the same application
+   conversation, then run both unchanged support-agent smoke checks and a final
+   full-refresh Terraform no-drift plan.
+
+Version 1 and its immutable image remain available as rollback targets. A
+failed r2 acceptance must restore version 1 routing or republish the known-good
+r1 image without changing support agents or directive data.
+
+### 22.4 Deployment result
+
+Deployed and accepted on 2026-07-23:
+
+- ACR build `ch2h` published
+  `agmem5df652acr.azurecr.io/directive-rag-maf-hosted:directive-rag-20260723-r2`
+  with digest
+  `sha256:82ed49573f96ed7f936e71a8e3c8b0b99495146e8d9ede9e43af81bb93a450b0`.
+- The built Linux image resolves
+  `agent-framework-foundry-hosting==1.0.0b260722` and passes the encrypted
+  reasoning emission/replay regression probe.
+- Hosted Agent `directive-rag-maf-hosted:2` is active and retains managed
+  identity `f3d4b5d4-24c0-4fb8-b1e3-530e5a83c1c1`.
+- Backend revision `ca-agmem-backend--0000046` is healthy with release metadata
+  `directive-rag-20260723-r2`.
+- A real application conversation completed a tool-using first turn and a
+  follow-up under the same conversation ID. The follow-up returned the correct
+  Company Car Policy effective date, April 1, 2026, without
+  `Agent run failed`.
+- Both unchanged support agents passed live smoke checks, and Application
+  Insights contains no new encrypted-replay exceptions.
+- Live least-privilege verification is unchanged: the directive agent identity
+  has only `AcrPull`, `AgentTools.Invoke`, and
+  `Agent365.Observability.OtelWrite`; the shared project identity has only
+  `AgentTools.Invoke`.
+- All disposable acceptance conversations and the direct Hosted Agent test
+  session were deleted after user approval.
+- The final refreshed Terraform plan reports 93 no-op resources and no drift.
+
+## 21. Directive RAG application and agent integration - 2026-07-23
+
+> **Status:** Deployed - Phase 8 internal pilot active
+
+### 21.1 Approved scope
+
+Implement, but do not deploy or enable, Phases 4-6 from the approved Directive
+RAG implementation plan:
+
+- backend repositories and strict directive tools over the already deployed
+  Search, Cosmos, and Blob data planes;
+- a separate Microsoft Agent Framework Hosted directive agent using the existing
+  GPT-5.6 deployment and only the directive backend tools;
+- backend/frontend streaming progress, cancellation, enriched citations, and
+  mandatory-status presentation for the third agent.
+
+The user approved this scope with "implement phases 4, 5, 6" on 2026-07-23.
+The Prompt Agent and existing customer-support Hosted MAF agent must remain
+behavior-compatible. Directive enablement and Azure deployment remain deferred
+to the validation and staged-release workflow.
+
+### 21.2 Preparation checklist
+
+- [x] Audit current backend, Hosted Agent, frontend, infrastructure, and tests.
+- [x] Finalize repository changes, tool contracts, identity boundaries, budgets,
+      and failure behavior.
+- [x] Implement Phase 4 repositories, gateway isolation, and tests.
+- [x] Implement the separate Phase 5 Hosted Agent package and release wiring.
+- [x] Implement Phase 6 protocol, citation, cancellation, and frontend behavior.
+- [x] Run repository validation and independent code review.
+- [x] Set this section and the document status to `Ready for Validation`.
+- [x] Invoke `azure-validate`; do not deploy in this implementation task.
+
+### 21.3 Architecture and security constraints
+
+- The backend is the only directive data-plane principal used at query time.
+- The directive Hosted Agent receives no Search, Cosmos, Blob, or mandate roles.
+- Tool dispatch is bound to immutable agent type and an agent-specific principal
+  allowlist; model arguments cannot supply trusted user identity.
+- All Search filters are constructed from typed fields. Tools accept no raw
+  OData, arbitrary Blob paths/URLs, or Cosmos queries.
+- Current versions are the default. Historical access requires an exact resolved
+  version.
+- Full-document access follows catalog-owned manifests and returns explicit
+  continuation rather than silently truncating.
+- Mandatory status is looked up only after source selection and never influences
+  retrieval, filtering, or ranking.
+- Long operations expose safe workflow stages and cancellation but never model
+  reasoning or retrieved document text.
+
+### 21.4 Validation and deployment boundary
+
+Implementation acceptance requires backend/agent/frontend tests, Python
+compilation, frontend type-check/build, Terraform formatting/validation, shell
+syntax, and diff review. Azure deployment, new RBAC assignments, agent
+publication, and feature enablement are out of scope until a separately reviewed
+saved plan passes `azure-validate`.
+
+### 21.5 Validation checklist
+
+- [x] All validation checks pass
+  - [x] Terraform installation
+  - [x] Azure CLI installation
+  - [x] Azure authentication and confirmed subscription
+  - [x] Terraform initialization
+  - [x] Terraform format check
+  - [x] Terraform syntax validation
+  - [x] Terraform plan preview
+  - [x] Terraform state backend access
+  - [x] Azure Policy review
+  - [x] Template variable resolution
+  - [x] Application tests and production build
+  - [x] Static least-privilege role verification
+
+### 21.6 Validation proof - 2026-07-23
+
+**Tooling, authentication, and state**
+
+- `terraform version` returned `1.13.3`; `az version` returned `2.80.0`.
+- `az account show` confirmed the enabled default subscription
+  `ME-MngEnvMCAP372348-mimarusa-1`
+  (`7bc68c68-f434-49ad-ab3e-b883ec39da86`) and tenant
+  `a7b1484c-f66a-496a-b1cf-35631a50396c`.
+- `terraform -chdir=infra init -input=false -no-color` completed against the
+  existing backend and locked providers.
+- `terraform -chdir=infra state list` read 94 managed state entries.
+- `terraform -chdir=infra fmt -check -recursive` and
+  `terraform -chdir=infra validate -no-color` passed.
+- A recursive template scan found no unresolved `{{ .Env.* }}` expressions.
+
+**Refreshed Terraform plan**
+
+- `terraform -chdir=infra plan -input=false -no-color -detailed-exitcode`
+  completed with the expected change exit code `2`.
+- Result: `0 to add, 1 to change, 0 to destroy`; the only resource action is an
+  in-place update of `azurerm_container_app.backend`.
+- Plan-JSON assertions prove that `DIRECTIVE_AGENT_ENABLED=false`,
+  `DIRECTIVE_AGENT_VISIBLE=false`, the directive Search API is stable
+  `2026-04-01`, the two legacy support principals remain available through the
+  explicit config fallback, and no directive principal is configured before
+  publication.
+- Saved plan evidence:
+  - `files/phase456-validation-plan.txt`
+  - `files/phase456-validation-plan-full.txt`
+  - `files/phase456-validation-plan.json`
+  - `files/phase456-validation.tfplan`
+
+**Application verification**
+
+- Backend: 104 tests passed, including current/historical Search filters,
+  artifact continuation, mandate isolation, cross-agent authorization, live
+  progress, citation persistence, and cancellation cleanup.
+- Hosted Agents: all 9 unchanged support-agent tests and all 4 directive-agent
+  tests passed.
+- Frontend: all 11 tests and the TypeScript/Vite production build passed.
+- Python compilation, shell syntax, Terraform formatting, whitespace checks,
+  and the directive Search bearer-token source assertion passed.
+- Independent five-axis review approved the change after finding one masked
+  literal Authorization placeholder in the new directive Search client. The
+  header now uses the scoped Entra access token, and a regression test asserts
+  both the Search scope and outbound bearer header.
+
+**Azure Policy and static role verification**
+
+- Azure Policy assignment review found inherited management-group deny,
+  deploy, audit, and security-baseline initiatives. The deny initiative reports
+  zero non-compliant resources. Current audit/deploy findings concern existing
+  Search, ACR, VNet, and Foundry diagnostic/private-link posture; this plan
+  creates no resources and does not change those resources.
+- The backend UAMI retains Search Index Data Reader, directive-database Cosmos
+  Data Reader, artifact-container Storage Blob Data Reader, and the existing
+  Foundry endpoint-consumer assignment required by the Phase 4 runtime.
+- The directive Hosted Agent receives no Search, Cosmos, Blob, or mandate-data
+  role. Its future gateway application-role and telemetry grants remain a
+  publication-time action in `assign_hosted_agent_access.sh`.
+- Support and directive principal/tool allowlists are separate. The support
+  allowlist retains its legacy fallback; the directive allowlist remains empty
+  while the feature is disabled.
+- The previously documented account-scoped backend Cosmos Data Contributor
+  remains during staged support-write verification. The narrower support
+  contributor and directive reader assignments already exist; removing the
+  broad legacy assignment remains a separate post-verification change.
+
+**Boundary**
+
+Validation did not apply Terraform, build or push Azure images, publish a
+Hosted Agent, assign a new role, or enable/advertise `directive-rag`. Phase 7
+evaluation and a separately approved staged release remain prerequisites to
+deployment.
+
+**Phase 8 backend error-contract hotfix revalidation - 2026-07-23T18:37:48Z**
+
+- Current Azure CLI user authentication reconfirmed the enabled default
+  subscription and existing East US 2 resource group. The backend Container App
+  remains healthy in single-revision mode on port 8000.
+- The focused directive regression and full root-context backend suite pass with
+  106 tests. An unavailable directive catalog or mandate container now maps to
+  `DIRECTIVE_DATA_UNAVAILABLE` instead of escaping the gateway as an unhandled
+  HTTP 500. Existing support Cosmos stores retain their prior `RuntimeError`
+  contract.
+- Independent five-axis re-review approved the remediation with no remaining
+  correctness, readability, architecture, security, or performance blocker.
+- The immutable local candidate
+  `agent-memory-backend:directive-rag-20260723-r1-errorcontract1` built
+  successfully and returned `{"status":"ok"}` from `/health/live` on its
+  declared port.
+- Terraform initialization, formatting, validation, state access, template
+  variable scanning, and a full refresh plan all passed. The plan reports no
+  infrastructure changes.
+- Six inherited policy assignments were reviewed, 11 directive/backend static
+  role resources remain in state, and live ACR verification confirms the
+  backend identity retains `AcrPull`.
+
+### 21.7 Phase 8 approval and Phase 7 deferral - 2026-07-23
+
+The user explicitly instructed: "skip phase 7 - we will do it later, and
+continue with phase 8." This supersedes the Phase 7-before-release ordering for
+the current demo rollout but does not mark Phase 7 complete.
+
+- Subscription reconfirmed:
+  `ME-MngEnvMCAP372348-mimarusa-1`
+  (`7bc68c68-f434-49ad-ab3e-b883ec39da86`).
+- Region reconfirmed: East US 2, using existing resource group
+  `rg-agent-memory-rag`.
+- Immutable directive release ID: `directive-rag-20260723-r1`.
+- Apply only a newly refreshed reviewed Terraform plan; never apply the prior
+  validation artifact after release metadata changes.
+- Deploy backend and frontend application images while
+  `DIRECTIVE_AGENT_ENABLED=false` and `DIRECTIVE_AGENT_VISIBLE=false`.
+- Build and publish only the separate directive Hosted Agent image. Do not
+  rebuild or republish either support agent.
+- After publication, explicitly confirm the security-sensitive application-role
+  grants, then register the published and shared project Agent Identities only
+  in `directive_hosted_agent_principal_ids`.
+- Enable the runtime while keeping it hidden, then complete health, support
+  regression, authorization, directive smoke, citation, and cancellation checks.
+- Pilot visibility may be enabled only after those hidden checks pass. General
+  enablement and the full Phase 7 quality/scale/security evaluation remain
+  deferred.
+
+Skipping Phase 7 accepts reduced answer-quality and scale confidence for the
+pilot. It does not relax current-version enforcement, exact-version historical
+retrieval, identity isolation, mandate privacy, citation requirements, or
+support-agent compatibility gates.
+
+### 21.8 Phase 8 deployment result - 2026-07-23
+
+**Published agent and identity boundary**
+
+- Azure Developer CLI was upgraded to `1.28.1`; the Foundry agent extension
+  remained `1.0.0-beta.6`.
+- `directive-rag-maf-hosted:1` is active on the Responses `2.0.0` protocol with
+  image
+  `agmem5df652acr.azurecr.io/directive-rag-maf-hosted:directive-rag-20260723-r1`
+  (digest
+  `sha256:83eb1b5a6a525b6dfdf63d27e2ad32652f4af8f23bda0064b867bfc0cfe51c76`).
+- The installed non-interactive tooling still selected a build path for the
+  documented prebuilt-image manifest. Publication therefore used a locally
+  loaded immutable ACR image with
+  `azd deploy directive-rag-maf-hosted --from-package <image>`. The deployment
+  manifest is isolated from runtime source, and the build Dockerfile remains
+  outside the nested azd project.
+- Published Agent Identity
+  `f3d4b5d4-24c0-4fb8-b1e3-530e5a83c1c1` has only resource-scoped `AcrPull`,
+  `AgentTools.Invoke`, and `Agent365.Observability.OtelWrite`.
+- Shared project Agent Identity
+  `5054c2c8-1110-4867-8762-7a44193084dd` has `AgentTools.Invoke` and no
+  `Agent365.Observability.OtelWrite`. The directive identity has no direct
+  Search, Cosmos, Blob, mandate, or model data-plane role.
+
+**Hidden enablement and Search correction**
+
+- The reviewed hidden-runtime plan was `0 to add, 1 to change, 0 to destroy`.
+  It enabled the runtime, kept visibility false, and allowlisted only the
+  published and shared project Agent Identities.
+- Initial hidden readiness exposed a deterministic HTTP `400` from the stable
+  Search `2026-04-01` retrieve endpoint. Direct reproduction proved that
+  `failOnError` and `maxOutputDocuments` are not valid
+  `knowledgeSourceParams` fields in that API version.
+- The backend now omits those two fields and enforces the configured result bound
+  on both returned references and the evidence exposed to the agent. The
+  regression test checks the exact stable request shape and rejects unbounded raw
+  Search output.
+- Final review also found that an uninitialized directive catalog or mandate
+  Cosmos container could bypass the directive tool-error contract. Directive
+  Cosmos repositories now raise `DirectiveDataUnavailable`, while existing
+  support Cosmos stores retain their prior error behavior. Regression coverage
+  drives both unavailable repositories through the real executor; the complete
+  backend suite passes with 106 tests and 7 subtests.
+- Final backend image
+  `agmem5df652acr.azurecr.io/backend:directive-rag-20260723-r1-errorcontract1`
+  has digest
+  `sha256:3db2253ad27b73c9712006af6cb28f04e701db377d51e830561e055c99453525`.
+  Revision `ca-agmem-backend--0000045` is healthy and receives 100% of backend
+  traffic.
+
+**Hidden acceptance and pilot promotion**
+
+- Live directive scenarios passed for full current-version summary, eligibility
+  with explicit unknown-user-fact handling, vacation filing procedure,
+  complete exact-version comparison, and parent/sub-directive traversal.
+- Responses contained directive/version/section/page citations, personalized
+  mandate tri-state, complete coverage accounting, finite progress stages, and
+  heartbeat events.
+- A five-second client abort followed by a successful turn on the same
+  conversation proved cancellation cleanup and turn-lease release.
+- The internal gateway rejected a delegated user token with HTTP `403` and an
+  anonymous request with HTTP `401`.
+- Both unchanged support agents passed live regression turns after the Search
+  correction.
+- The pilot-visibility plan was `0 to add, 1 to change, 0 to destroy` and changed
+  only `DIRECTIVE_AGENT_VISIBLE` from false to true.
+- Final readiness has no degraded dependencies. Authenticated `/agents` exposes
+  the two existing support agents plus an available `directive-rag` option.
+- The final live Search tool result contained 10 references and exactly 10
+  bounded evidence entries.
+- Microsoft Defender for Storage added its policy-owned
+  `storageDataScanner` private-link rule after the initial drift check. Terraform
+  now ignores only that externally managed nested rule rather than planning to
+  remove the security integration; all other storage-network controls remain
+  managed.
+- The final full-refresh Terraform plan reports no changes. Live health is ready
+  with no degraded dependency, all three agents are authenticated and available,
+  and the backend identity retains only `AcrPull` at the registry scope. All ten
+  temporary smoke-test conversations were deleted.
+
+Pilot URL:
+
+`https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io`
+
+Phase 7 and general enablement remain explicitly deferred.
+
+## 20. Directive RAG extension - 2026-07-23
+
+> **Status:** Deployed - Phases 2 and 3 private directive data and ingestion
+
+Sections 20.1–20.14 preserve the pre-deployment validation record. Their local
+Azure CLI/public-bootstrap assumption was rejected by live policy behavior and
+is superseded by the deployed private-job design and evidence in Section 20.15.
+
+### 20.1 Objective and approval
+
+Add a third, separate Microsoft Agent Framework Hosted Agent for enterprise
+directives. The directive agent owns retrieval planning for discovery,
+question-answering, full-document summaries, procedures, eligibility guidance,
+version comparisons, and two-level linked-directive traversal.
+
+The existing Foundry Prompt Agent and customer-support Hosted MAF agent remain
+independent and behavior-compatible. The user reviewed the detailed research
+and implementation plan and approved execution with "start with implementation"
+on 2026-07-23.
+
+Authoritative design details are also maintained in:
+
+- `docs/i-want-to-tailor-my-rag-scenario-to-some.md`;
+- the session implementation plan created from the repository audit.
+
+### 20.2 Confirmed requirements and Azure context
+
+| Attribute | Confirmed value |
+|---|---|
+| Mode | Modify the existing Azure application |
+| Classification | Demo / MVP with production-oriented boundaries |
+| Corpus | Approximately 10,000 single-language directives |
+| Update frequency | Daily |
+| Users | Hundreds, roughly one-percent expected concurrency |
+| Quality/latency | Prefer answer quality; no initial SLA; show safe progress |
+| Subscription | `ME-MngEnvMCAP372348-mimarusa-1` (`7bc68c68-f434-49ad-ab3e-b883ec39da86`), reconfirmed 2026-07-23 |
+| Tenant | `a7b1484c-f66a-496a-b1cf-35631a50396c` |
+| Resource group | `rg-agent-memory-rag` |
+| Location | East US 2, reconfirmed 2026-07-23 |
+| Deployment recipe | Existing Terraform/AzAPI plus existing image and Hosted Agent release scripts |
+| Model | Existing `gpt-5.6-sol`, version `2026-07-09` |
+| Authentication | Entra tokens, managed identities, and resource-scoped RBAC |
+| Initial ingestion identity | Dedicated UAMI `id-agmem-ingestion-5df652` (`f98f333c-4a20-4092-938a-3e405c702c4b`) |
+| Initial ingestion network | VNet-integrated Container Apps Job using private Blob, Cosmos, and Document Intelligence endpoints |
+| Existing agents | Preserve Prompt Agent and customer-support Hosted MAF agent |
+
+No Copilot SDK, Azure Functions, cross-cloud migration, or App Service
+specialized workflow is present. Do not run `azd init` or replace the current
+Terraform deployment path.
+
+### 20.3 Phase 0 evidence and constraints
+
+- Existing backend, frontend, Hosted Agent, and Terraform baselines pass.
+- A refreshed Terraform plan reports no managed-resource drift.
+- `gpt-5.6-sol` works with both direct Responses and Hosted MAF. Its limits are
+  1,050,000 total context tokens, 922,000 maximum input tokens, and 128,000
+  maximum output tokens.
+- The GPT-5.6 deployment exists outside Terraform state and must be imported or
+  adopted rather than recreated.
+- Independent Hosted Agents can run in the existing Foundry project with
+  distinct names, versions, endpoints, GUIDs, and managed identities.
+- The stable Search `2026-04-01` knowledge-base retrieve contract works,
+  including references, source data, semantic intents, and `filterAddOn`.
+  Preview-only `retrievalReasoningEffort` and `outputMode` are not sent.
+- Document Intelligence Layout `2024-11-30` produces Markdown and HTML tables
+  from the current directive fixtures.
+- The current Hosted runtime's project OpenAI client plus `agent_reference`
+  call shape is rejected by the deployed service. Each runtime must call its
+  physical agent-specific Responses endpoint.
+- Current fixtures do not represent a 100-150 page directive. Representative
+  token/chunk volume, Search production sizing, and full server-side
+  cancellation remain later gates, not blockers to Phase 1.
+
+### 20.4 Target architecture
+
+| Component | Target |
+|---|---|
+| Directive agent | New Hosted MAF deployment using `gpt-5.6-sol` |
+| Discovery/evidence | Version-aware Azure AI Search chunk index and stable knowledge-base retrieve API |
+| Catalog | Cosmos DB `directives/catalog`, partitioned by `/directive_id` |
+| Mandatory projection | Cosmos DB `directives/user_mandates`, partitioned by `/user_id` |
+| Full artifacts | Private Blob container containing canonical Markdown, manifests, section shards, and summaries |
+| Extraction | Document Intelligence Layout to canonical Markdown |
+| Source | Local folder for MVP; source adapter compatible with future Blob input |
+| Backend boundary | Strict typed tools; no raw Blob paths, Cosmos queries, or OData from the model |
+| Frontend | Existing chat UI with a third agent, structured progress, cancellation, and directive citations |
+
+Mandatory status is informational, never authorization, filtering, or ranking.
+The daily headerless CSV contract is
+`user_upn,entra_object_id,directive_id,M`. Ingestion constructs the same
+`<tenant_id>:<object_id>` key as application authentication and publishes one
+complete sparse snapshot to Cosmos. Runtime never reads the CSV or Microsoft
+Graph.
+
+Canonical Markdown, manifests, section shards, and summary payloads use Blob
+Storage in every shared environment. Local artifact storage is development-test
+only. Source-file disappearance and document deletion are out of MVP scope.
+
+### 20.5 Security and policy constraints
+
+- Production runtime services retain the existing backend user-assigned managed
+  identity. Ingestion uses its own dedicated Container Apps Job UAMI.
+- Do not add account keys, connection strings, client secrets, or broad
+  fallback credentials.
+- Grant the backend read-only directive data access. Give the ingestion UAMI
+  only the exact publication roles listed and verified in Section 20.15.
+- Keep Storage, Cosmos, and Document Intelligence private and Entra-only. The
+  VNet-integrated job uses private endpoints and private DNS; no CIDR rule,
+  policy exemption, key, SAS token, or connection string is permitted.
+- Hosted Agents receive no direct Blob, Cosmos, or Search data access; they call
+  the authenticated backend gateway.
+- Keep directive and support tool/principal allowlists independent.
+- Keep unpublished/future directives out of normal retrieval.
+- No applicable resource-group Azure Policy assignments were found during the
+  preceding 2026-07-23 release validation.
+- Any RBAC mutation, paid Search-plan activation, resource provisioning, or
+  destructive action requires its normal reviewed Terraform/deployment gate.
+
+### 20.6 Implementation sequence
+
+1. **Shared contracts and runtime boundary**
+   - add `AgentType.DIRECTIVE_RAG` without changing existing enum values;
+   - add optional directive citation fields and typed progress events;
+   - add a separate versioned directive prompt;
+   - migrate Hosted calls to physical agent-specific Responses endpoints;
+   - parameterize Hosted runtime identity, endpoint, release, and prompt;
+   - add disabled directive settings/runtime composition;
+   - preserve old conversation restoration.
+2. **Infrastructure**
+   - import/adopt the existing GPT-5.6 deployment;
+   - add private Blob artifact storage, directive Cosmos containers, Document
+     Intelligence access, settings, outputs, and least-privilege RBAC;
+   - grant the active Azure CLI identity the two missing ingestion data roles
+     and temporarily enable public network reachability for the local bootstrap;
+   - retain the existing Search service and support resources.
+3. **Ingestion**
+   - extract authoritative control metadata from each document;
+   - normalize Markdown, preserve tables, build manifests/chunks/relations and
+     one summary per version;
+   - publish versioned Search/catalog/artifact data atomically;
+   - publish a complete generation-qualified mandate snapshot.
+4. **Backend tools**
+   - add strict resolution, Search, manifest, content, relation, summary, and
+     selected-directive mandate tools;
+   - enforce current-version defaults, budgets, traversal limits, and
+     per-agent tool/principal isolation.
+5. **Directive Hosted Agent**
+   - deploy a separate package and identity with only directive tools;
+   - keep retrieval planning in the agent and data-policy enforcement in the
+     backend.
+6. **Product integration**
+   - stream safe progress and heartbeats;
+   - propagate cancellation and release turn leases;
+   - render version/section/page citations and mandatory-status badges.
+7. **Acceptance and rollout**
+   - prove support compatibility, directive quality/security, failure
+     isolation, scale, and rollback before enabling agent visibility.
+
+### 20.7 Current Phase 1 execution gate
+
+Phase 1 is complete only when:
+
+- both existing serialized conversation types restore without migration;
+- `/agents` still exposes exactly the original two agents while directive
+  visibility is false;
+- the current support Hosted Agent succeeds through its physical Responses
+  endpoint and readiness executes a minimal endpoint probe;
+- two Hosted runtime instances retain independent physical names, endpoints,
+  releases, prompts, and state;
+- contract/config/runtime tests pass without changing existing support
+  descriptors or external API behavior.
+
+No Azure resource apply or deployment was part of the Phase 1 implementation
+gate. The separately approved backend-only release is recorded in Section 20.12.
+The directive feature remains disabled, and existing physical agents and Azure
+resources remain unchanged.
+
+### 20.8 Phase 1 result
+
+The Phase 1 implementation completed on 2026-07-23 without provisioning,
+Terraform apply, image deployment, Hosted Agent publication, Search publication,
+or traffic change. A separate backend-only deployment was approved afterward and
+is recorded in Section 20.12.
+
+- Existing agent enum values, prompt behavior, citation keys, and conversation
+  restoration remain compatible. Legacy conversations without runtime metadata
+  remain support-Hosted conversations and cannot be claimed by `directive-rag`.
+- `directive-rag` has separate prompt/release/runtime identity and remains
+  disabled and hidden by default. `/agents` returns exactly the original two
+  agents while visibility is false.
+- Hosted MAF now binds each runtime to the exact URL-encoded physical
+  `/agents/{agent}/endpoint/protocols/openai` root with `api-version=v1`.
+  `agent_reference` remains exclusive to the native Prompt Agent path.
+- Startup runs a non-impersonating Responses request and requires bounded probe
+  session cleanup. Failed runtimes close partial clients and recover on a
+  per-agent 5-to-300-second exponential backoff without duplicate retry tasks.
+- Directive construction and readiness failures are isolated as degraded and
+  cannot make the two support agents unavailable. Startup cancellation and
+  shutdown reclaim initialized clients, retry tasks, and pending probe sessions.
+- The deployed support Hosted endpoint passed the final physical-route probe in
+  30.35 seconds. The service rejects `max_output_tokens` on this protocol, so the
+  health request intentionally omits that unsupported field.
+- Final checks passed: 85 backend tests, Python compilation, diff/whitespace
+  checks, 6 frontend tests and production build, 9 support Hosted Agent tests,
+  contracts-wheel directive-prompt packaging, and independent correctness,
+  architecture, security, and performance review with no remaining required
+  findings.
+
+Phase 2 remains the next gate: adopt the existing GPT-5.6 deployment and add
+directive Blob, Document Intelligence, Cosmos, configuration, and
+least-privilege RBAC through reviewed Terraform. The directive flags remain off
+until later ingestion, tool, agent-package, UI, and acceptance phases pass.
+
+### 20.9 Phase 1 deployment approval and scope
+
+The user explicitly approved deployment on 2026-07-23 at 11:47 CEST before
+continuing with Phase 2.
+
+- Release only the backend application and its shared `agent_contracts`
+  dependency. The frontend and both deployed Foundry agents are unchanged.
+- Keep `DIRECTIVE_AGENT_ENABLED=false` and `DIRECTIVE_AGENT_VISIBLE=false`.
+- Expect no Azure resource create, update, replacement, or deletion from
+  Terraform. Do not apply if validation finds infrastructure drift or a resource
+  mutation.
+- Build an immutable backend image through the existing ACR Tasks path, update
+  the backend Container App to that image, and preserve the current healthy
+  revision as the rollback target.
+- Before traffic acceptance, require healthy liveness/readiness, exactly the two
+  existing agents from `/agents`, authenticated Prompt Agent and support Hosted
+  MAF smoke turns, successful physical Hosted endpoint startup verification,
+  and no directive dependency exposed as required.
+- Follow the mandatory `azure-validate` then `azure-deploy` workflow. No Phase 2
+  infrastructure is part of this release.
+
+### 20.10 Phase 1 deployment validation checklist
+
+- [x] Terraform installation verified.
+- [x] Azure CLI installation verified.
+- [x] Active Azure authentication matches the confirmed subscription and tenant.
+- [x] Terraform initialized successfully.
+- [x] Recursive Terraform format check passed.
+- [x] Terraform syntax validation passed.
+- [x] Saved full-refresh Terraform plan reviewed with zero resource changes,
+  replacements, or deletions.
+- [x] Terraform state backend is accessible.
+- [x] Applicable Azure Policy assignments reviewed.
+- [x] No unresolved `{{ .Env.* }}` template variables exist.
+- [x] Backend tests, Python compilation, support Hosted Agent tests, and package
+  build verification passed. The unavailable local Docker daemon is replaced by
+  the established ACR Tasks remote-build gate during deployment.
+- [x] Static managed-identity and RBAC relationships reviewed with no Phase 1
+  mutation.
+- [x] Phase 1 validation proof recorded below.
+
+### 20.11 Phase 1 validation proof
+
+Validated at `2026-07-23T11:50:02+02:00` against subscription
+`ME-MngEnvMCAP372348-mimarusa-1`
+(`7bc68c68-f434-49ad-ab3e-b883ec39da86`), tenant
+`a7b1484c-f66a-496a-b1cf-35631a50396c`, resource group
+`rg-agent-memory-rag`, and existing East US 2 resources.
+
+- Terraform `1.13.3` and Azure CLI `2.80.0` are installed. The active/default
+  Azure account is enabled and exactly matches the confirmed subscription and
+  tenant.
+- `terraform init -input=false`, `terraform fmt -check -recursive`, and
+  `terraform validate` pass. Terraform state is accessible with 68 tracked
+  resources.
+- The refreshed saved plan has detailed exit code `0`. Its JSON contains zero
+  resource changes requiring action and 36 unchanged planned outputs:
+  - binary:
+    `/Users/mimarusa/.copilot/session-state/9cf0ea64-6411-41dc-a6e6-349d986e6f79/files/phase1-deploy-terraform.tfplan`;
+  - text:
+    `/Users/mimarusa/.copilot/session-state/9cf0ea64-6411-41dc-a6e6-349d986e6f79/files/phase1-deploy-terraform-plan.txt`.
+- Eleven inherited management-group/subscription Azure Policy assignments were
+  retrieved and reviewed. This release creates no ARM resources and changes no
+  Terraform-managed property, so the deploy/deny/security initiatives introduce
+  no new Phase 1 action.
+- No unresolved Go-style `{{ .Env.* }}` expression exists in Terraform or
+  tfvars JSON files.
+- The release build gates pass: 85 backend tests, Python compilation, 9 support
+  Hosted Agent tests, contracts-wheel construction, and packaged directive
+  prompt verification. Docker client `27.4.0` is installed but its local daemon
+  is unavailable; the established Azure ACR Tasks path performs the immutable
+  container build during deployment.
+- Static RBAC review confirms no role mutation. The backend user-assigned
+  identity retains resource-scoped ACR pull, Foundry/OpenAI interaction,
+  end-user impersonation, agent session write/delete, Search read, Cosmos data,
+  and Application Insights publication permissions required by the existing
+  runtime. The account-scoped Cosmos assignment is pre-existing and remains a
+  planned Phase 2 narrowing task.
+- Validation authorizes only the backend image release described in Section
+  20.9. Directive flags remain false; no Terraform apply, frontend deployment,
+  Foundry Agent publication, Search publication, or Phase 2 provisioning is
+  authorized.
+
+### 20.12 Phase 1 deployment results
+
+Deployed and verified at `2026-07-23T11:58:51+02:00`.
+
+- The user reconfirmed subscription
+  `ME-MngEnvMCAP372348-mimarusa-1`
+  (`7bc68c68-f434-49ad-ab3e-b883ec39da86`) and East US 2 immediately
+  before deployment. Resource group `rg-agent-memory-rag` and Container Apps
+  environment `cae-agmem-5df652` were already provisioned and healthy.
+- Backend identity `id-agmem-5df652` retained `AcrPull` on
+  `agmem5df652acr` before the release.
+- ACR Task run `ch22` built only the backend image:
+  `agmem5df652acr.azurecr.io/backend:directive-rag-phase1-20260723095245`,
+  digest
+  `sha256:2fa419aa3ca7d99cddaad241a95ba094c098cd76d9004a8a3c0e31d77f93038c`.
+- Container App revision
+  `ca-agmem-backend--p1-20260723095245` is provisioned, healthy, latest ready,
+  and receives 100 percent of backend traffic. No directive flag override is
+  present, so `DIRECTIVE_AGENT_ENABLED` and `DIRECTIVE_AGENT_VISIBLE` retain
+  their disabled defaults.
+- `https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io/api/health/live`
+  and
+  `https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io/api/health/ready`
+  returned HTTP 200. Readiness reported all required support dependencies
+  healthy, no degraded dependency, and exactly `foundry-prompt` and
+  `agent-framework` as available agents; no directive dependency was required.
+- Unauthenticated `/api/agents` access returned HTTP 401. Authenticated
+  discovery returned exactly the original two available agents. Authenticated
+  end-to-end smoke turns completed for both the Prompt Agent and support Hosted
+  MAF agent, and both temporary conversations were deleted successfully.
+- Live backend RBAC contains the expected resource-scoped `AcrPull`,
+  `Search Index Data Reader`, `Monitoring Metrics Publisher`,
+  `Cognitive Services OpenAI User`, and
+  `Agent Memory Foundry Agent Consumer` assignments. Cosmos retains the
+  pre-existing account-scoped `Cosmos DB Built-in Data Contributor` assignment;
+  narrowing remains a Phase 2 task.
+- Rollback revision `ca-agmem-backend--0000037` remains directly addressable,
+  inactive, healthy, and provisioned on image
+  `backend:ranked-simplification-20260723001514`, digest
+  `sha256:4ef06aa5d1adf06095e88d6e13e5c474d5d24c8cb06f3a81de253374f467ed75`.
+- Frontend revision `ca-agmem-frontend--0000017` and image
+  `frontend:ranked-simplification-20260723001514` are unchanged. Neither
+  Foundry Agent was rebuilt or republished.
+- The post-release full-refresh Terraform plan returned detailed exit code `0`
+  with zero creates, updates, deletes, or replacements:
+  - binary:
+    `/Users/mimarusa/.copilot/session-state/9cf0ea64-6411-41dc-a6e6-349d986e6f79/files/phase1-postdeploy-terraform.tfplan`;
+  - text:
+    `/Users/mimarusa/.copilot/session-state/9cf0ea64-6411-41dc-a6e6-349d986e6f79/files/phase1-postdeploy-terraform-plan.txt`.
+
+No Terraform apply, frontend deployment, Hosted Agent publication, Search
+publication, or Phase 2 provisioning occurred. The verified application URL is
+`https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io`.
+
+### 20.13 Phase 2 infrastructure preparation
+
+Prepared and revised on `2026-07-23` for validation only. No Phase 2 resource
+has been provisioned.
+
+**Generated Terraform**
+
+- `infra/directive_data.tf` adopts the existing `gpt-5.6-sol` deployment and
+  defines directive-only Storage, Document Intelligence, Cosmos, private
+  endpoints, and RBAC.
+- `infra/main.tf`, `infra/variables.tf`, `infra/network.tf`,
+  `infra/compute.tf`, `infra/outputs.tf`, and
+  `infra/terraform.tfvars.example` contain the related names, inputs, private
+  DNS, disabled backend settings, and outputs.
+- The existing pure-Terraform/AzAPI recipe remains authoritative. No `azd`
+  template or second infrastructure path was introduced.
+
+**Model adoption**
+
+- Terraform imports the existing deployment
+  `/subscriptions/7bc68c68-f434-49ad-ab3e-b883ec39da86/resourceGroups/rg-agent-memory-rag/providers/Microsoft.CognitiveServices/accounts/agmem5df652aif2/deployments/gpt-5.6-sol`.
+- The imported resource is a no-op against live model version `2026-07-09`,
+  `GlobalStandard` capacity `250`, RAI policy `Microsoft.DefaultV2`, and
+  `OnceNewDefaultVersionAvailable`.
+- `prevent_destroy` protects the adopted directive deployment. Existing
+  `gpt-4o-mini` and embedding deployments are unchanged.
+
+**Artifact and extraction resources**
+
+- Storage account `agmem5df652docs` is GPv2 Standard LRS by default, with HTTPS
+  only, TLS 1.2 minimum, shared-key authentication disabled, OAuth as the
+  default, nested public access disabled, 30-day blob/container soft delete,
+  and blob versioning.
+- Blob container `directive-artifacts` is created through ARM/AzAPI with public
+  access disabled; Terraform does not require a storage key.
+- For the first local ingestion, the Storage public endpoint is temporarily
+  reachable with firewall default action `Allow` and no IPv4 CIDR rules. Shared
+  keys, nested/public Blob access, and container anonymous access remain
+  disabled, so the public endpoint still requires Entra data-plane RBAC.
+  Backend traffic can use the retained Blob private endpoint and
+  `privatelink.blob.core.windows.net`.
+- Document Intelligence account `agmem5df652docint` uses
+  `FormRecognizer`/`S0`, a custom subdomain, system-assigned identity, disabled
+  local authentication, temporary public network reachability with no IP
+  allowlist, and a retained private endpoint through
+  `privatelink.cognitiveservices.azure.com`.
+- One explicit variable, `directive_initial_ingestion_public_access`, controls
+  both temporary public endpoints and defaults to `true` for the approved
+  bootstrap. Setting it to `false` disables public network access and restores
+  default-deny network ACLs without removing either private endpoint.
+
+**Catalog, configuration, and least privilege**
+
+- The existing serverless Cosmos account gains database `directives` and
+  containers `catalog` (`/directive_id`) and `user_mandates` (`/user_id`), both
+  with partition-key version 2 and no default TTL.
+- The backend receives `Storage Blob Data Reader` at the artifact-container
+  scope and Cosmos built-in Data Reader at `/dbs/directives`.
+- Cosmos narrowing is staged safely: a replacement built-in Data Contributor
+  assignment is added at `/dbs/support`, while the pre-existing account-wide
+  assignment remains until deployed support writes pass. Removing the broad
+  assignment is a separate post-verification change.
+- Terraform resolves the current Azure CLI credential through
+  `data.azurerm_client_config.current`. The refreshed plan binds the bootstrap
+  assignments to `admin@MngEnvMCAP372348.onmicrosoft.com`, object ID
+  `bb0f05ed-8e4b-4784-926d-fe9e3bfb0cdf`.
+- That identity receives `Storage Blob Data Contributor` at the artifact
+  container scope and `Cognitive Services User` on Document Intelligence.
+  Existing current-deployer assignments already provide Search Index Data
+  Contributor, Search Service Contributor, Cosmos Data Contributor, and
+  Cognitive Services OpenAI User; Terraform does not duplicate them.
+- The superseded `directive_ingestion_principal_ids` and
+  `directive_ingestion_allowed_ip_ranges` inputs are removed. Phase 3 ingestion
+  will use `AzureCliCredential` for this MVP bootstrap, so runtime does not
+  silently select a different local credential.
+- Backend environment wiring names the new model, Blob, Cosmos, and future
+  Search resources while explicitly keeping
+  `DIRECTIVE_AGENT_ENABLED=false` and `DIRECTIVE_AGENT_VISIBLE=false`.
+  No directive runtime becomes required or discoverable in this phase.
+
+**Preparation verification**
+
+- Official Azure guidance and the installed AzureRM/AzAPI provider schemas were
+  reviewed for passwordless access, Storage firewall/private-endpoint behavior,
+  Document Intelligence managed identity/private networking, Search roles,
+  Cosmos native RBAC scopes, and Terraform resource contracts.
+- `terraform fmt -check -recursive`, `terraform validate`, and
+  `git diff --check -- infra` pass.
+- Independent code review found no required correctness, security, or logic
+  issue.
+- The full-refresh saved plan returns detailed exit code `2` and contains:
+  - one no-op import of the live GPT deployment;
+  - 15 additive creates, including the two current-CLI bootstrap assignments;
+  - one in-place backend Container App environment update;
+  - zero deletes and zero replacements.
+- The 16 changed resource addresses are the previously approved directive
+  resources and disabled backend settings plus
+  `azurerm_role_assignment.deployer_directive_blob_contributor` and
+  `azurerm_role_assignment.deployer_directive_document_intelligence`.
+- Saved plan artifacts:
+  - binary:
+    `/Users/mimarusa/.copilot/session-state/9cf0ea64-6411-41dc-a6e6-349d986e6f79/files/phase2-ingestion-bootstrap.tfplan`;
+  - text:
+    `/Users/mimarusa/.copilot/session-state/9cf0ea64-6411-41dc-a6e6-349d986e6f79/files/phase2-ingestion-bootstrap-plan.txt`.
+
+At the preparation handoff, this status authorized `azure-validate` only. It did
+not authorize `terraform apply`, resource provisioning, backend image
+deployment, frontend deployment, Search publication, ingestion, or Hosted Agent
+publication.
+
+### 20.14 Phase 2 bootstrap revalidation scope
+
+The earlier `2026-07-23T12:19:03+02:00` validation is superseded because the
+user subsequently approved a different initial-ingestion access model. The new
+model removes explicit principal/CIDR inputs, grants the two missing data roles
+to the current Azure CLI identity, and temporarily allows public network
+reachability without enabling anonymous or key-based access.
+
+Preparation checks completed before handoff:
+
+- [x] the active Azure CLI account is
+  `admin@MngEnvMCAP372348.onmicrosoft.com`, object ID
+  `bb0f05ed-8e4b-4784-926d-fe9e3bfb0cdf`, in the confirmed subscription and
+  tenant;
+- [x] `data.azurerm_client_config.current.object_id` resolves to the same object
+  ID, with no `ARM_CLIENT_ID`, client secret, OIDC, or alternate Terraform
+  identity configured;
+- [x] `terraform fmt -check -recursive` and `terraform validate` pass;
+- [x] the refreshed saved plan has one no-op import, 15 creates, one update,
+  zero deletes, and zero replacements;
+- [x] planned Storage and Document Intelligence public network access is enabled
+  while shared keys, Blob anonymous access, and Document Intelligence local
+  authentication remain disabled;
+- [x] both private endpoints remain in the plan;
+- [x] the two new role assignments target the same current CLI object ID.
+
+**All validation checks pass**
+
+- [x] 1. Terraform installation
+- [x] 2. Azure CLI installation
+- [x] 3. Azure authentication and target context
+- [x] 4. Terraform initialization
+- [x] 5. Recursive Terraform format check
+- [x] 6. Terraform syntax validation
+- [x] 7. Saved full-refresh plan preview and exact-action assertions
+- [x] 8. Terraform state backend access
+- [x] 9. Azure Policy validation
+- [x] 10. Terraform/AZD template-variable resolution check
+- [x] 11. Backend, frontend, package, and script build/regression verification
+- [x] 12. Static RBAC, identity, network, and data-access review
+
+Validated at `2026-07-23T12:40:27+02:00` against subscription
+`ME-MngEnvMCAP372348-mimarusa-1`
+(`7bc68c68-f434-49ad-ab3e-b883ec39da86`), tenant
+`a7b1484c-f66a-496a-b1cf-35631a50396c`, resource group
+`rg-agent-memory-rag`, and East US 2.
+
+**Validation proof**
+
+- Terraform `1.13.3` and Azure CLI `2.80.0` are installed. The enabled current
+  account is `admin@MngEnvMCAP372348.onmicrosoft.com`, object ID
+  `bb0f05ed-8e4b-4784-926d-fe9e3bfb0cdf`, in the approved subscription and
+  tenant. No alternate Terraform client, secret, or OIDC identity is set.
+- `terraform init -input=false`, `terraform fmt -check -recursive`, and
+  `terraform validate` pass. The remote state is accessible with 68 tracked
+  resources. No unresolved `{{ .Env.* }}` expression exists.
+- The saved full-refresh plan has detailed exit code `2`: one no-op import of
+  `gpt-5.6-sol`, 15 creates, one in-place backend environment update, zero
+  deletes, and zero replacements. An exact sorted-address assertion passed for
+  all 16 changed resources; the imported model's before/after values are
+  identical.
+- The two additional creates are only
+  `azurerm_role_assignment.deployer_directive_blob_contributor` and
+  `azurerm_role_assignment.deployer_directive_document_intelligence`, both
+  targeting the current CLI object ID. Their planned roles are respectively
+  `Storage Blob Data Contributor` at the artifact-container scope and
+  `Cognitive Services User` at the Document Intelligence account scope.
+- Live/static role review confirms the same CLI identity already has Search
+  Index Data Contributor and Search Service Contributor on
+  `agmem5df652search`, Cosmos built-in Data Contributor on
+  `agmem5df652cosmos`, Cognitive Services OpenAI User on
+  `agmem5df652aif2`, and inherited Owner/User Access Administrator authority.
+  No duplicate Search, Cosmos, or OpenAI assignment is planned.
+- With the approved bootstrap flag enabled, Storage and Document Intelligence
+  public network access are enabled with default action `Allow` and no CIDR
+  rules. Storage shared keys, nested/public Blob access, container anonymous
+  access, and Document Intelligence local authentication remain disabled.
+  Both private endpoints remain planned.
+- A second non-persistent plan with
+  `directive_initial_ingestion_public_access=false` passed assertions that both
+  services disable public network access, both ACLs return to default `Deny`,
+  Entra-only settings remain intact, and both private endpoints remain.
+- Eleven applicable subscription/management-group policy assignments were
+  retrieved. `MCAPSGovDenyPolicies` contains no deny affecting the planned GPv2
+  Storage or Form Recognizer account; the only relevant cognitive definition
+  denies provisioned Azure OpenAI capacity, while the imported model is
+  unchanged Global Standard. The classic-resource deny does not match these ARM
+  resources.
+- Azure Security Baseline evaluates unrestricted Storage and Azure AI network
+  access as `Audit`, not deny. The temporary bootstrap will therefore produce
+  an expected audit finding until the flag is closed. Public Blob access is
+  separately disabled, shared-key/local-auth controls are compliant, and both
+  private endpoints are present.
+- Storage name `agmem5df652docs` and Document Intelligence subdomain
+  `agmem5df652docint` remain available. Private-endpoint subnet `snet-pe` is
+  healthy at `10.42.2.0/24`, has 17 existing IP configurations, and has capacity
+  for the two additive endpoints.
+- Regression gates pass: 85 backend tests plus 5 subtests, 9 support Hosted
+  Agent tests, 6 frontend tests, the 183-module frontend production build,
+  Python compilation, shell syntax, synchronized report copies, and
+  `git diff --check`.
+- Independent five-axis review found no required correctness, architecture,
+  security, or performance issue in the bootstrap-access revision.
+
+This validation authorized the Phase 2 apply recorded in Section 20.15. Its
+local-ingestion bootstrap assumption is superseded by the Azure Policy finding
+and private-job plan below.
+
+### 20.15 Policy-constrained first-ingestion revision
+
+> **Status:** Deployed
+
+Phase 2 deployed successfully on `2026-07-23`, but post-deployment verification
+found that management-group policy `StorageAccountPublicNetworkModify` changes
+`Microsoft.Storage/storageAccounts/publicNetworkAccess` to `Disabled` on every
+write. Reapplying Terraform and explicitly requesting `Enabled` through Azure
+CLI both completed successfully but were modified back to `Disabled`. Therefore
+a local ingestion process using the current Azure CLI credential cannot reach
+the private artifact container.
+
+The user selected the compliant alternative: a VNet-integrated Azure Container
+Apps Job using managed identity and the existing private endpoints.
+
+#### 20.15.1 Scope and recipe
+
+- Modify the existing pure Terraform/AzAPI deployment; do not add a second IaC
+  path or run `azd init`.
+- Add a separate Python package and image under `setup/directive_ingest/`.
+  Keep `setup/knowledgebase/setup_search.py` and both support agents unchanged.
+- Add a dedicated `gpt-5-nano` `2025-08-07` Global Standard deployment at
+  capacity 10 for Azure AI Search knowledge-base query planning. Stable Search
+  API `2026-04-01` does not support `gpt-4o-mini` for this role; the existing
+  `gpt-5.6-sol` deployment remains the directive summary/agent model.
+- Bake the seven MVP PDFs and complete headerless `mandatory/mand.csv` fixture
+  into the first immutable image. The source-adapter boundary remains compatible
+  with a later Blob source.
+- Create only a manual-trigger Container Apps Job for the first run. Daily
+  scheduling is deferred until the first run and idempotent rerun pass.
+- Build the image through the existing ACR Tasks path, update only the job image,
+  start one execution, and wait for its terminal state and logs.
+
+#### 20.15.2 Job and identity
+
+- Add UAMI `id-agmem-ingestion-5df652` and job
+  `job-agmem-directive-ingest` in existing environment `cae-agmem-5df652`.
+- Use one replica, parallelism one, one required completion, retry limit one,
+  timeout 7,200 seconds, and Consumption allocation 1 vCPU/2 GiB.
+- Use `ManagedIdentityCredential(client_id=AZURE_CLIENT_ID)` in Azure. Do not use
+  `DefaultAzureCredential`, Azure CLI tokens, keys, SAS, connection strings, or
+  secrets in the hosted job.
+- Use the existing VNet integration, private DNS links, Blob/Document
+  Intelligence/Cosmos private endpoints, and ACR private endpoint. Search and
+  Foundry remain their existing public Entra-only endpoints.
+- Assign only:
+  - `AcrPull` on `agmem5df652acr`;
+  - `Storage Blob Data Contributor` on `directive-artifacts`;
+  - `Cognitive Services User` on `agmem5df652docint`;
+  - `Search Service Contributor` and `Search Index Data Contributor` on
+    `agmem5df652search`;
+  - Cosmos built-in Data Contributor scoped to `/dbs/directives`;
+  - `Cognitive Services OpenAI User` on `agmem5df652aif2`.
+- Keep the two previously deployed current-user bootstrap role assignments in
+  this phase to avoid an unrelated destructive plan. They are unused by the job
+  and can be removed in a separately confirmed cleanup.
+
+#### 20.15.3 Policy reconciliation
+
+- Remove the public-ingestion behavior from desired state. Storage and Document
+  Intelligence use `public_network_access_enabled=false` and default-deny ACLs;
+  all private endpoints remain.
+- Remove the obsolete `directive_initial_ingestion_public_access` input rather
+  than ignoring drift. The management-group policy and Terraform must agree on
+  private Storage.
+- Do not create a policy exemption, IPv4 rule, VPN, jump VM, or access-token
+  transfer workaround.
+
+#### 20.15.4 Ingestion contract
+
+1. Enumerate only `setup/directives/pdf/*.pdf`, hash each source, and treat
+   filename values as validation hints.
+2. Extract every PDF with Document Intelligence Layout `2024-11-30`, Markdown
+   output, and the job UAMI. Preserve HTML tables.
+3. Parse the first document-control table as authoritative metadata, validate
+   required fields, normalize canonical Markdown, and determine exactly one
+   current version for each stable directive ID.
+4. Build structure/table-aware chunks, ordered section shards, a manifest, exact
+   relation edges, relation-review records, and one generated summary per
+   version.
+5. Store content-hash-addressed artifacts under
+   `directives/{directive_id}/{directive_version_id}/{source_hash}/` in Blob.
+6. Upsert deterministic directive, version, relation, review, and ingestion
+   records to Cosmos `directives/catalog`, partitioned by `/directive_id`.
+7. Create/update Search index `directive-chunks-v1`, knowledge source
+   `directive-chunks-ks-v1`, and knowledge base `directive-kb-v1` through Entra
+   REST calls. Upload 3,072-dimensional `text-embedding-3-large` vectors with
+   deterministic chunk IDs and complete version/citation fields.
+8. Validate the complete headerless CSV contract
+   `user_upn,entra_object_id,directive_id,M`. Publish snapshot-qualified sparse
+   assignments to `directives/user_mandates` and atomically switch the global
+   active-snapshot pointer only after the full file succeeds.
+9. Publish a version only after artifacts, catalog staging, embeddings, and
+   Search upload succeed. A failed document is quarantined and cannot demote or
+   corrupt an already published version.
+10. Exit nonzero on quarantine, partial publication, mandate snapshot failure,
+    invalid current-version state, orphan chunks, invalid relations, or count
+    mismatch.
+
+#### 20.15.5 Expected first-run evidence
+
+- Seven PDFs extracted and seven directive-version records published.
+- Four stable directive IDs with exactly four current versions.
+- One accepted company-car parent/sub-directive relation and no cycle/depth
+  violation.
+- Five sparse mandatory assignments from two users and three directive IDs,
+  with one active snapshot.
+- Blob contains canonical Markdown, manifests, section shards, and summaries for
+  every version.
+- Search chunk count equals the manifest totals, every chunk resolves to a
+  catalog version, vector dimensions equal 3,072, and current-version filtering
+  returns only four versions.
+- Knowledge base `directive-kb-v1` uses deployment
+  `gpt-5-nano-directive-kb` with GA model name `gpt-5-nano`; a stable
+  `2026-04-01` create/read probe must succeed before document publication.
+- A second execution is idempotent: no duplicate Blob paths, Cosmos records,
+  mandate assignments, or Search documents.
+
+#### 20.15.6 Verification and deployment gates
+
+- Unit tests cover metadata parsing, current-version selection, chunk/table
+  boundaries, relations, mandate validation, deterministic IDs, quarantine, and
+  the seven checked-in Markdown fixtures.
+- `terraform fmt`, `terraform validate`, exact saved-plan review, policy review,
+  static RBAC review, Python compilation/tests, Docker build through ACR, and
+  existing backend/frontend/support-agent regressions must pass.
+- The Terraform plan may contain only the dedicated identity/job/roles/outputs
+  plus the additive `gpt-5-nano` planner deployment and private-network
+  reconciliation. It must contain no existing data, support-agent, model,
+  Search-service, frontend, or backend deletion or replacement.
+- After apply, verify all six ARM roles by exact role name and scope and verify
+  the exact Cosmos Data Contributor role at `/dbs/directives`; counts alone are
+  insufficient.
+- After the image update, run a separate non-publishing job execution with the
+  same image and UAMI. Starting the container proves ACR pull; the command must
+  prove Blob, both Cosmos containers, Search, Document Intelligence,
+  embeddings, `gpt-5.6-sol`, and `gpt-5-nano-directive-kb` data-plane access.
+  Run the ingestion execution only after this preflight succeeds.
+- Verify the support application remains ready and exposes only the original two
+  agents. `DIRECTIVE_AGENT_ENABLED` and `DIRECTIVE_AGENT_VISIBLE` stay false.
+
+#### 20.15.7 Rollback
+
+- Before first successful publication, rollback means disabling/stopping the job
+  and reverting its image; existing support behavior and data are unaffected.
+- Publication uses deterministic/versioned IDs and content-addressed artifacts.
+  On failure, retain diagnostics and the last complete published state; do not
+  delete or rewrite prior directive data automatically.
+- Do not remove the private endpoints, directive database/containers, artifact
+  account/container, adopted model, or current support resources as part of job
+  rollback.
+
+Official implementation references:
+
+- Container Apps Jobs:
+  `https://learn.microsoft.com/azure/container-apps/jobs`
+- Container Apps managed identities:
+  `https://learn.microsoft.com/azure/container-apps/managed-identity`
+- Search RBAC:
+  `https://learn.microsoft.com/azure/search/search-security-rbac`
+- Document Intelligence SDK:
+  `https://learn.microsoft.com/azure/ai-services/document-intelligence/how-to-guides/use-sdk-rest-api`
+- Blob Python/Entra access:
+  `https://learn.microsoft.com/azure/storage/blobs/storage-blob-python-get-started`
+
+#### 20.15.8 Deployment and live verification
+
+Deployed and verified on `2026-07-23`:
+
+- The saved Terraform plan applied exactly 10 creates, two in-place
+  private-network reconciliations, and zero destroys. Final refresh reports no
+  Terraform drift.
+- Planner deployment `gpt-5-nano-directive-kb` is Succeeded on model
+  `gpt-5-nano` `2025-08-07`, Global Standard capacity 10.
+- Live role verification for UAMI principal
+  `f98f333c-4a20-4092-938a-3e405c702c4b` confirms:
+  - `AcrPull` on `agmem5df652acr`;
+  - Storage Blob Data Contributor on
+    `agmem5df652docs/blobServices/default/containers/directive-artifacts`;
+  - Cognitive Services User on `agmem5df652docint`;
+  - Search Service Contributor and Search Index Data Contributor on
+    `agmem5df652search`;
+  - Cognitive Services OpenAI User on `agmem5df652aif2`;
+  - Cosmos built-in Data Contributor scoped exactly to
+    `agmem5df652cosmos/dbs/directives`.
+- The initial image exposed a missing async HTTP transport during preflight; no
+  publication occurred in that failed execution. Adding the explicit `aiohttp`
+  dependency resolved it.
+- Per-execution CLI command overrides were found to be ignored by the Container
+  Apps extension. The release path now persists each mode on the job and asserts
+  the actual execution template before waiting, preventing a mislabeled
+  preflight from publishing data.
+- First publication run `20260723T140241Z-0c88b920` completed seven changed
+  sources, 91 chunks, and active mandate snapshot
+  `mandates-a2769c0a0f84afda090ede178b4e8cbe2667762b5bd4cc13ce525533fa56f283`.
+- Final immutable image
+  `agmem5df652acr.azurecr.io/directive-ingestion:phase3-first-r5-20260723-1445`
+  has digest
+  `sha256:e589d5591946066daa41caffa759f7acc749f554038b670984c1bc9ae39a986f`.
+- Final preflight execution `job-agmem-directive-ingest-nyw8fvp` proved ACR,
+  Blob, both Cosmos containers, Search, Document Intelligence, embeddings,
+  summary-model, and planner-model access without publication.
+- Idempotency execution `job-agmem-directive-ingest-jyld7r0` skipped all seven
+  unchanged inputs and made no mandate change.
+- Read-only verification execution `job-agmem-directive-ingest-yuzejm3`
+  confirmed seven versions, four directive IDs, four current versions, one
+  canonical accepted relation, 91 published chunks, 56 current chunks, 119
+  required artifacts, 3,072 vector dimensions, five mandatory assignments,
+  two mandate users, and the expected Search source/base/planner.
+- The job is restored to `directive-ingest run-daily`, Storage and Document
+  Intelligence public access are Disabled, directive feature flags remain
+  false, and the existing application health endpoint returns `{"status":"ok"}`.
+- Application endpoint:
+  `https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io`
 
 ## 16. Simplified architecture release - 2026-07-13
 
@@ -2474,3 +3710,124 @@ unrelated `demo-swe-prj` agents were preserved. Post-cleanup verification shows
 `customer-support-maf-hosted` enabled on active version 7 with package
 `T_6bf1c88d-27eb-3e26-4b03-9d8308d3867f` unblocked. A direct Responses request
 for `ORD-003` completed successfully and returned `delivered`.
+
+## 19. Ranked simplification release - 2026-07-23
+
+**Scope:** Deploy the reviewed backend service, chat orchestration, settings,
+Cosmos lifecycle, and JWT refactors together with the frontend stream reducer,
+citation utilities, component-owned clock/focus behavior, and centralized
+Search release identifiers. Preserve application behavior, data, identities,
+agents, resource names, regions, networking, and RBAC.
+
+### 19.1 Execution checklist
+
+- [x] Implement every ranked simplification in the recommended order.
+- [x] Complete independent correctness, simplicity, architecture, security, and
+  performance review.
+- [x] Patch the direct frontend dependency advisory.
+- [x] All validation checks pass.
+  - [x] Terraform installation verified.
+  - [x] Azure CLI installation verified.
+  - [x] Azure authentication and target subscription verified.
+  - [x] Terraform initialized successfully.
+  - [x] Recursive Terraform format check passed.
+  - [x] Terraform syntax validation passed.
+  - [x] Saved Terraform plan reviewed.
+  - [x] Terraform state backend is accessible.
+  - [x] Applicable Azure Policy assignments reviewed.
+  - [x] No unresolved `{{ .Env.* }}` template variables exist.
+- [x] Apply the saved output-only Terraform plan.
+- [x] Build and deploy immutable backend and frontend images.
+- [x] Verify production health, readiness, authentication, both agent
+  capabilities, and final Terraform no-drift.
+
+### 19.2 Validation proof
+
+Validated at `2026-07-23T00:15:14+02:00` for subscription
+`ME-MngEnvMCAP372348-mimarusa-1`
+(`7bc68c68-f434-49ad-ab3e-b883ec39da86`), tenant
+`a7b1484c-f66a-496a-b1cf-35631a50396c`, resource group
+`rg-agent-memory-rag`, and existing location `eastus2`.
+
+- Terraform `1.13.3` and Azure CLI `2.80.0` are installed.
+- Azure CLI resolves the enabled target subscription as the current default.
+- `terraform init -input=false`, `terraform fmt -check -recursive`, and
+  `terraform validate` pass.
+- Terraform state is accessible with 68 tracked resources.
+- The saved plan contains no resource changes, replacements, or deletions. It
+  removes one obsolete output and adds six Search release outputs with their
+  existing deployed identifiers.
+- Saved plan:
+  `/Users/mimarusa/.copilot/session-state/b1242311-ffb6-4008-bbc8-118327688c5d/files/simplification.tfplan`.
+- The Azure Policy MCP command failed because its local
+  `Microsoft.Identity.Client` assembly could not be loaded. The equivalent
+  authenticated Azure CLI scope query succeeded and returned no applicable
+  assignments for the target resource group.
+- Static RBAC review confirms this release makes no role mutation. Existing
+  resource-scoped data-plane roles remain aligned with backend, frontend,
+  Search, Cosmos DB, Foundry, ACR, and telemetry operations.
+- No unresolved `{{ .Env.* }}` expressions exist in Terraform inputs.
+- Backend suite: 61 tests passed.
+- Frontend suite: 6 tests passed; TypeScript and Vite production build
+  succeeded.
+- Hosted MAF suite: 9 tests passed in an isolated environment.
+- `npm audit --audit-level=low` reports zero vulnerabilities after the
+  DOMPurify patch update.
+- Search setup imports without environment variables and constructs explicit
+  configuration successfully.
+- Updated release shell syntax and `git diff --check` pass.
+- Independent review approved the complete diff with no high-confidence
+  blocking findings.
+
+### 19.3 Deployment and rollback
+
+- Apply only the reviewed saved Terraform plan above.
+- Build backend and frontend images through the established ACR Tasks path.
+- Deploy new Container Apps revisions with immutable release tags.
+- Do not rebuild Hosted MAF or republish Search/Foundry assets because neither
+  runtime definition changed.
+- Preserve the currently healthy backend and frontend revisions as rollback
+  targets until post-deployment acceptance passes.
+
+### 19.4 Deployment results
+
+Verified at `2026-07-23T00:25:02+02:00`:
+
+- the saved Terraform plan applied successfully with `0` additions, `0`
+  resource changes, and `0` destroys; only the reviewed output state changed;
+- ACR build `ch20` produced backend image
+  `backend:ranked-simplification-20260723001514`, digest
+  `sha256:4ef06aa5d1adf06095e88d6e13e5c474d5d24c8cb06f3a81de253374f467ed75`;
+- ACR build `ch21` produced frontend image
+  `frontend:ranked-simplification-20260723001514`, digest
+  `sha256:35491559df137181899b32f88d5708f20fa16e9cc8c212ec06f01a3a9092b0ca`;
+- backend revision `ca-agmem-backend--0000037` and frontend revision
+  `ca-agmem-frontend--0000017` are healthy, latest-ready, and each receive
+  `100%` traffic;
+- production root, runtime configuration, liveness, and readiness return HTTP
+  `200`; readiness reports Cosmos history, profile, and memory, Foundry IQ,
+  Prompt Agent, Hosted MAF, and the Hosted tool gateway as healthy;
+- anonymous `/api/me`, `/api/agents`, and MCP initialization remain protected
+  with HTTP `401`, while authenticated `/api/me` succeeds;
+- an authenticated Prompt Agent turn returned the grounded 30-day return
+  policy;
+- an authenticated Hosted MAF turn called the order path and returned
+  `ORD-003` as delivered;
+- both temporary smoke-test conversations were deleted and subsequently
+  returned HTTP `404`;
+- live RBAC verification confirms backend access to ACR, Search, Foundry,
+  Application Insights, the Foundry project, and Cosmos DB; frontend ACR pull;
+  and Foundry project access to Search, ACR, and Log Analytics;
+- the Hosted MAF image/version and Search/Foundry assets were intentionally
+  unchanged;
+- rollback targets remain backend revision
+  `ca-agmem-backend--0000036` on `backend:mcp-agent-id-20260720-r3` and frontend
+  revision `ca-agmem-frontend--0000016` on
+  `frontend:composer-20260713210046`;
+- the final full-refresh Terraform plan reports no drift. Its output is stored
+  at
+  `/Users/mimarusa/.copilot/session-state/b1242311-ffb6-4008-bbc8-118327688c5d/files/post-simplification-terraform-plan.txt`.
+
+Production URL:
+
+`https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io`

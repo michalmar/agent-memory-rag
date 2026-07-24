@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
   # --- Core runtime (offline slice + deployed) ---
   "agent-memory-rag-contracts==0.1.0",
+  "directive-contracts==0.1.0",
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.30.0",
   "ag-ui-protocol>=0.1.19",     # AG-UI events + EventEncoder (SSE frames, see B4)
@@ -14,6 +15,7 @@ dependencies = [
   # --- Azure stores + LLM ---
   "aiohttp>=3.9.0",
   "azure-cosmos>=4.9.0",
+  "azure-storage-blob>=12.25.0",
   "azure-ai-projects==2.3.0",
   "azure-identity>=1.19.0",
   "azure-monitor-opentelemetry>=1.6.0",
@@ -25,6 +27,7 @@ dependencies = [
 
 [tool.uv.sources]
 agent-memory-rag-contracts = { path = "../agent_contracts", editable = true }
+directive-contracts = { path = "../directive_contracts", editable = true }
 
 [tool.setuptools.packages.find]
 include = ["agent_memory_backend*"]

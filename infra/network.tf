@@ -36,13 +36,14 @@ resource "azurerm_subnet" "pe" {
 # --------------------------------------------------------------- private DNS
 locals {
   private_dns_zones = {
-    cosmos   = "privatelink.documents.azure.com"
-    acr      = "privatelink.azurecr.io"
-    blob     = "privatelink.blob.core.windows.net"
-    monitor  = "privatelink.monitor.azure.com"
-    oms      = "privatelink.oms.opinsights.azure.com"
-    ods      = "privatelink.ods.opinsights.azure.com"
-    agentsvc = "privatelink.agentsvc.azure-automation.net"
+    cosmos    = "privatelink.documents.azure.com"
+    acr       = "privatelink.azurecr.io"
+    blob      = "privatelink.blob.core.windows.net"
+    cognitive = "privatelink.cognitiveservices.azure.com"
+    monitor   = "privatelink.monitor.azure.com"
+    oms       = "privatelink.oms.opinsights.azure.com"
+    ods       = "privatelink.ods.opinsights.azure.com"
+    agentsvc  = "privatelink.agentsvc.azure-automation.net"
   }
 }
 

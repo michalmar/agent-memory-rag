@@ -12,7 +12,7 @@ packages = ["agent_contracts"]
 package-dir = { agent_contracts = "." }
 
 [tool.setuptools.package-data]
-agent_contracts = ["customer_support.txt", "foundry_prompt.txt"]
+agent_contracts = ["customer_support.txt", "directive_rag.txt", "foundry_prompt.txt"]
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "directive-ingestion"
+version = "0.1.0"
+description = "Managed-identity directive ingestion and publication pipeline."
+requires-python = ">=3.11"
+dependencies = [
+  "aiohttp>=3.9,<4",
+  "azure-cosmos>=4.9,<5",
+  "azure-identity>=1.20,<2",
+  "azure-storage-blob>=12.24,<13",
+  "directive-contracts>=0.1.0",
+  "httpx>=0.27,<1",
+  "openai>=2.8,<3",
+  "pydantic>=2.8,<3",
+  "tiktoken>=0.8,<1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.3,<9", "pytest-asyncio>=0.24,<1"]
+
+[project.scripts]
+directive-ingest = "directive_ingestion.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/directive_ingestion"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.uv.sources]
+directive-contracts = { path = "../../directive_contracts" }

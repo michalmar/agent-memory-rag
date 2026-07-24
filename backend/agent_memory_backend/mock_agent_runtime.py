@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 
 from agent_contracts import (
     AgentType,
+    DIRECTIVE_RAG_PROMPT_VERSION,
     FOUNDRY_PROMPT_VERSION,
     NormalizedAgentEvent,
     PROMPT_VERSION,
@@ -28,9 +29,18 @@ _ORDER_RE = re.compile(r"ORD-\d+", re.IGNORECASE)
 
 
 class MockAgentRuntime:
-    def __init__(self, agent_type: AgentType, tool_executor: ToolExecutor) -> None:
+    def __init__(
+        self,
+        agent_type: AgentType,
+        tool_executor: ToolExecutor,
+        *,
+        release_id: str | None = None,
+        prompt_version: str | None = None,
+    ) -> None:
         self._agent_type = agent_type
         self._tool_executor = tool_executor
+        self._release_id = release_id
+        self._prompt_version = prompt_version
 
     async def initialize(self) -> None:
         return None
@@ -44,16 +54,26 @@ class MockAgentRuntime:
         authenticated_user_id: str,
         seed_messages: list[dict[str, str]] | None = None,
     ) -> RuntimeState:
+        settings = get_settings()
+        prompt_version = self._prompt_version
+        if prompt_version is None:
+            if self._agent_type is AgentType.FOUNDRY_PROMPT:
+                prompt_version = FOUNDRY_PROMPT_VERSION
+            elif self._agent_type is AgentType.DIRECTIVE_RAG:
+                prompt_version = DIRECTIVE_RAG_PROMPT_VERSION
+            else:
+                prompt_version = PROMPT_VERSION
+        release_id = self._release_id or (
+            settings.directive_agent_release_id
+            if self._agent_type is AgentType.DIRECTIVE_RAG
+            else settings.agent_release_id
+        )
         return RuntimeState(
             descriptor=RuntimeDescriptor(
                 agent_type=self._agent_type,
                 physical_agent_name=f"local-mock-{self._agent_type.value}",
-                release_id=get_settings().agent_release_id,
-                prompt_version=(
-                    FOUNDRY_PROMPT_VERSION
-                    if self._agent_type == AgentType.FOUNDRY_PROMPT
-                    else PROMPT_VERSION
-                ),
+                release_id=release_id,
+                prompt_version=prompt_version,
                 observed_agent_version="local",
             )
         )

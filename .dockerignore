@@ -1,10 +1,17 @@
 **
 !agent_contracts/
 !agent_contracts/**
+!directive_contracts/
+!directive_contracts/**
 !agents/
 !agents/**
 !backend/
 !backend/**
+!setup/
+!setup/directive_ingest/
+!setup/directive_ingest/**
+!setup/directives/
+!setup/directives/**
 
 **/.env
 **/.env.*

@@ -16,6 +16,8 @@ def _settings(*, cosmos: bool = False, search: bool = False):
         search_configured=search,
         foundry_prompt_enabled=False,
         foundry_hosted_enabled=False,
+        directive_agent_enabled=False,
+        directive_agent_visible=False,
         agent_gateway_audience="",
         hosted_agent_principal_ids=(),
         readiness_timeout_seconds=0.05,

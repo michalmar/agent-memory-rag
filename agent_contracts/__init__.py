@@ -4,6 +4,7 @@ from .models import (
     AgentType,
     Citation,
     CitationsEvent,
+    MandatoryStatus,
     NormalizedAgentEvent,
     RuntimeCompletedEvent,
     RuntimeDescriptor,
@@ -15,22 +16,37 @@ from .models import (
     ToolStartedEvent,
     TurnContext,
     UsageEvent,
+    WorkflowHeartbeatEvent,
+    WorkflowProgressEvent,
+    WorkflowStage,
+    WorkflowStatus,
 )
 from .orders import lookup_order_status
 from .prompts import (
+    DIRECTIVE_RAG_PROMPT_VERSION,
     FOUNDRY_PROMPT_VERSION,
     PROMPT_VERSION,
+    render_directive_rag_instructions,
     render_foundry_prompt_instructions,
     render_instructions,
 )
-from .tools import COMMON_TOOL_DEFINITIONS, ToolDefinition, tool_definition
+from .tools import (
+    COMMON_TOOL_DEFINITIONS,
+    DIRECTIVE_TOOL_DEFINITIONS,
+    ToolDefinition,
+    directive_tool_definition,
+    tool_definition,
+)
 
 __all__ = [
     "AgentType",
     "Citation",
     "CitationsEvent",
     "COMMON_TOOL_DEFINITIONS",
+    "DIRECTIVE_TOOL_DEFINITIONS",
+    "DIRECTIVE_RAG_PROMPT_VERSION",
     "FOUNDRY_PROMPT_VERSION",
+    "MandatoryStatus",
     "NormalizedAgentEvent",
     "PROMPT_VERSION",
     "RuntimeCompletedEvent",
@@ -44,8 +60,14 @@ __all__ = [
     "ToolStartedEvent",
     "TurnContext",
     "UsageEvent",
+    "WorkflowHeartbeatEvent",
+    "WorkflowProgressEvent",
+    "WorkflowStage",
+    "WorkflowStatus",
     "lookup_order_status",
+    "render_directive_rag_instructions",
     "render_foundry_prompt_instructions",
     "render_instructions",
+    "directive_tool_definition",
     "tool_definition",
 ]

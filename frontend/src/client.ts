@@ -31,7 +31,41 @@ export interface ChatMessage {
   citations?: CitationSource[];
 }
 
-export type AgentType = 'foundry-prompt' | 'agent-framework';
+export type AgentType =
+  | 'foundry-prompt'
+  | 'agent-framework'
+  | 'directive-rag';
+
+export type MandatoryStatus =
+  | 'mandatory'
+  | 'non_mandatory'
+  | 'unknown';
+
+export type WorkflowStage =
+  | 'resolving'
+  | 'searching'
+  | 'loading_content'
+  | 'following_references'
+  | 'comparing_versions'
+  | 'checking_mandatory_status'
+  | 'verifying_coverage'
+  | 'preparing_answer';
+
+export type WorkflowStatus =
+  | 'started'
+  | 'in_progress'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface WorkflowProgress {
+  stage: WorkflowStage;
+  status: WorkflowStatus;
+  message: string;
+  completed_count?: number;
+  total_count?: number;
+  heartbeat?: boolean;
+}
 
 export interface TokenUsage {
   input_tokens?: number;
@@ -44,6 +78,19 @@ export interface CitationSource {
   source_name: string;
   search_idx?: number | null;
   url?: string | null;
+  directive_id?: string;
+  directive_version_id?: string;
+  version_label?: string;
+  section_id?: string;
+  section_number?: string;
+  section_title?: string;
+  page_from?: number;
+  page_to?: number;
+  effective_from?: string;
+  mandatory_status?: MandatoryStatus;
+  mandate_snapshot_id?: string;
+  retrieval_strategy?: string;
+  coverage?: Record<string, unknown>;
 }
 
 export interface RuntimeMetadata {
@@ -208,20 +255,29 @@ export class AGUIClient {
     if (id && handlers.onConversationId) handlers.onConversationId(id);
 
     const reader = res.body.getReader();
+    const cancelReader = () => {
+      void reader.cancel();
+    };
+    signal?.addEventListener('abort', cancelReader, { once: true });
     const decoder = new TextDecoder();
     let buffer = '';
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buffer.indexOf('\n\n')) !== -1) {
-        const frame = buffer.slice(0, idx);
-        buffer = buffer.slice(idx + 2);
-        this.dispatchFrame(frame, handlers);
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          const frame = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          this.dispatchFrame(frame, handlers);
+        }
       }
+      if (buffer.trim()) this.dispatchFrame(buffer, handlers);
+    } finally {
+      signal?.removeEventListener('abort', cancelReader);
+      reader.releaseLock();
     }
-    if (buffer.trim()) this.dispatchFrame(buffer, handlers);
   }
 
   private dispatchFrame(frame: string, handlers: ChatHandlers): void {

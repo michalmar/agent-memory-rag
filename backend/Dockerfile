@@ -7,9 +7,10 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /build
 
 COPY agent_contracts /build/agent_contracts
+COPY directive_contracts /build/directive_contracts
 COPY backend /build/backend
 RUN pip install --upgrade pip \
-    && pip install /build/agent_contracts /build/backend \
+    && pip install /build/agent_contracts /build/directive_contracts /build/backend \
     && rm -rf /build
 
 WORKDIR /app

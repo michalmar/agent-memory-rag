@@ -1,7 +1,18 @@
 // Map tool-result JSON to the internal A2UI tool-card subset.
 import type { A2UIMessage, ComponentDef, DataEntry } from './a2ui/types.js';
-import type { CitationSource } from './client.js';
+import { hasCitations } from './citations.js';
 import { SHIPPING_STATUS_TEMPLATE } from './templates/shipping-status.js';
+
+const DIRECTIVE_TOOLS = new Set([
+  'resolve_directive',
+  'search_directives',
+  'get_directive_manifest',
+  'get_directive_content',
+  'search_within_directive',
+  'get_related_directives',
+  'get_precomputed_summary',
+  'get_user_directive_mandates',
+]);
 
 function flatten(model: Record<string, unknown>): DataEntry[] {
   const entries: DataEntry[] = [];
@@ -29,45 +40,6 @@ function inflateSurfaceTemplate(
     { dataModelUpdate: { surfaceId, contents: flatten(dataModel) } },
     { beginRendering: { surfaceId, root: 'root' } },
   ];
-}
-
-function citationValues(parsed: unknown): unknown[] {
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
-  const envelope = parsed as Record<string, unknown>;
-  const data =
-    envelope.data && typeof envelope.data === 'object' && !Array.isArray(envelope.data)
-      ? (envelope.data as Record<string, unknown>)
-      : envelope;
-  const values = Array.isArray(envelope.citations) ? envelope.citations : data.citations;
-  return Array.isArray(values) ? values : [];
-}
-
-export function parseCitations(value: unknown): CitationSource[] {
-  const values = Array.isArray(value) ? value : citationValues(value);
-  return values.flatMap((value) => {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
-    const citation = value as Record<string, unknown>;
-    if (typeof citation.ref_id !== 'string' || typeof citation.source_name !== 'string') {
-      return [];
-    }
-    return [
-      {
-        ref_id: citation.ref_id,
-        source_name: citation.source_name,
-        search_idx:
-          typeof citation.search_idx === 'number' ? citation.search_idx : undefined,
-        url: typeof citation.url === 'string' ? citation.url : undefined,
-      },
-    ];
-  });
-}
-
-export function extractToolCitations(content: string): CitationSource[] {
-  try {
-    return parseCitations(JSON.parse(content));
-  } catch {
-    return [];
-  }
 }
 
 function genericDump(toolName: string, parsed: unknown, surfaceId: string): A2UIMessage[] {
@@ -118,7 +90,8 @@ export function convertToolResult(
     );
   }
 
-  if (toolName === 'knowledge_base_retrieve' || citationValues(parsed).length > 0) return [];
+  if (toolName === 'knowledge_base_retrieve' || hasCitations(parsed)) return [];
+  if (DIRECTIVE_TOOLS.has(toolName)) return [];
 
   return genericDump(toolName, parsed, surfaceId);
 }

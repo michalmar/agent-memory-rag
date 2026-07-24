@@ -1,0 +1,13 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "directive-contracts"
+version = "0.1.0"
+description = "Shared contracts for directive ingestion and retrieval."
+requires-python = ">=3.11"
+dependencies = ["pydantic>=2.8,<3"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["directive_contracts"]

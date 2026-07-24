@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from .config import get_settings
+from .cosmos_container import CosmosContainerLifecycle
 
 logger = logging.getLogger("profile")
 
@@ -62,42 +63,23 @@ def public_profile(document: dict) -> dict:
     }
 
 
-class UserProfileMemoryStore:
+class UserProfileMemoryStore(CosmosContainerLifecycle):
     def __init__(self) -> None:
-        self._client = None
-        self._container = None
+        super().__init__()
 
     async def initialize(self) -> None:
         s = get_settings()
         if not s.cosmos_configured:
             logger.warning("Cosmos not configured; profile store disabled")
             return
-        from azure.cosmos.aio import CosmosClient
-
-        if s.cosmos_key:
-            self._client = CosmosClient(s.cosmos_endpoint, credential=s.cosmos_key)
-        else:
-            from .azure_clients import get_credential
-
-            self._client = CosmosClient(s.cosmos_endpoint, credential=get_credential())
-        db = self._client.get_database_client(s.cosmos_database)
-        self._container = db.get_container_client(s.cosmos_profiles_container)
+        await self._initialize_container(s, s.cosmos_profiles_container)
         logger.info("Profile store initialized (%s)", s.cosmos_profiles_container)
 
-    async def close(self) -> None:
-        if self._client is not None:
-            await self._client.close()
-            self._client = None
-            self._container = None
-
-    @property
-    def enabled(self) -> bool:
-        return self._container is not None
-
     async def health_check(self) -> None:
-        if self._container is None:
-            raise RuntimeError("Cosmos profile container is not initialized")
-        await self._container.read()
+        container = self._require_initialized_container(
+            "Cosmos profile container is not initialized"
+        )
+        await container.read()
 
     async def get_profile(self, user_id: str) -> dict | None:
         if not self.enabled:

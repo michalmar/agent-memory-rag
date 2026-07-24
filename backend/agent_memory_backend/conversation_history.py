@@ -7,15 +7,23 @@ from datetime import datetime, timezone
 from collections.abc import Sequence
 from typing import Any
 
-from agent_contracts import AgentType, RuntimeDescriptor, RuntimeState
+from agent_contracts import (
+    AgentType,
+    MandatoryStatus,
+    RuntimeDescriptor,
+    RuntimeState,
+)
 from .config import get_settings
+from .cosmos_container import CosmosContainerLifecycle
 
 logger = logging.getLogger("history")
 
 _AGENT_LABELS = {
     AgentType.FOUNDRY_PROMPT.value: "Prompt Agent",
     AgentType.AGENT_FRAMEWORK.value: "Hosted Agent Framework",
+    AgentType.DIRECTIVE_RAG.value: "Directive Assistant",
 }
+_MANDATORY_STATUS_VALUES = frozenset(status.value for status in MandatoryStatus)
 
 
 def _now() -> str:
@@ -98,6 +106,36 @@ def _public_citation(value: Any) -> dict[str, Any] | None:
     url = value.get("url")
     if isinstance(url, str) and url:
         citation["url"] = url
+    for key in (
+        "directive_id",
+        "directive_version_id",
+        "version_label",
+        "section_id",
+        "section_number",
+        "section_title",
+        "effective_from",
+        "mandate_snapshot_id",
+        "retrieval_strategy",
+    ):
+        field_value = value.get(key)
+        if isinstance(field_value, str) and field_value:
+            citation[key] = field_value
+    mandatory_status = value.get("mandatory_status")
+    if mandatory_status in _MANDATORY_STATUS_VALUES:
+        citation["mandatory_status"] = mandatory_status
+    elif "directive_id" in citation:
+        citation["mandatory_status"] = MandatoryStatus.UNKNOWN.value
+    for key in ("page_from", "page_to"):
+        field_value = value.get(key)
+        if (
+            isinstance(field_value, int)
+            and not isinstance(field_value, bool)
+            and field_value >= 0
+        ):
+            citation[key] = field_value
+    coverage = value.get("coverage")
+    if isinstance(coverage, dict):
+        citation["coverage"] = coverage
     return citation
 
 
@@ -163,50 +201,28 @@ def public_conversation_detail(document: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-class ConversationHistoryStore:
+class ConversationHistoryStore(CosmosContainerLifecycle):
     def __init__(self) -> None:
-        self._client = None
-        self._container = None
+        super().__init__()
 
     async def initialize(self) -> None:
         settings = get_settings()
         if not settings.cosmos_configured:
             logger.warning("Cosmos not configured; history store disabled")
             return
-        from azure.cosmos.aio import CosmosClient
-
-        if settings.cosmos_key:
-            self._client = CosmosClient(
-                settings.cosmos_endpoint, credential=settings.cosmos_key
-            )
-        else:
-            from .azure_clients import get_credential
-
-            self._client = CosmosClient(
-                settings.cosmos_endpoint, credential=get_credential()
-            )
-        database = self._client.get_database_client(settings.cosmos_database)
-        self._container = database.get_container_client(
-            settings.cosmos_history_container
+        await self._initialize_container(
+            settings,
+            settings.cosmos_history_container,
         )
         logger.info(
             "History store initialized (%s)", settings.cosmos_history_container
         )
 
-    async def close(self) -> None:
-        if self._client is not None:
-            await self._client.close()
-            self._client = None
-            self._container = None
-
-    @property
-    def enabled(self) -> bool:
-        return self._container is not None
-
     async def health_check(self) -> None:
-        if self._container is None:
-            raise RuntimeError("Cosmos history container is not initialized")
-        await self._container.read()
+        container = self._require_initialized_container(
+            "Cosmos history container is not initialized"
+        )
+        await container.read()
 
     async def get_conversation(
         self, conversation_id: str, user_id: str

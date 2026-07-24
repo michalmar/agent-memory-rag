@@ -28,7 +28,7 @@ class TurnAccumulator:
     assistant_usage: dict[str, int] | None = None
     assistant_tools: list[str] = field(default_factory=list)
     assistant_citations: list[dict[str, Any]] = field(default_factory=list)
-    _citation_positions: dict[tuple[str, str], int] = field(
+    _citation_positions: dict[tuple[Any, ...], int] = field(
         default_factory=dict, init=False
     )
 
@@ -72,24 +72,34 @@ class TurnAccumulator:
 
     def _add_citations(self, citations: tuple[Citation, ...]) -> None:
         for citation in citations:
-            key = (citation.ref_id, citation.source_name)
+            key = _citation_key(citation)
+            payload = citation.to_dict()
             existing_index = self._citation_positions.get(key)
             if existing_index is not None:
                 existing = self.assistant_citations[existing_index]
-                if not existing.get("url") and citation.url:
-                    existing["url"] = citation.url
-                if (
-                    existing.get("search_idx") is None
-                    and citation.search_idx is not None
-                ):
-                    existing["search_idx"] = citation.search_idx
+                for name, value in payload.items():
+                    if (
+                        name == "mandatory_status"
+                        and existing.get(name) == "unknown"
+                        and value in {"mandatory", "non_mandatory"}
+                    ):
+                        existing[name] = value
+                        continue
+                    if existing.get(name) is None and value is not None:
+                        existing[name] = value
                 continue
             self._citation_positions[key] = len(self.assistant_citations)
-            self.assistant_citations.append(
-                {
-                    "ref_id": citation.ref_id,
-                    "source_name": citation.source_name,
-                    "search_idx": citation.search_idx,
-                    "url": citation.url,
-                }
-            )
+            self.assistant_citations.append(payload)
+
+
+def _citation_key(citation: Citation) -> tuple[Any, ...]:
+    if citation.directive_id:
+        return (
+            citation.ref_id,
+            citation.source_name,
+            citation.directive_version_id,
+            citation.section_id,
+            citation.page_from,
+            citation.page_to,
+        )
+    return (citation.ref_id, citation.source_name)

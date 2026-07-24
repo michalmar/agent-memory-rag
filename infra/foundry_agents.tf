@@ -3,10 +3,19 @@
 # session state remains compatible with tenant policy that disables Storage keys.
 
 locals {
+  search_assets = {
+    knowledge_base          = "customer-support-kb"
+    orders_index            = "orders"
+    policy_index            = "return-policy"
+    orders_knowledge_source = "orders-ks"
+    policy_knowledge_source = "return-policy-ks"
+    knowledge_api_version   = "2026-05-01-preview"
+  }
+
   foundry_agents_project_endpoint    = "https://${local.names.foundry_agents}.services.ai.azure.com/api/projects/${local.names.foundry_project}"
   foundry_agents_cognitive_endpoint  = "https://${local.names.foundry_agents}.cognitiveservices.azure.com/"
   foundry_agents_openai_resource_uri = "https://${local.names.foundry_agents}.openai.azure.com"
-  foundry_iq_mcp_endpoint            = "https://${azurerm_search_service.main.name}.search.windows.net/knowledgebases/customer-support-kb/mcp?api-version=2026-05-01-preview"
+  foundry_iq_mcp_endpoint            = "https://${azurerm_search_service.main.name}.search.windows.net/knowledgebases/${local.search_assets.knowledge_base}/mcp?api-version=${local.search_assets.knowledge_api_version}"
 }
 
 resource "azapi_resource" "foundry_agents" {

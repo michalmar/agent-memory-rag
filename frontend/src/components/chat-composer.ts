@@ -12,6 +12,7 @@ export interface ChatComposerActions {
   updateInput: (value: string) => void;
   chooseAgent: (agentType: AgentType) => void;
   send: () => void;
+  stop: () => void;
 }
 
 @customElement('chat-composer')
@@ -65,7 +66,9 @@ export class ChatComposer extends LightDomElement {
               rows="3"
               aria-label="Message Memory Thread"
               aria-describedby="composer-shortcut"
-              placeholder="Ask a support question…"
+              placeholder=${this.agentType === 'directive-rag'
+                ? 'Ask about a company directive…'
+                : 'Ask a support question…'}
               .value=${this.input}
               @input=${this.onInput}
               @keydown=${this.onKeydown}
@@ -122,14 +125,17 @@ export class ChatComposer extends LightDomElement {
               </div>
 
               <button
-                class="send-button"
+                class="send-button ${this.busy ? 'stop-button' : ''}"
                 type="button"
-                aria-label="Send message"
-                title="Send"
-                ?disabled=${this.busy || !this.input.trim() || this.agentOptions.length === 0}
-                @click=${this.actions.send}
+                aria-label=${this.busy ? 'Stop response' : 'Send message'}
+                title=${this.busy ? 'Stop' : 'Send'}
+                ?disabled=${!this.busy
+                  && (!this.input.trim() || this.agentOptions.length === 0)}
+                @click=${this.busy ? this.actions.stop : this.actions.send}
               >
-                <span class="material-symbols-outlined">arrow_upward</span>
+                <span class="material-symbols-outlined">
+                  ${this.busy ? 'stop' : 'arrow_upward'}
+                </span>
               </button>
             </div>
             <span id="composer-shortcut" class="sr-only">

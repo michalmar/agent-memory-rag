@@ -16,6 +16,7 @@ from azure.cosmos.exceptions import (
 )
 
 from .config import get_settings
+from .cosmos_container import CosmosContainerLifecycle
 from .telemetry import span
 
 logger = logging.getLogger("memory")
@@ -88,10 +89,9 @@ def _unavailable(exc: Exception) -> MemoryStoreUnavailable:
     return MemoryStoreUnavailable("Cosmos semantic memory is unavailable")
 
 
-class ConversationMemoryStore:
+class ConversationMemoryStore(CosmosContainerLifecycle):
     def __init__(self) -> None:
-        self._client: Any = None
-        self._container: Any = None
+        super().__init__()
 
     async def initialize(self) -> None:
         settings = get_settings()
@@ -99,36 +99,14 @@ class ConversationMemoryStore:
             logger.warning("Cosmos not configured; semantic memory store disabled")
             return
 
-        from azure.cosmos.aio import CosmosClient
-
-        if settings.cosmos_key:
-            self._client = CosmosClient(
-                settings.cosmos_endpoint, credential=settings.cosmos_key
-            )
-        else:
-            from .azure_clients import get_credential
-
-            self._client = CosmosClient(
-                settings.cosmos_endpoint, credential=get_credential()
-            )
-        database = self._client.get_database_client(settings.cosmos_database)
-        self._container = database.get_container_client(
-            settings.cosmos_memory_container
+        await self._initialize_container(
+            settings,
+            settings.cosmos_memory_container,
         )
         logger.info(
             "Semantic memory store initialized (%s)",
             settings.cosmos_memory_container,
         )
-
-    async def close(self) -> None:
-        if self._client is not None:
-            await self._client.close()
-            self._client = None
-            self._container = None
-
-    @property
-    def enabled(self) -> bool:
-        return self._container is not None
 
     def _require_container(self) -> Any:
         if self._container is None:

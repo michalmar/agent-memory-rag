@@ -44,7 +44,7 @@ echo "==> Building frontend image (server-side ACR task)"
 az acr build -r "$ACR_NAME" -t "frontend:$TAG" -f "$REPO_ROOT/frontend/Dockerfile" "$REPO_ROOT/frontend"
 
 echo "==> Building Hosted MAF image (server-side ACR task)"
-az acr build -r "$ACR_NAME" -t "$HOSTED_AGENT_NAME:$AGENT_RELEASE_ID" -f "$REPO_ROOT/agents/customer-support-maf/src/customer-support-maf/Dockerfile" "$REPO_ROOT"
+"$SCRIPT_DIR/build_hosted_agent_image.sh" --agent support --tag "$AGENT_RELEASE_ID"
 
 echo "==> Rolling backend Container App -> $BACKEND_IMG"
 az containerapp update -n "$BACKEND_APP" -g "$RG" --image "$BACKEND_IMG" -o none

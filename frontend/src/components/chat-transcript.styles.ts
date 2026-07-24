@@ -299,6 +299,25 @@ export const chatTranscriptStyles = css`
     text-decoration: none;
   }
 
+  .message-source-text {
+    display: inline-flex;
+    min-width: 0;
+    max-width: 280px;
+    flex-direction: column;
+  }
+
+  .message-source-name,
+  .message-source-details {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .message-source-details {
+    color: var(--fg-muted);
+    font-size: 0.62rem;
+  }
+
   a.message-source {
     text-decoration: underline;
     text-decoration-color: var(--border-strong);
@@ -315,11 +334,30 @@ export const chatTranscriptStyles = css`
     font-size: 0.82rem;
   }
 
-  .message-source > span:last-child {
-    max-width: 240px;
-    overflow: hidden;
-    text-overflow: ellipsis;
+  .mandate-badge {
+    flex: 0 0 auto;
+    padding: 1px 5px;
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    font-size: 0.58rem;
+    font-weight: 600;
     white-space: nowrap;
+  }
+
+  .mandate-mandatory {
+    color: var(--accent);
+    border-color: var(--accent-border);
+    background: var(--accent-ring);
+  }
+
+  .mandate-non_mandatory {
+    color: var(--fg-muted);
+    background: var(--surface-muted);
+  }
+
+  .mandate-unknown {
+    color: var(--warning, var(--fg-muted));
+    border-style: dashed;
   }
 
   .message-footer {

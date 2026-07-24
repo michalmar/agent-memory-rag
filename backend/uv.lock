@@ -43,6 +43,8 @@ dependencies = [
     { name = "azure-cosmos" },
     { name = "azure-identity" },
     { name = "azure-monitor-opentelemetry" },
+    { name = "azure-storage-blob" },
+    { name = "directive-contracts" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "mcp" },
@@ -62,6 +64,8 @@ requires-dist = [
     { name = "azure-cosmos", specifier = ">=4.9.0" },
     { name = "azure-identity", specifier = ">=1.19.0" },
     { name = "azure-monitor-opentelemetry", specifier = ">=1.6.0" },
+    { name = "azure-storage-blob", specifier = ">=12.25.0" },
+    { name = "directive-contracts", editable = "../directive_contracts" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "mcp", specifier = "==1.28.1" },
@@ -646,6 +650,17 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ab/f8/614dc7e051418cfe53d55173c1e24c6b0085e89996fe90508c2fdf769aef/cryptography-49.0.0-pp311-pypy311_pp73-manylinux_2_34_x86_64.whl", hash = "sha256:084ef1af862eb07ec46d25f68689f2102a9fc0e05ce7b80f14f5fe51e4eef0f6", size = 4715449, upload-time = "2026-06-12T20:02:05.469Z" },
     { url = "https://files.pythonhosted.org/packages/aa/50/a9caea39ad19c431c1a3f8a31114df65b260cdfe67786b6c7e7c040c4c44/cryptography-49.0.0-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:be9fcb48a55f023493482827d4f459bd263cc20efde64f204b97c123201850c6", size = 3783731, upload-time = "2026-06-12T20:02:43.319Z" },
 ]
+
+[[package]]
+name = "directive-contracts"
+version = "0.1.0"
+source = { editable = "../directive_contracts" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.8,<3" }]
 
 [[package]]
 name = "distro"

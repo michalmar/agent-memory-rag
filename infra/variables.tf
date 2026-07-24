@@ -137,6 +137,34 @@ variable "hosted_agent_principal_ids" {
   }
 }
 
+variable "support_hosted_agent_principal_ids" {
+  type        = set(string)
+  default     = []
+  description = "Support Hosted Agent principals. Empty preserves the legacy hosted_agent_principal_ids fallback."
+
+  validation {
+    condition = alltrue([
+      for principal_id in var.support_hosted_agent_principal_ids :
+      can(regex("^[0-9a-fA-F-]{36}$", principal_id))
+    ])
+    error_message = "Every support Hosted Agent principal ID must be a GUID."
+  }
+}
+
+variable "directive_hosted_agent_principal_ids" {
+  type        = set(string)
+  default     = []
+  description = "Directive Hosted Agent principals allowed to invoke only directive tools."
+
+  validation {
+    condition = alltrue([
+      for principal_id in var.directive_hosted_agent_principal_ids :
+      can(regex("^[0-9a-fA-F-]{36}$", principal_id))
+    ])
+    error_message = "Every directive Hosted Agent principal ID must be a GUID."
+  }
+}
+
 variable "foundry_iq_connection_name" {
   type    = string
   default = "customer-support-kb-mcp"
@@ -145,4 +173,141 @@ variable "foundry_iq_connection_name" {
 variable "foundry_application_tools_connection_name" {
   type    = string
   default = "customer-support-tools-mcp"
+}
+
+variable "directive_model_name" {
+  type        = string
+  default     = "gpt-5.6-sol"
+  description = "Existing GPT deployment adopted for the directive Hosted Agent."
+}
+
+variable "directive_model_version" {
+  type        = string
+  default     = "2026-07-09"
+  description = "Exact model version of the existing directive deployment."
+}
+
+variable "directive_model_capacity" {
+  type        = number
+  default     = 250
+  description = "Existing Global Standard capacity, in thousands of tokens per minute."
+
+  validation {
+    condition     = var.directive_model_capacity > 0
+    error_message = "directive_model_capacity must be greater than zero."
+  }
+}
+
+variable "directive_knowledge_model_deployment" {
+  type        = string
+  default     = "gpt-5-nano-directive-kb"
+  description = "Dedicated Azure AI Search knowledge-base planner deployment."
+}
+
+variable "directive_knowledge_model_name" {
+  type        = string
+  default     = "gpt-5-nano"
+  description = "GA-supported Azure AI Search knowledge-base planner model."
+}
+
+variable "directive_knowledge_model_version" {
+  type        = string
+  default     = "2025-08-07"
+  description = "Exact planner model version used by the stable Search API."
+}
+
+variable "directive_knowledge_model_capacity" {
+  type        = number
+  default     = 10
+  description = "Global Standard planner capacity, in thousands of tokens per minute."
+
+  validation {
+    condition     = var.directive_knowledge_model_capacity > 0
+    error_message = "directive_knowledge_model_capacity must be greater than zero."
+  }
+}
+
+variable "directive_agent_enabled" {
+  type        = bool
+  default     = false
+  description = "Instantiate the directive Hosted Agent runtime. Keep false through the Phase 2 data-infrastructure release."
+}
+
+variable "directive_agent_visible" {
+  type        = bool
+  default     = false
+  description = "Expose the directive agent from /agents. Keep false until the final rollout gate."
+}
+
+variable "directive_foundry_agent_name" {
+  type    = string
+  default = "directive-rag-maf-hosted"
+}
+
+variable "directive_agent_release_id" {
+  type    = string
+  default = "directive-rag-20260723-r2"
+}
+
+variable "directive_search_knowledge_base_name" {
+  type    = string
+  default = "directive-kb-v1"
+}
+
+variable "directive_search_knowledge_source_name" {
+  type    = string
+  default = "directive-chunks-ks-v1"
+}
+
+variable "directive_search_index_name" {
+  type    = string
+  default = "directive-chunks-v1"
+}
+
+variable "directive_cosmos_database_name" {
+  type    = string
+  default = "directives"
+}
+
+variable "directive_catalog_container_name" {
+  type    = string
+  default = "catalog"
+}
+
+variable "directive_mandates_container_name" {
+  type    = string
+  default = "user_mandates"
+}
+
+variable "directive_artifacts_container_name" {
+  type    = string
+  default = "directive-artifacts"
+}
+
+variable "directive_storage_replication_type" {
+  type        = string
+  default     = "LRS"
+  description = "Artifact storage redundancy. LRS is the MVP default; use ZRS for a production regional-HA deployment."
+
+  validation {
+    condition = contains(
+      ["LRS", "ZRS", "GRS", "GZRS", "RAGRS", "RAGZRS"],
+      var.directive_storage_replication_type,
+    )
+    error_message = "directive_storage_replication_type must be a supported Standard storage replication type."
+  }
+}
+
+variable "directive_artifact_retention_days" {
+  type        = number
+  default     = 30
+  description = "Soft-delete retention for directive blobs and containers."
+
+  validation {
+    condition = (
+      var.directive_artifact_retention_days >= 1 &&
+      var.directive_artifact_retention_days <= 365
+    )
+    error_message = "directive_artifact_retention_days must be between 1 and 365."
+  }
 }

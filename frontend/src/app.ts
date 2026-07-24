@@ -3,20 +3,23 @@
 import { LitElement, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import { A2UIProcessor } from './a2ui/processor.js';
 import type { ChatTurn, ResourceStatus } from './chat-models.js';
 import {
+  createChatEventState,
+  reduceChatEvent,
+} from './chat-event-reducer.js';
+import {
+  findCitationByIdentity,
+  replaceCitationMarkers,
+} from './citations.js';
+import {
   AGUIClient,
-  type AGUIEvent,
   type AgentOption,
   type AgentType,
-  type CitationSource,
   type ConversationSummary,
   type MemoryRow,
   type ProfileDoc,
-  type TokenUsage,
 } from './client.js';
-import { convertToolResult, extractToolCitations, parseCitations } from './converters.js';
 import {
   AUTH_REQUIRED_EVENT,
   type AuthSession,
@@ -32,7 +35,7 @@ import './components/chat-composer.js';
 import './components/chat-transcript.js';
 import './components/conversation-sidebar.js';
 import './components/memory-rail.js';
-import { ProfileDrawer } from './components/profile-drawer.js';
+import './components/profile-drawer.js';
 import { uiLogger } from './ui-logger.js';
 
 type AuthStatus = 'checking' | 'signed-out' | 'signing-in' | 'signed-in' | 'error';
@@ -73,15 +76,11 @@ export class NativeApp extends LitElement {
   @state() private profile: ProfileDoc | null = null;
   @state() private profileDraft = '';
   @state() private toast: string | null = null;
-  @state() private relativeClock = Date.now();
 
   private client = new AGUIClient();
-  private processor = new A2UIProcessor();
   private conversationId: string | null = null;
-  private toolNames = new Map<string, string>();
   private surfaceSeq = 0;
   private toastTimer?: number;
-  private relativeClockTimer?: number;
   private profileTrigger?: HTMLElement;
   private authGeneration = 0;
   private identityGeneration = 0;
@@ -119,6 +118,7 @@ export class NativeApp extends LitElement {
     updateInput: (value: string) => (this.input = value),
     chooseAgent: (agentType: AgentType) => this.chooseAgent(agentType),
     send: () => void this.send(),
+    stop: () => this.stopActiveChat(),
   };
   private transcriptActions = {
     copy: (turn: ChatTurn) => void this.copyTurn(turn),
@@ -157,7 +157,6 @@ export class NativeApp extends LitElement {
     THREAD_RAIL_DESKTOP.addEventListener('change', this.onThreadRailBreakpointChange);
     MEMORY_RAIL_DESKTOP.addEventListener('change', this.onMemoryRailBreakpointChange);
     window.addEventListener(AUTH_REQUIRED_EVENT, this.onAuthRequired);
-    this.scheduleRelativeClock();
     this.applyTheme();
     if (getConfig().authMode === 'entra') {
       void this.initializeAuthentication();
@@ -174,7 +173,6 @@ export class NativeApp extends LitElement {
     ++this.authGeneration;
     this.chatAbort?.abort();
     if (this.toastTimer) clearTimeout(this.toastTimer);
-    if (this.relativeClockTimer) clearTimeout(this.relativeClockTimer);
   }
 
   private applyTheme(): void {
@@ -324,21 +322,6 @@ export class NativeApp extends LitElement {
     }
   }
 
-  private scheduleRelativeClock(): void {
-    if (!this.isConnected) return;
-    if (this.relativeClockTimer) clearTimeout(this.relativeClockTimer);
-    const now = Date.now();
-    const hasRecentTurn = this.turns.some((turn) => {
-      if (!turn.createdAt) return false;
-      const timestamp = Date.parse(turn.createdAt);
-      return Number.isFinite(timestamp) && now - timestamp < 60_000;
-    });
-    this.relativeClockTimer = window.setTimeout(() => {
-      this.relativeClock = Date.now();
-      this.scheduleRelativeClock();
-    }, hasRecentTurn ? 1000 : 60_000);
-  }
-
   private nextTurnId(): string {
     this.turnSequence += 1;
     return `turn-${this.turnSequence}`;
@@ -350,16 +333,10 @@ export class NativeApp extends LitElement {
       return;
     }
     try {
-      const text = turn.text.replace(
-        /【\d+:([^†】]+)†([^】]+)】/g,
-        (_marker, refId: string, sourceName: string) => {
-          const index = turn.citations.findIndex(
-            (citation) =>
-              citation.ref_id === refId || citation.source_name === sourceName,
-          );
-          return index >= 0 ? `[${index + 1}]` : `[${sourceName}]`;
-        },
-      );
+      const text = replaceCitationMarkers(turn.text, (marker) => {
+        const index = findCitationByIdentity(turn.citations, marker);
+        return index >= 0 ? `[${index + 1}]` : `[${marker.sourceName}]`;
+      });
       await navigator.clipboard.writeText(text);
       this.showToast('Message copied');
     } catch (error) {
@@ -406,8 +383,6 @@ export class NativeApp extends LitElement {
     this.profileDraft = '';
     this.me = null;
     this.busy = false;
-    this.toolNames.clear();
-    this.processor = new A2UIProcessor();
   }
 
   private toggleTheme(): void {
@@ -433,12 +408,26 @@ export class NativeApp extends LitElement {
     return generation;
   }
 
+  private stopActiveChat(): void {
+    if (!this.busy) return;
+    const activeTurn = this.turns.at(-1);
+    if (activeTurn?.role === 'assistant') {
+      this.replaceTurn({
+        ...activeTurn,
+        progress: {
+          stage: activeTurn.progress?.stage ?? 'preparing_answer',
+          status: 'cancelled',
+          message: 'Response stopped',
+        },
+      });
+    }
+    this.cancelActiveChat();
+  }
+
   private newChat = (): void => {
     this.cancelActiveChat();
     this.conversationId = null;
     this.turns = [];
-    this.toolNames.clear();
-    this.processor = new A2UIProcessor();
     this.selectedMemory = null;
     if (!THREAD_RAIL_DESKTOP.matches) this.sidebarOpen = false;
   };
@@ -467,30 +456,6 @@ export class NativeApp extends LitElement {
   }
 
   private onAppKeydown(e: KeyboardEvent): void {
-    if (this.profileOpen && e.key === 'Tab') {
-      const drawer = this.renderRoot.querySelector<HTMLElement>('.profile-drawer');
-      const focusable = drawer
-        ? Array.from(
-            drawer.querySelectorAll<HTMLElement>(
-              'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])',
-            ),
-          )
-        : [];
-      const first = focusable[0];
-      const last = focusable.at(-1);
-      if (first && last) {
-        const active = this.shadowRoot?.activeElement;
-        if (e.shiftKey && (active === first || !drawer?.contains(active ?? null))) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && active === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-      return;
-    }
-
     if (e.key !== 'Escape') return;
     if (this.profileOpen) {
       this.closeProfile();
@@ -527,7 +492,6 @@ export class NativeApp extends LitElement {
         tools: [...new Set(m.tools ?? [])],
         citations: m.citations ?? [],
       }));
-      this.scheduleRelativeClock();
       if (doc.metadata?.agent_type) this.agentType = doc.metadata.agent_type;
       if (!THREAD_RAIL_DESKTOP.matches) this.sidebarOpen = false;
     } catch (e) {
@@ -627,10 +591,6 @@ export class NativeApp extends LitElement {
       this.profileDraft = JSON.stringify(this.profileToSections(profile), null, 2);
       this.profileOpen = true;
       if (!THREAD_RAIL_DESKTOP.matches) this.sidebarOpen = false;
-      await this.updateComplete;
-      const drawer = this.renderRoot.querySelector<ProfileDrawer>('profile-drawer');
-      await drawer?.updateComplete;
-      drawer?.querySelector<HTMLElement>('.profile-close')?.focus();
     } catch {
       if (generation === this.identityGeneration) this.showToast('Could not load profile');
     }
@@ -747,7 +707,7 @@ export class NativeApp extends LitElement {
       tools: [],
       citations: [],
     };
-    const assistantTurn: ChatTurn = {
+    let assistantTurn: ChatTurn = {
       id: this.nextTurnId(),
       role: 'assistant',
       text: '',
@@ -756,9 +716,8 @@ export class NativeApp extends LitElement {
       tools: [],
       citations: [],
     };
-    this.toolNames.clear();
+    let eventState = createChatEventState(assistantTurn, this.surfaceSeq);
     this.turns = [...this.turns, userTurn, assistantTurn];
-    this.scheduleRelativeClock();
 
     const isNew = this.conversationId === null;
     const identityGeneration = this.identityGeneration;
@@ -778,7 +737,12 @@ export class NativeApp extends LitElement {
           if (
             identityGeneration === this.identityGeneration &&
             chatGeneration === this.chatGeneration
-          ) this.handleEvent(ev, assistantTurn);
+          ) {
+            eventState = reduceChatEvent(eventState, ev);
+            assistantTurn = eventState.turn;
+            this.surfaceSeq = eventState.nextSurfaceSequence;
+            this.replaceTurn(assistantTurn);
+          }
         },
       }, controller.signal);
     } catch (e) {
@@ -787,7 +751,7 @@ export class NativeApp extends LitElement {
         chatGeneration === this.chatGeneration &&
         !controller.signal.aborted
       ) {
-        assistantTurn.error = String(e);
+        assistantTurn = { ...assistantTurn, error: String(e) };
       }
     } finally {
       if (this.chatAbort === controller) this.chatAbort = undefined;
@@ -796,112 +760,21 @@ export class NativeApp extends LitElement {
         chatGeneration !== this.chatGeneration
       ) return;
       this.busy = false;
-      assistantTurn.createdAt = new Date().toISOString();
-      this.turns = [...this.turns];
-      this.scheduleRelativeClock();
+      assistantTurn = {
+        ...assistantTurn,
+        createdAt: new Date().toISOString(),
+      };
+      this.replaceTurn(assistantTurn);
       // A turn was persisted server-side; refresh history (new convo appears / updates).
       void this.refreshConversations();
       if (isNew) void this.refreshMe();
     }
   };
 
-  private handleEvent(ev: AGUIEvent, turn: ChatTurn): void {
-    switch (ev.type) {
-      case 'TEXT_MESSAGE_CONTENT':
-        turn.text += ev.delta ?? '';
-        break;
-      case 'TOOL_CALL_START':
-        if (ev.toolCallId && ev.toolCallName) {
-          this.toolNames.set(ev.toolCallId, ev.toolCallName);
-          if (!turn.tools.includes(ev.toolCallName)) turn.tools.push(ev.toolCallName);
-        }
-        break;
-      case 'TOOL_CALL_RESULT': {
-        const name = ev.toolCallId ? this.toolNames.get(ev.toolCallId) : undefined;
-        if (ev.content) {
-          this.mergeCitations(turn, extractToolCitations(ev.content));
-          if (name) this.renderToolSurface(name, ev.content, turn);
-        }
-        break;
-      }
-      case 'TOOL_CALL_END':
-        if (ev.toolCallId) this.toolNames.delete(ev.toolCallId);
-        break;
-      case 'CUSTOM':
-        if (ev.name === 'agent_usage') {
-          const usage = this.readUsage(ev.value);
-          if (usage) turn.usage = usage;
-        } else if (ev.name === 'agent_citations') {
-          this.mergeCitations(turn, parseCitations(ev.value));
-        }
-        break;
-      case 'RUN_ERROR':
-        turn.error = ev.message ?? 'Run error';
-        break;
-      default:
-        break;
-    }
-    this.turns = [...this.turns];
-  }
-
-  private readUsage(value: unknown): TokenUsage | undefined {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-    const usage = value as Record<string, unknown>;
-    const result: TokenUsage = {};
-    if (
-      typeof usage.input_tokens === 'number' &&
-      Number.isFinite(usage.input_tokens) &&
-      usage.input_tokens >= 0
-    ) {
-      result.input_tokens = usage.input_tokens;
-    }
-    if (
-      typeof usage.output_tokens === 'number' &&
-      Number.isFinite(usage.output_tokens) &&
-      usage.output_tokens >= 0
-    ) {
-      result.output_tokens = usage.output_tokens;
-    }
-    if (
-      typeof usage.cached_tokens === 'number' &&
-      Number.isFinite(usage.cached_tokens) &&
-      usage.cached_tokens >= 0
-    ) {
-      result.cached_tokens = usage.cached_tokens;
-    }
-    return Object.keys(result).length ? result : undefined;
-  }
-
-  private mergeCitations(turn: ChatTurn, citations: CitationSource[]): void {
-    const positions = new Map(
-      turn.citations.map((citation, index) => [
-        `${citation.ref_id}\u0000${citation.source_name}`,
-        index,
-      ]),
+  private replaceTurn(updated: ChatTurn): void {
+    this.turns = this.turns.map((turn) =>
+      turn.id === updated.id ? updated : turn,
     );
-    for (const citation of citations) {
-      const key = `${citation.ref_id}\u0000${citation.source_name}`;
-      const existingIndex = positions.get(key);
-      if (existingIndex !== undefined) {
-        const existing = turn.citations[existingIndex];
-        if (!existing.url && citation.url) existing.url = citation.url;
-        if (existing.search_idx == null && citation.search_idx != null) {
-          existing.search_idx = citation.search_idx;
-        }
-        continue;
-      }
-      positions.set(key, turn.citations.length);
-      turn.citations.push(citation);
-    }
-  }
-
-  private renderToolSurface(toolName: string, content: string, turn: ChatTurn): void {
-    const surfaceId = `s-${this.surfaceSeq++}`;
-    const messages = convertToolResult(toolName, content, surfaceId);
-    if (messages.length === 0) return;
-    for (const m of messages) this.processor.apply(m);
-    const surface = this.processor.getSurface(surfaceId);
-    if (surface) turn.surfaces = [...turn.surfaces, surface];
   }
   // ---------------------------------------------------------------- render
   render() {
@@ -921,8 +794,11 @@ export class NativeApp extends LitElement {
     const activeConversation = this.conversationId
       ? this.conversations.find((conversation) => conversation.id === this.conversationId)
       : undefined;
+    const threadKind = this.agentType === 'directive-rag'
+      ? 'directive thread'
+      : 'support thread';
     const title = activeConversation?.title
-      ?? (this.conversationId ? 'Active support thread' : 'New support thread');
+      ?? (this.conversationId ? `Active ${threadKind}` : `New ${threadKind}`);
 
     return html`
       <div class="app-shell" @keydown=${this.onAppKeydown}>
@@ -1041,7 +917,6 @@ export class NativeApp extends LitElement {
               .agentType=${this.agentType}
               .agentOptions=${this.agentOptions}
               .userName=${name}
-              .clock=${this.relativeClock}
               .actions=${this.transcriptActions}
             ></chat-transcript>
           </main>
@@ -1179,4 +1054,3 @@ export class NativeApp extends LitElement {
 }
 
 // Touch getConfig so tree-shaking keeps runtime config wiring available.
-void getConfig();

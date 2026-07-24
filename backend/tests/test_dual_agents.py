@@ -63,6 +63,25 @@ def _runtime_state(
     )
 
 
+def _hosted_runtime(
+    agent_type: AgentType = AgentType.AGENT_FRAMEWORK,
+    *,
+    agent_name: str = "support-agent",
+) -> FoundryHostedMafRuntime:
+    return FoundryHostedMafRuntime(
+        agent_type=agent_type,
+        project_endpoint="https://example.services.ai.azure.com/api/projects/test",
+        physical_agent_name=agent_name,
+        physical_agent_endpoint=(
+            "https://example.services.ai.azure.com/api/projects/test"
+            f"/agents/{agent_name}/endpoint/protocols/openai"
+        ),
+        release_id="release-1",
+        prompt_version="prompt-1",
+        request_timeout_seconds=30,
+    )
+
+
 def _document(state: RuntimeState, *, user_id: str = "tenant:user") -> dict:
     return {
         "id": "conversation-1",
@@ -118,13 +137,23 @@ class AgentGatewayTests(unittest.IsolatedAsyncioTestCase):
             call_id="call-1",
             arguments={"order_id": "ORD-001"},
         )
-        result = await dispatch_agent_tool(
-            "get_order_status",
-            request,
-            AgentCaller(principal_id="hosted-principal", tenant_id="tenant"),
-            history,
-            Executor(),
-        )
+        with patch(
+            "agent_memory_backend.agent_tool_gateway.get_settings",
+            return_value=SimpleNamespace(
+                support_hosted_agent_principal_ids=("hosted-principal",),
+                directive_hosted_agent_principal_ids=(),
+            ),
+        ):
+            result = await dispatch_agent_tool(
+                "get_order_status",
+                request,
+                AgentCaller(
+                    principal_id="hosted-principal",
+                    tenant_id="tenant",
+                ),
+                history,
+                {AgentType.AGENT_FRAMEWORK: Executor()},
+            )
 
         self.assertEqual(history.lookup, ("tenant:user", "hosted-session-1"))
         self.assertEqual(result.status, "ok")
@@ -149,7 +178,7 @@ class AgentGatewayTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 AgentCaller(principal_id="hosted-principal", tenant_id="tenant"),
                 History(),
-                ToolExecutor(None, None),
+                {AgentType.AGENT_FRAMEWORK: ToolExecutor(None, None)},
             )
         self.assertEqual(raised.exception.status_code, 403)
 
@@ -285,25 +314,23 @@ class RemoteRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(events[-1], RuntimeCompletedEvent)
 
     async def test_health_checks_do_not_require_agent_definition_read(self) -> None:
-        for runtime, module, enabled_name in (
-            (
-                FoundryPromptRuntime(),
-                "agent_memory_backend.foundry_prompt_runtime.get_settings",
-                "foundry_prompt_enabled",
-            ),
-            (
-                FoundryHostedMafRuntime(),
-                "agent_memory_backend.foundry_hosted_maf_runtime.get_settings",
-                "foundry_hosted_enabled",
-            ),
-        ):
+        prompt_runtime = FoundryPromptRuntime()
+        hosted_runtime = _hosted_runtime()
+        for runtime in (prompt_runtime, hosted_runtime):
             get_agent = AsyncMock(side_effect=AssertionError("unexpected definition read"))
             runtime._project = SimpleNamespace(
                 agents=SimpleNamespace(get=get_agent)
             )
             runtime._openai = object()
-            with patch(module, return_value=SimpleNamespace(**{enabled_name: True})):
+            if isinstance(runtime, FoundryHostedMafRuntime):
+                runtime._endpoint_verified = True
                 await runtime.health_check()
+            else:
+                with patch(
+                    "agent_memory_backend.foundry_prompt_runtime.get_settings",
+                    return_value=SimpleNamespace(foundry_prompt_enabled=True),
+                ):
+                    await runtime.health_check()
             get_agent.assert_not_awaited()
 
     async def test_prompt_state_uses_authenticated_user_header(self) -> None:
@@ -391,7 +418,7 @@ class RemoteRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(events[-1], RuntimeCompletedEvent)
 
     async def test_hosted_response_without_session_id_preserves_binding(self) -> None:
-        runtime = FoundryHostedMafRuntime()
+        runtime = _hosted_runtime()
         runtime._openai = object()
         state = _runtime_state(
             AgentType.AGENT_FRAMEWORK, hosted_id="precreated-session"
@@ -409,17 +436,10 @@ class RemoteRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
             yield ("completed_response", response)
 
-        settings = SimpleNamespace(agent_request_timeout_seconds=30)
         context = TurnContext("application-1", "tenant:user", state)
-        with (
-            patch(
-                "agent_memory_backend.foundry_hosted_maf_runtime.stream_response",
-                side_effect=fake_stream,
-            ),
-            patch(
-                "agent_memory_backend.foundry_hosted_maf_runtime.get_settings",
-                return_value=settings,
-            ),
+        with patch(
+            "agent_memory_backend.foundry_hosted_maf_runtime.stream_response",
+            side_effect=fake_stream,
         ):
             events = [event async for event in runtime.stream_turn("hello", context)]
 
@@ -428,7 +448,7 @@ class RemoteRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(events[-1], RuntimeCompletedEvent)
 
     async def test_hosted_runtime_reports_framework_function_tools(self) -> None:
-        runtime = FoundryHostedMafRuntime()
+        runtime = _hosted_runtime()
         runtime._openai = object()
         state = _runtime_state(
             AgentType.AGENT_FRAMEWORK, hosted_id="hosted-session"
@@ -450,17 +470,10 @@ class RemoteRuntimeTests(unittest.IsolatedAsyncioTestCase):
         async def fake_stream(*args, **kwargs):
             yield ("completed_response", response)
 
-        settings = SimpleNamespace(agent_request_timeout_seconds=30)
         context = TurnContext("application-1", "tenant:user", state)
-        with (
-            patch(
-                "agent_memory_backend.foundry_hosted_maf_runtime.stream_response",
-                side_effect=fake_stream,
-            ),
-            patch(
-                "agent_memory_backend.foundry_hosted_maf_runtime.get_settings",
-                return_value=settings,
-            ),
+        with patch(
+            "agent_memory_backend.foundry_hosted_maf_runtime.stream_response",
+            side_effect=fake_stream,
         ):
             events = [event async for event in runtime.stream_turn("hello", context)]
 

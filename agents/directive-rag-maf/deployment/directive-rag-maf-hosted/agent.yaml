@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/microsoft/AgentSchema/refs/heads/main/schemas/v1.0/ContainerAgent.yaml
+kind: hosted
+name: directive-rag-maf-hosted
+description: Enterprise directive assistant implemented with Microsoft Agent Framework.
+protocols:
+  - protocol: responses
+    version: 2.0.0
+resources:
+  cpu: "0.5"
+  memory: 1Gi
+environment_variables:
+  - name: DIRECTIVE_MODEL_DEPLOYMENT
+    value: ${DIRECTIVE_MODEL_DEPLOYMENT}
+  - name: DIRECTIVE_MAX_ITERATIONS
+    value: ${DIRECTIVE_MAX_ITERATIONS}
+  - name: APP_TOOL_GATEWAY_URL
+    value: ${APP_TOOL_GATEWAY_URL}
+  - name: APP_TOOL_GATEWAY_SCOPE
+    value: ${APP_TOOL_GATEWAY_SCOPE}
+  - name: ENTRA_TENANT_ID
+    value: ${ENTRA_TENANT_ID}

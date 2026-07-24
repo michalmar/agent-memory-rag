@@ -1,12 +1,17 @@
 import DOMPurify from 'dompurify';
 import { html, nothing, type PropertyValues } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { marked } from 'marked';
 
 import '../a2ui/surface-renderer.js';
 import { agentIcon, agentLabel } from '../agent-presentation.js';
 import type { ChatTurn } from '../chat-models.js';
+import {
+  findCitationByIdentity,
+  findCitationBySearchIndex,
+  replaceCitationMarkers,
+} from '../citations.js';
 import type {
   AgentOption,
   AgentType,
@@ -29,15 +34,53 @@ export class ChatTranscript extends LightDomElement {
   @property() agentType: AgentType = 'agent-framework';
   @property({ attribute: false }) agentOptions: AgentOption[] = [];
   @property() userName = '';
-  @property({ type: Number }) clock = Date.now();
   @property({ attribute: false }) actions!: ChatTranscriptActions;
 
+  @state() private clock = Date.now();
+  private clockTimer?: number;
+  private turnTimestampSignature = '';
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    this.scheduleClock();
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    if (this.clockTimer) clearTimeout(this.clockTimer);
+  }
+
   protected updated(changed: PropertyValues): void {
-    if (!changed.has('turns') || this.turns.length === 0) return;
-    const conversation = this.parentElement;
-    if (conversation?.classList.contains('conversation-main')) {
-      conversation.scrollTop = conversation.scrollHeight;
+    if (changed.has('turns')) {
+      const timestampSignature = this.turns
+        .map((turn) => turn.createdAt ?? '')
+        .join('\u0000');
+      if (timestampSignature !== this.turnTimestampSignature) {
+        this.turnTimestampSignature = timestampSignature;
+        this.scheduleClock();
+      }
+      if (this.turns.length > 0) {
+        const conversation = this.parentElement;
+        if (conversation?.classList.contains('conversation-main')) {
+          conversation.scrollTop = conversation.scrollHeight;
+        }
+      }
     }
+  }
+
+  private scheduleClock(): void {
+    if (!this.isConnected) return;
+    if (this.clockTimer) clearTimeout(this.clockTimer);
+    const now = Date.now();
+    const hasRecentTurn = this.turns.some((turn) => {
+      if (!turn.createdAt) return false;
+      const timestamp = Date.parse(turn.createdAt);
+      return Number.isFinite(timestamp) && now - timestamp < 60_000;
+    });
+    this.clockTimer = window.setTimeout(() => {
+      this.clock = Date.now();
+      this.scheduleClock();
+    }, hasRecentTurn ? 1000 : 60_000);
   }
 
   render() {
@@ -48,7 +91,11 @@ export class ChatTranscript extends LightDomElement {
             forum
           </span>
           <h2 id="welcome-title">Start a thread</h2>
-          <p>Ask about an order, a policy, or saved context.</p>
+          <p>
+            ${this.agentType === 'directive-rag'
+              ? 'Search, summarize, compare, or ask about company directives.'
+              : 'Ask about an order, a policy, or saved context.'}
+          </p>
         </section>
       `;
     }
@@ -58,6 +105,13 @@ export class ChatTranscript extends LightDomElement {
   private renderTurn(turn: ChatTurn) {
     const responding =
       turn.role === 'assistant' && this.busy && this.turns.at(-1) === turn;
+    const progressLabel = responding
+      ? this.progressLabel(turn)
+      : undefined;
+    const terminalProgress = turn.progress
+      && ['cancelled', 'failed'].includes(turn.progress.status)
+      ? turn.progress
+      : undefined;
     const timeLabel = this.formatRelativeTime(turn.createdAt);
     return html`
       <article class="msg ${turn.role}">
@@ -88,7 +142,7 @@ export class ChatTranscript extends LightDomElement {
                 aria-label="Agent is responding"
               >
                 <span class="response-dot"></span>
-                ${turn.text ? 'Writing' : 'Working'}
+                ${progressLabel ?? (turn.text ? 'Writing' : 'Working')}
               </span>`
             : nothing}
         </div>
@@ -99,9 +153,11 @@ export class ChatTranscript extends LightDomElement {
                   ? this.renderMarkdown(turn.text, turn)
                   : turn.text}
               </div>`
-            : responding
+            : responding || terminalProgress
               ? html`<div class="message-body message-pending">
-                  Preparing a response…
+                  ${progressLabel
+                    ?? terminalProgress?.message
+                    ?? 'Preparing a response…'}
                 </div>`
               : nothing}
           ${turn.surfaces.length
@@ -148,12 +204,19 @@ export class ChatTranscript extends LightDomElement {
           ${turn.citations.map((citation, index) => {
             const target = this.citationTarget(turn, index);
             const name = this.citationName(citation, index);
+            const details = this.citationDetails(citation);
             const url = this.citationUrl(citation);
             const content = html`
               <span class="material-symbols-outlined" aria-hidden="true">
                 description
               </span>
-              <span>${name}</span>
+              <span class="message-source-text">
+                <span class="message-source-name">${name}</span>
+                ${details
+                  ? html`<span class="message-source-details">${details}</span>`
+                  : nothing}
+              </span>
+              ${this.renderMandatoryStatus(citation)}
             `;
             return url
               ? html`<a
@@ -248,6 +311,56 @@ export class ChatTranscript extends LightDomElement {
     }
   }
 
+  private citationDetails(citation: CitationSource): string {
+    if (!citation.directive_id) return '';
+    const details: string[] = [];
+    if (citation.version_label) details.push(`Version ${citation.version_label}`);
+    if (citation.section_number || citation.section_title) {
+      details.push(
+        [
+          citation.section_number
+            ? `Section ${citation.section_number}`
+            : 'Section',
+          citation.section_title,
+        ].filter(Boolean).join(' · '),
+      );
+    }
+    if (citation.page_from != null) {
+      details.push(
+        citation.page_to != null && citation.page_to !== citation.page_from
+          ? `Pages ${citation.page_from}–${citation.page_to}`
+          : `Page ${citation.page_from}`,
+      );
+    }
+    if (citation.effective_from) {
+      details.push(`Effective ${citation.effective_from}`);
+    }
+    return details.join(' · ');
+  }
+
+  private renderMandatoryStatus(citation: CitationSource) {
+    if (!citation.directive_id) return nothing;
+    const status = citation.mandatory_status ?? 'unknown';
+    const presentation = {
+      mandatory: {
+        label: 'Mandatory',
+        title: 'This directive is mandatory for the signed-in user.',
+      },
+      non_mandatory: {
+        label: 'Not mandatory',
+        title: 'This directive is not mandatory for the signed-in user; it remains available and relevant.',
+      },
+      unknown: {
+        label: 'Status unknown',
+        title: 'Mandatory status could not be verified.',
+      },
+    }[status];
+    return html`<span
+      class="mandate-badge mandate-${status}"
+      title=${presentation.title}
+    >${presentation.label}</span>`;
+  }
+
   private citationUrl(citation: CitationSource): string | null {
     if (!citation.url) return null;
     try {
@@ -274,31 +387,23 @@ export class ChatTranscript extends LightDomElement {
 
   private linkCitationMarkers(text: string, turn: ChatTurn): string {
     let fallbackIndex = 0;
-    return text.replace(
-      /【(\d+):([^†】]+)†([^】]+)】/g,
-      (_marker, searchIndexValue: string, refId: string, sourceName: string) => {
-        let index = turn.citations.findIndex(
-          (citation) =>
-            citation.ref_id === refId || citation.source_name === sourceName,
-        );
-        if (index < 0) {
-          index = turn.citations.findIndex(
-            (citation) => citation.search_idx === Number(searchIndexValue),
-          );
-        }
-        if (index < 0 && fallbackIndex < turn.citations.length) {
-          index = fallbackIndex;
-          fallbackIndex += 1;
-        }
-        if (index < 0) return `[${sourceName}]`;
-        fallbackIndex = Math.max(fallbackIndex, index + 1);
-        const target = this.citationTarget(turn, index);
-        const label = this.escapeAttribute(
-          this.citationName(turn.citations[index], index),
-        );
-        return `<sup class="inline-citation"><a href="#${target}" data-citation-target="${target}" aria-label="Source ${index + 1}: ${label}">${index + 1}</a></sup>`;
-      },
-    );
+    return replaceCitationMarkers(text, (marker) => {
+      let index = findCitationByIdentity(turn.citations, marker);
+      if (index < 0) {
+        index = findCitationBySearchIndex(turn.citations, marker);
+      }
+      if (index < 0 && fallbackIndex < turn.citations.length) {
+        index = fallbackIndex;
+        fallbackIndex += 1;
+      }
+      if (index < 0) return `[${marker.sourceName}]`;
+      fallbackIndex = Math.max(fallbackIndex, index + 1);
+      const target = this.citationTarget(turn, index);
+      const label = this.escapeAttribute(
+        this.citationName(turn.citations[index], index),
+      );
+      return `<sup class="inline-citation"><a href="#${target}" data-citation-target="${target}" aria-label="Source ${index + 1}: ${label}">${index + 1}</a></sup>`;
+    });
   }
 
   private renderMarkdown(text: string, turn: ChatTurn) {
@@ -348,8 +453,28 @@ export class ChatTranscript extends LightDomElement {
       get_order_status: 'Order status',
       check_memory: 'Memory search',
       update_user_profile: 'Profile update',
+      resolve_directive: 'Directive resolution',
+      search_directives: 'Directive search',
+      get_directive_manifest: 'Directive outline',
+      get_directive_content: 'Directive content',
+      search_within_directive: 'Focused directive search',
+      get_related_directives: 'Linked directives',
+      get_precomputed_summary: 'Directive summary',
+      get_user_directive_mandates: 'Mandatory status',
     };
     return labels[toolName] ?? toolName.replaceAll('_', ' ');
+  }
+
+  private progressLabel(turn: ChatTurn): string | undefined {
+    const progress = turn.progress;
+    if (!progress) return undefined;
+    if (
+      progress.completed_count != null
+      && progress.total_count != null
+    ) {
+      return `${progress.message} ${progress.completed_count}/${progress.total_count}`;
+    }
+    return progress.message;
   }
 
   private tokenSummary(usage: TokenUsage): string {

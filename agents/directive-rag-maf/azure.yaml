@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+requiredVersions:
+    extensions:
+        azure.ai.agents: '>=1.0.0-beta.4'
+name: directive-rag-maf-hosted
+services:
+    ai-project:
+        host: azure.ai.project
+        endpoint: https://agmem5df652aif2.services.ai.azure.com/api/projects/agmem-agents
+    directive-rag-maf-hosted:
+        project: deployment/directive-rag-maf-hosted
+        host: azure.ai.agent
+        language: docker
+        image: agmem5df652acr.azurecr.io/directive-rag-maf-hosted:directive-rag-20260723-r2
+        docker:
+            remoteBuild: true
+        uses:
+            - ai-project
+        container:
+            resources:
+                cpu: "0.5"
+                memory: 1Gi
+        description: Enterprise directive assistant implemented with Microsoft Agent Framework.
+        environmentVariables:
+            - name: DIRECTIVE_MODEL_DEPLOYMENT
+              value: ${DIRECTIVE_MODEL_DEPLOYMENT}
+            - name: DIRECTIVE_MAX_ITERATIONS
+              value: ${DIRECTIVE_MAX_ITERATIONS}
+            - name: APP_TOOL_GATEWAY_URL
+              value: ${APP_TOOL_GATEWAY_URL}
+            - name: APP_TOOL_GATEWAY_SCOPE
+              value: ${APP_TOOL_GATEWAY_SCOPE}
+            - name: ENTRA_TENANT_ID
+              value: ${ENTRA_TENANT_ID}
+        kind: hosted
+        name: directive-rag-maf-hosted
+        protocols:
+            - protocol: responses
+              version: 2.0.0
+infra:
+    provider: microsoft.foundry

@@ -161,6 +161,17 @@ export const chatComposerStyles = css`
     transform: translateY(-1px);
   }
 
+  .send-button.stop-button {
+    color: var(--fg);
+    background: var(--surface-muted);
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+  }
+
+  .send-button.stop-button:hover {
+    color: var(--accent);
+    background: var(--card);
+  }
+
   .send-button:disabled {
     cursor: not-allowed;
     opacity: 0.38;

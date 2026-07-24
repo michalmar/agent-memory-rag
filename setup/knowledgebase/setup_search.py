@@ -18,30 +18,6 @@ from openai import AsyncAzureOpenAI
 EMBED_DIM = 3072
 HERE = os.path.dirname(__file__)
 
-SEARCH_ENDPOINT = os.environ["SEARCH_ENDPOINT"].rstrip("/")
-OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"].rstrip("/")
-OPENAI_RESOURCE_URI = os.environ.get(
-    "AZURE_OPENAI_RESOURCE_URI", OPENAI_ENDPOINT
-).rstrip("/")
-EMBED_DEPLOYMENT = os.environ.get(
-    "AZURE_OPENAI_EMBED_DEPLOYMENT", "text-embedding-3-large"
-)
-CHAT_DEPLOYMENT = os.environ.get("AZURE_OPENAI_CHAT_DEPLOYMENT", "gpt-4o-mini")
-CHAT_MODEL = os.environ.get("AZURE_OPENAI_CHAT_MODEL", CHAT_DEPLOYMENT)
-OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-10-21")
-SEARCH_API_VERSION = os.environ.get("SEARCH_API_VERSION", "2024-07-01")
-KNOWLEDGE_API_VERSION = os.environ.get(
-    "SEARCH_KNOWLEDGE_API_VERSION", "2026-05-01-preview"
-)
-ORDERS_INDEX = os.environ.get("SEARCH_ORDERS_INDEX", "orders")
-POLICY_INDEX = os.environ.get("SEARCH_POLICY_INDEX", "return-policy")
-ORDERS_SOURCE = os.environ.get("SEARCH_ORDERS_KNOWLEDGE_SOURCE", "orders-ks")
-POLICY_SOURCE = os.environ.get(
-    "SEARCH_POLICY_KNOWLEDGE_SOURCE", "return-policy-ks"
-)
-KNOWLEDGE_BASE = os.environ.get("SEARCH_KB", "customer-support-kb")
-
-
 @dataclass(frozen=True)
 class SearchSource:
     document_directory: str
@@ -56,35 +32,92 @@ class SearchSource:
         return ("id", *self.filterable_fields, "page_chunk")
 
 
-SEARCH_SOURCES = (
-    SearchSource(
-        document_directory="orders",
-        index_name=ORDERS_INDEX,
-        knowledge_source_name=ORDERS_SOURCE,
-        keyword_field="order_id",
-        filterable_fields=("order_id", "category"),
-        retrieval_instruction=(
-            "Use the orders source for order and shipping questions."
-        ),
-    ),
-    SearchSource(
-        document_directory="policies",
-        index_name=POLICY_INDEX,
-        knowledge_source_name=POLICY_SOURCE,
-        keyword_field="section",
-        filterable_fields=("section",),
-        retrieval_instruction=(
-            "Use the return-policy source for returns, refunds, and "
-            "eligibility questions."
-        ),
-    ),
-)
+@dataclass(frozen=True)
+class SearchSetupConfig:
+    search_endpoint: str
+    openai_endpoint: str
+    openai_resource_uri: str
+    embed_deployment: str
+    chat_deployment: str
+    chat_model: str
+    openai_api_version: str
+    search_api_version: str
+    knowledge_api_version: str
+    knowledge_base: str
+    azure_client_id: str
+    sources: tuple[SearchSource, ...]
+
+    @classmethod
+    def from_environment(cls) -> SearchSetupConfig:
+        openai_endpoint = os.environ["AZURE_OPENAI_ENDPOINT"].rstrip("/")
+        chat_deployment = os.environ.get(
+            "AZURE_OPENAI_CHAT_DEPLOYMENT", "gpt-4o-mini"
+        )
+        return cls(
+            search_endpoint=os.environ["SEARCH_ENDPOINT"].rstrip("/"),
+            openai_endpoint=openai_endpoint,
+            openai_resource_uri=os.environ.get(
+                "AZURE_OPENAI_RESOURCE_URI", openai_endpoint
+            ).rstrip("/"),
+            embed_deployment=os.environ.get(
+                "AZURE_OPENAI_EMBED_DEPLOYMENT",
+                "text-embedding-3-large",
+            ),
+            chat_deployment=chat_deployment,
+            chat_model=os.environ.get(
+                "AZURE_OPENAI_CHAT_MODEL", chat_deployment
+            ),
+            openai_api_version=os.environ.get(
+                "AZURE_OPENAI_API_VERSION", "2024-10-21"
+            ),
+            search_api_version=os.environ.get(
+                "SEARCH_API_VERSION", "2024-07-01"
+            ),
+            knowledge_api_version=os.environ.get(
+                "SEARCH_KNOWLEDGE_API_VERSION", "2026-05-01-preview"
+            ),
+            knowledge_base=os.environ.get(
+                "SEARCH_KB", "customer-support-kb"
+            ),
+            azure_client_id=os.environ.get("AZURE_CLIENT_ID", "").strip(),
+            sources=(
+                SearchSource(
+                    document_directory="orders",
+                    index_name=os.environ.get(
+                        "SEARCH_ORDERS_INDEX", "orders"
+                    ),
+                    knowledge_source_name=os.environ.get(
+                        "SEARCH_ORDERS_KNOWLEDGE_SOURCE", "orders-ks"
+                    ),
+                    keyword_field="order_id",
+                    filterable_fields=("order_id", "category"),
+                    retrieval_instruction=(
+                        "Use the orders source for order and shipping questions."
+                    ),
+                ),
+                SearchSource(
+                    document_directory="policies",
+                    index_name=os.environ.get(
+                        "SEARCH_POLICY_INDEX", "return-policy"
+                    ),
+                    knowledge_source_name=os.environ.get(
+                        "SEARCH_POLICY_KNOWLEDGE_SOURCE",
+                        "return-policy-ks",
+                    ),
+                    keyword_field="section",
+                    filterable_fields=("section",),
+                    retrieval_instruction=(
+                        "Use the return-policy source for returns, refunds, "
+                        "and eligibility questions."
+                    ),
+                ),
+            ),
+        )
 
 
-def _credential() -> DefaultAzureCredential:
-    client_id = os.environ.get("AZURE_CLIENT_ID", "").strip()
+def _credential(config: SearchSetupConfig) -> DefaultAzureCredential:
     return DefaultAzureCredential(
-        managed_identity_client_id=client_id or None,
+        managed_identity_client_id=config.azure_client_id or None,
     )
 
 
@@ -189,7 +222,7 @@ async def _request(
 ) -> dict[str, Any]:
     response = await client.request(
         method,
-        f"{SEARCH_ENDPOINT}{path}",
+        path,
         params={"api-version": api_version},
         headers=await _headers(credential),
         json=payload,
@@ -205,25 +238,30 @@ async def _request(
 
 
 async def _embed(
-    openai_client: AsyncAzureOpenAI, texts: list[str]
+    openai_client: AsyncAzureOpenAI,
+    deployment: str,
+    texts: list[str],
 ) -> list[list[float]]:
     response = await openai_client.embeddings.create(
-        model=EMBED_DEPLOYMENT, input=texts
+        model=deployment,
+        input=texts,
     )
     return [item.embedding for item in response.data]
 
 
 async def _create_indexes(
-    client: httpx.AsyncClient, credential: Any
+    client: httpx.AsyncClient,
+    credential: Any,
+    config: SearchSetupConfig,
 ) -> None:
-    for source in SEARCH_SOURCES:
+    for source in config.sources:
         index = _index_definition(source)
         existing = await _request(
             client,
             credential,
             "GET",
             f"/indexes/{index['name']}",
-            api_version=SEARCH_API_VERSION,
+            api_version=config.search_api_version,
             allow_not_found=True,
         )
         if existing:
@@ -239,7 +277,7 @@ async def _create_indexes(
             credential,
             "PUT",
             f"/indexes/{index['name']}",
-            api_version=SEARCH_API_VERSION,
+            api_version=config.search_api_version,
             payload=index,
         )
         print(f"[setup] index ready: {index['name']}")
@@ -249,8 +287,9 @@ async def _upload_documents(
     client: httpx.AsyncClient,
     credential: Any,
     openai_client: AsyncAzureOpenAI,
+    config: SearchSetupConfig,
 ) -> None:
-    for source in SEARCH_SOURCES:
+    for source in config.sources:
         documents = await asyncio.to_thread(
             _load_docs_sync, source.document_directory
         )
@@ -260,7 +299,9 @@ async def _upload_documents(
             )
 
         embeddings = await _embed(
-            openai_client, [document["page_chunk"] for document in documents]
+            openai_client,
+            config.embed_deployment,
+            [document["page_chunk"] for document in documents],
         )
         actions = []
         for document, embedding in zip(documents, embeddings, strict=True):
@@ -276,7 +317,7 @@ async def _upload_documents(
             credential,
             "POST",
             f"/indexes/{source.index_name}/docs/index",
-            api_version=SEARCH_API_VERSION,
+            api_version=config.search_api_version,
             payload={"value": actions},
         )
         failures = [
@@ -293,9 +334,11 @@ async def _upload_documents(
 
 
 async def _create_knowledge_sources(
-    client: httpx.AsyncClient, credential: Any
+    client: httpx.AsyncClient,
+    credential: Any,
+    config: SearchSetupConfig,
 ) -> None:
-    for source in SEARCH_SOURCES:
+    for source in config.sources:
         payload = {
             "name": source.knowledge_source_name,
             "kind": "searchIndex",
@@ -316,7 +359,7 @@ async def _create_knowledge_sources(
             credential,
             "PUT",
             f"/knowledgesources/{source.knowledge_source_name}",
-            api_version=KNOWLEDGE_API_VERSION,
+            api_version=config.knowledge_api_version,
             payload=payload,
         )
         print(
@@ -326,25 +369,27 @@ async def _create_knowledge_sources(
 
 
 async def _create_knowledge_base(
-    client: httpx.AsyncClient, credential: Any
+    client: httpx.AsyncClient,
+    credential: Any,
+    config: SearchSetupConfig,
 ) -> None:
     payload = {
-        "name": KNOWLEDGE_BASE,
+        "name": config.knowledge_base,
         "description": "Customer-support orders and return-policy knowledge.",
         "retrievalInstructions": " ".join(
-            source.retrieval_instruction for source in SEARCH_SOURCES
+            source.retrieval_instruction for source in config.sources
         ),
         "knowledgeSources": [
             {"name": source.knowledge_source_name}
-            for source in SEARCH_SOURCES
+            for source in config.sources
         ],
         "models": [
             {
                 "kind": "azureOpenAI",
                 "azureOpenAIParameters": {
-                    "resourceUri": OPENAI_RESOURCE_URI,
-                    "deploymentId": CHAT_DEPLOYMENT,
-                    "modelName": CHAT_MODEL,
+                    "resourceUri": config.openai_resource_uri,
+                    "deploymentId": config.chat_deployment,
+                    "modelName": config.chat_model,
                 },
             }
         ],
@@ -354,30 +399,39 @@ async def _create_knowledge_base(
         client,
         credential,
         "PUT",
-        f"/knowledgebases/{KNOWLEDGE_BASE}",
-        api_version=KNOWLEDGE_API_VERSION,
+        f"/knowledgebases/{config.knowledge_base}",
+        api_version=config.knowledge_api_version,
         payload=payload,
     )
-    print(f"[setup] knowledge base ready: {KNOWLEDGE_BASE}")
+    print(f"[setup] knowledge base ready: {config.knowledge_base}")
 
 
 async def main() -> None:
-    credential = _credential()
+    config = SearchSetupConfig.from_environment()
+    credential = _credential(config)
     token_provider = get_bearer_token_provider(
         credential, "https://cognitiveservices.azure.com/.default"
     )
     openai_client = AsyncAzureOpenAI(
-        azure_endpoint=OPENAI_ENDPOINT,
+        azure_endpoint=config.openai_endpoint,
         azure_ad_token_provider=token_provider,
-        api_version=OPENAI_API_VERSION,
+        api_version=config.openai_api_version,
     )
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120)) as client:
-            await _create_indexes(client, credential)
-            await _upload_documents(client, credential, openai_client)
-            await _create_knowledge_sources(client, credential)
-            await _create_knowledge_base(client, credential)
+        async with httpx.AsyncClient(
+            base_url=config.search_endpoint,
+            timeout=httpx.Timeout(120),
+        ) as client:
+            await _create_indexes(client, credential, config)
+            await _upload_documents(
+                client,
+                credential,
+                openai_client,
+                config,
+            )
+            await _create_knowledge_sources(client, credential, config)
+            await _create_knowledge_base(client, credential, config)
     finally:
         await openai_client.close()
         await credential.close()
