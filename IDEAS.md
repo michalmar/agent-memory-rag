@@ -2,6 +2,14 @@
 
 Use this file to collect workshop and project ideas. Active ideas stay here; implemented ideas are moved to the Archive section. New ideas are added first.
 
+## Migrate the directive agent to stateful continuation
+
+Replace stateless inner model replay with service-managed stateful continuation. Keep the outer Hosted Agent conversation as the application transcript, use a separate backend-owned inner Foundry model conversation with `AgentSession` and `store=true`, send only new input after bootstrap, and explicitly own concurrency, retries, retention, and deletion. Keep the support agent on its known-good dependency stack until the directive canary is accepted.
+
+**Implementation plan:** [`TEMP-plan-stateful-continuation.md`](docs/TEMP-plan-stateful-continuation.md)
+
+<sub>**Date:** 2026-07-24 · **Author:** Unknown · **Implemented:** No</sub>
+
 ## Use Azure Blob Storage as the directive source
 
 Store uploaded directive PDFs in a dedicated `directive-source` container in the existing directive storage account. Add a managed-identity Blob source adapter while keeping generated immutable PDFs, canonical Markdown, sections, manifests, and summaries in the existing `directive-artifacts` container.
