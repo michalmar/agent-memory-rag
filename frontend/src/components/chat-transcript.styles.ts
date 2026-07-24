@@ -240,8 +240,7 @@ export const chatTranscriptStyles = css`
     gap: 8px;
   }
 
-  .message-tools,
-  .message-sources {
+  .message-tools {
     display: flex;
     margin-top: 10px;
     align-items: center;
@@ -256,6 +255,7 @@ export const chatTranscriptStyles = css`
   }
 
   .message-tools-label,
+  .message-citations-label,
   .message-sources-label {
     font-weight: 600;
   }
@@ -272,37 +272,110 @@ export const chatTranscriptStyles = css`
     content: '·';
   }
 
-  .message-sources {
-    align-items: flex-start;
+  .message-citations {
+    display: grid;
+    min-width: 0;
+    margin-top: 10px;
+    color: var(--fg-muted);
+    font-size: 0.68rem;
+    line-height: 1.4;
+    gap: 8px;
   }
 
-  .message-sources-label {
+  .message-documents {
+    display: grid;
+    min-width: 0;
+    align-items: start;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  .message-citations-label {
     padding-top: 3px;
   }
 
-  .message-source-links {
-    display: flex;
+  .message-document-list,
+  .message-source-list {
+    display: grid;
     min-width: 0;
-    flex-wrap: wrap;
-    gap: 4px 12px;
+    padding: 0;
+    margin: 0;
+    grid-template-columns: minmax(0, 1fr);
+    list-style: none;
+    gap: 4px;
   }
 
-  .message-source {
+  .message-document-item,
+  .message-source-item {
+    min-width: 0;
+  }
+
+  .message-sources {
+    min-width: 0;
+  }
+
+  .message-sources-summary {
     display: inline-flex;
+    align-items: center;
+    border-radius: 4px;
+    cursor: pointer;
+    gap: 4px;
+    list-style: none;
+  }
+
+  .message-sources-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .message-sources-summary::marker {
+    content: '';
+  }
+
+  .message-sources-summary:hover {
+    color: var(--fg);
+  }
+
+  .message-sources-count {
+    min-width: 18px;
+    padding: 0 5px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 0.58rem;
+    text-align: center;
+  }
+
+  .message-sources-chevron {
+    font-size: 0.88rem;
+    transition: transform 120ms ease;
+  }
+
+  .message-sources[open] .message-sources-chevron {
+    transform: rotate(180deg);
+  }
+
+  .message-source-list {
+    margin-top: 6px;
+  }
+
+  .message-document,
+  .message-source {
+    display: grid;
+    width: 100%;
     min-width: 0;
     align-items: center;
+    box-sizing: border-box;
     border-radius: 3px;
     color: var(--fg-muted);
     font-size: 0.7rem;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 4px;
     line-height: 1.35;
     text-decoration: none;
   }
 
   .message-source-text {
-    display: inline-flex;
+    display: flex;
     min-width: 0;
-    max-width: 280px;
     flex-direction: column;
   }
 
@@ -318,17 +391,31 @@ export const chatTranscriptStyles = css`
     font-size: 0.62rem;
   }
 
-  a.message-source {
+  a.message-document .message-source-name,
+  a.message-source .message-source-name {
     text-decoration: underline;
     text-decoration-color: var(--border-strong);
     text-underline-offset: 2px;
   }
 
+  a.message-document:hover,
   a.message-source:hover {
     color: var(--accent);
+  }
+
+  a.message-document:hover .message-source-name,
+  a.message-source:hover .message-source-name {
     text-decoration-color: currentColor;
   }
 
+  .message-document:focus-visible,
+  .message-source:focus-visible,
+  .message-sources-summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .message-document .material-symbols-outlined,
   .message-source .material-symbols-outlined {
     flex: 0 0 auto;
     font-size: 0.82rem;

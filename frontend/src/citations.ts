@@ -4,11 +4,34 @@ import type {
 } from './client.js';
 
 const CITATION_MARKER = /【(\d+):([^†】]+)†([^】]+)】/g;
+const MERGEABLE_CITATION_FIELDS = [
+  'url',
+  'search_idx',
+  'directive_id',
+  'directive_version_id',
+  'version_label',
+  'section_id',
+  'section_number',
+  'section_title',
+  'page_from',
+  'page_to',
+  'effective_from',
+  'mandatory_status',
+  'mandate_snapshot_id',
+  'retrieval_strategy',
+  'coverage',
+] as const;
 
 export interface CitationMarker {
   searchIndex: number;
   refId: string;
   sourceName: string;
+}
+
+export interface CitationDocument {
+  citation: CitationSource;
+  firstSourceIndex: number;
+  sourceCount: number;
 }
 
 function citationValues(value: unknown): unknown[] {
@@ -120,23 +143,7 @@ export function mergeCitations(
       ) {
         existing.mandatory_status = citation.mandatory_status;
       }
-      for (const field of [
-        'url',
-        'search_idx',
-        'directive_id',
-        'directive_version_id',
-        'version_label',
-        'section_id',
-        'section_number',
-        'section_title',
-        'page_from',
-        'page_to',
-        'effective_from',
-        'mandatory_status',
-        'mandate_snapshot_id',
-        'retrieval_strategy',
-        'coverage',
-      ] as const) {
+      for (const field of MERGEABLE_CITATION_FIELDS) {
         if (existing[field] == null && citation[field] != null) {
           Object.assign(existing, { [field]: citation[field] });
         }
@@ -147,6 +154,77 @@ export function mergeCitations(
     merged.push({ ...citation });
   }
   return merged;
+}
+
+export function groupCitationsByDocument(
+  citations: CitationSource[],
+): CitationDocument[] {
+  const documents: CitationDocument[] = [];
+  const positions = new Map<string, number>();
+
+  for (const [sourceIndex, citation] of citations.entries()) {
+    const key = documentKey(citation);
+    const existingIndex = positions.get(key);
+    if (existingIndex === undefined) {
+      positions.set(key, documents.length);
+      documents.push({
+        citation: { ...citation },
+        firstSourceIndex: sourceIndex,
+        sourceCount: 1,
+      });
+      continue;
+    }
+
+    const document = documents[existingIndex];
+    const currentStatus = document.citation.mandatory_status;
+    for (const field of MERGEABLE_CITATION_FIELDS) {
+      if (
+        field !== 'mandatory_status'
+        && document.citation[field] == null
+        && citation[field] != null
+      ) {
+        Object.assign(document.citation, { [field]: citation[field] });
+      }
+    }
+    document.citation.mandatory_status = mergeMandatoryStatus(
+      currentStatus,
+      citation.mandatory_status,
+    );
+    document.sourceCount += 1;
+  }
+
+  return documents;
+}
+
+function documentKey(citation: CitationSource): string {
+  if (citation.directive_version_id) {
+    return `directive-version\u0000${citation.directive_version_id}`;
+  }
+  if (citation.directive_id) {
+    return [
+      'directive',
+      citation.directive_id,
+      citation.version_label ?? '',
+    ].join('\u0000');
+  }
+  const name = citation.source_name
+    .replace(/【[^】]+】/g, '')
+    .trim()
+    .toLowerCase();
+  return [
+    'source',
+    name || citation.ref_id,
+    citation.version_label ?? '',
+  ].join('\u0000');
+}
+
+function mergeMandatoryStatus(
+  current: MandatoryStatus | undefined,
+  addition: MandatoryStatus | undefined,
+): MandatoryStatus | undefined {
+  if (!current || current === 'unknown') return addition ?? current;
+  if (!addition || addition === 'unknown') return current;
+  return current === addition ? current : 'unknown';
 }
 
 function citationKey(citation: CitationSource): string {

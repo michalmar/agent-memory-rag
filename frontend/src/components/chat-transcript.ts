@@ -10,8 +10,10 @@ import type { ChatTurn } from '../chat-models.js';
 import {
   findCitationByIdentity,
   findCitationBySearchIndex,
+  groupCitationsByDocument,
   replaceCitationMarkers,
 } from '../citations.js';
+import type { CitationDocument } from '../citations.js';
 import type {
   AgentOption,
   AgentType,
@@ -169,7 +171,7 @@ export class ChatTranscript extends LightDomElement {
               </div>`
             : nothing}
           ${this.renderToolActivity(turn)}
-          ${this.renderSources(turn)}
+          ${this.renderCitations(turn)}
           ${this.renderAssistantFooter(turn, responding)}
           ${turn.error
             ? html`<div class="error-message" role="alert">
@@ -195,51 +197,122 @@ export class ChatTranscript extends LightDomElement {
     `;
   }
 
-  private renderSources(turn: ChatTurn) {
+  private renderCitations(turn: ChatTurn) {
     if (turn.role !== 'assistant' || turn.citations.length === 0) return nothing;
+    const documents = groupCitationsByDocument(turn.citations);
     return html`
-      <div class="message-sources" aria-label="Sources">
-        <span class="message-sources-label">Sources</span>
-        <div class="message-source-links">
-          ${turn.citations.map((citation, index) => {
-            const target = this.citationTarget(turn, index);
-            const name = this.citationName(citation, index);
-            const details = this.citationDetails(citation);
-            const url = this.citationUrl(citation);
-            const content = html`
-              <span class="material-symbols-outlined" aria-hidden="true">
-                description
-              </span>
-              <span class="message-source-text">
-                <span class="message-source-name">${name}</span>
-                ${details
-                  ? html`<span class="message-source-details">${details}</span>`
-                  : nothing}
-              </span>
-              ${this.renderMandatoryStatus(citation)}
-            `;
-            return url
-              ? html`<a
-                  id=${target}
-                  class="message-source"
-                  href=${url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  aria-label=${`Source ${index + 1}: ${name} (opens in a new tab)`}
-                >
-                  ${content}
-                </a>`
-              : html`<span
-                  id=${target}
-                  class="message-source"
-                  tabindex="-1"
-                  title=${citation.ref_id}
-                >
-                  ${content}
-                </span>`;
-          })}
+      <div class="message-citations">
+        <div class="message-documents" role="group" aria-label="Documents">
+          <span class="message-citations-label">Documents</span>
+          <ul class="message-document-list" role="list">
+            ${documents.map((document, index) =>
+              this.renderDocument(document, index))}
+          </ul>
         </div>
+        <details class="message-sources">
+          <summary class="message-sources-summary">
+            <span class="message-sources-label">Sources</span>
+            <span
+              class="message-sources-count"
+              aria-label=${`${turn.citations.length} sources`}
+            >${turn.citations.length}</span>
+            <span
+              class="message-sources-chevron material-symbols-outlined"
+              aria-hidden="true"
+            >expand_more</span>
+          </summary>
+          <ol class="message-source-list" role="list">
+            ${turn.citations.map((citation, index) =>
+              this.renderSource(turn, citation, index))}
+          </ol>
+        </details>
       </div>
+    `;
+  }
+
+  private renderDocument(document: CitationDocument, index: number) {
+    const citation = document.citation;
+    const name = this.citationName(citation, document.firstSourceIndex);
+    const details = this.documentDetails(document);
+    const title = this.citationTitle(name, details);
+    const url = this.citationUrl(citation);
+    const content = this.renderCitationContent(
+      citation,
+      name,
+      details,
+      'article',
+    );
+    return html`
+      <li class="message-document-item">
+        ${url
+          ? html`<a
+              class="message-document"
+              href=${url}
+              target="_blank"
+              rel="noopener noreferrer"
+              title=${title}
+              aria-label=${`Document ${index + 1}: ${name} (opens in a new tab)`}
+            >${content}</a>`
+          : html`<span class="message-document" title=${title}>
+              ${content}
+            </span>`}
+      </li>
+    `;
+  }
+
+  private renderSource(
+    turn: ChatTurn,
+    citation: CitationSource,
+    index: number,
+  ) {
+    const target = this.citationTarget(turn, index);
+    const name = this.citationName(citation, index);
+    const details = this.citationDetails(citation);
+    const title = this.citationTitle(name, details);
+    const url = this.citationUrl(citation);
+    const content = this.renderCitationContent(
+      citation,
+      name,
+      details,
+      'description',
+    );
+    return html`
+      <li class="message-source-item">
+        ${url
+          ? html`<a
+              id=${target}
+              class="message-source"
+              href=${url}
+              target="_blank"
+              rel="noopener noreferrer"
+              title=${title}
+              aria-label=${`Source ${index + 1}: ${name} (opens in a new tab)`}
+            >${content}</a>`
+          : html`<span
+              id=${target}
+              class="message-source"
+              tabindex="-1"
+              title=${title}
+            >${content}</span>`}
+      </li>
+    `;
+  }
+
+  private renderCitationContent(
+    citation: CitationSource,
+    name: string,
+    details: string,
+    icon: string,
+  ) {
+    return html`
+      <span class="material-symbols-outlined" aria-hidden="true">${icon}</span>
+      <span class="message-source-text">
+        <span class="message-source-name">${name}</span>
+        ${details
+          ? html`<span class="message-source-details">${details}</span>`
+          : nothing}
+      </span>
+      ${this.renderMandatoryStatus(citation)}
     `;
   }
 
@@ -338,6 +411,23 @@ export class ChatTranscript extends LightDomElement {
     return details.join(' · ');
   }
 
+  private documentDetails(document: CitationDocument): string {
+    const details: string[] = [];
+    const citation = document.citation;
+    if (citation.version_label) details.push(`Version ${citation.version_label}`);
+    if (citation.effective_from) {
+      details.push(`Effective ${citation.effective_from}`);
+    }
+    details.push(
+      `${document.sourceCount} citation${document.sourceCount === 1 ? '' : 's'}`,
+    );
+    return details.join(' · ');
+  }
+
+  private citationTitle(name: string, details: string): string {
+    return details ? `${name} — ${details}` : name;
+  }
+
   private renderMandatoryStatus(citation: CitationSource) {
     if (!citation.directive_id) return nothing;
     const status = citation.mandatory_status ?? 'unknown';
@@ -420,6 +510,10 @@ export class ChatTranscript extends LightDomElement {
     const source = this.querySelector<HTMLElement>(`#${target}`);
     if (!source) return;
     event.preventDefault();
+    const sourcesPanel = source.closest<HTMLDetailsElement>(
+      'details.message-sources',
+    );
+    if (sourcesPanel) sourcesPanel.open = true;
     source.scrollIntoView({ block: 'nearest' });
     source.focus({ preventScroll: true });
   };

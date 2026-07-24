@@ -4,6 +4,7 @@ import {
   extractToolCitations,
   findCitationByIdentity,
   findCitationBySearchIndex,
+  groupCitationsByDocument,
   mergeCitations,
   parseCitations,
   replaceCitationMarkers,
@@ -114,5 +115,93 @@ describe('citation utilities', () => {
       mandate_snapshot_id: 'snapshot-1',
     });
     expect(merged[1].section_id).toBe('s2');
+  });
+
+  it('groups chunk citations by parent document and keeps versions distinct', () => {
+    const documents = groupCitationsByDocument([
+      {
+        ref_id: 'policy-v2-s1',
+        source_name: 'Travel policy',
+        directive_id: 'DIR-1',
+        directive_version_id: 'DIR-1:v2',
+        version_label: '2.0',
+        section_id: 's1',
+        mandatory_status: 'unknown',
+      },
+      {
+        ref_id: 'policy-v2-s2',
+        source_name: 'Travel policy',
+        directive_id: 'DIR-1',
+        directive_version_id: 'DIR-1:v2',
+        version_label: '2.0',
+        section_id: 's2',
+        effective_from: '2026-01-01',
+        mandatory_status: 'mandatory',
+      },
+      {
+        ref_id: 'policy-v1-s1',
+        source_name: 'Travel policy',
+        directive_id: 'DIR-1',
+        directive_version_id: 'DIR-1:v1',
+        version_label: '1.0',
+        mandatory_status: 'non_mandatory',
+      },
+    ]);
+
+    expect(documents).toHaveLength(2);
+    expect(documents[0]).toMatchObject({
+      firstSourceIndex: 0,
+      sourceCount: 2,
+      citation: {
+        directive_version_id: 'DIR-1:v2',
+        effective_from: '2026-01-01',
+        mandatory_status: 'mandatory',
+      },
+    });
+    expect(documents[1]).toMatchObject({
+      firstSourceIndex: 2,
+      sourceCount: 1,
+      citation: {
+        directive_version_id: 'DIR-1:v1',
+        mandatory_status: 'non_mandatory',
+      },
+    });
+  });
+
+  it('groups non-directive chunks by source name', () => {
+    const documents = groupCitationsByDocument([
+      { ref_id: 'chunk-1', source_name: 'Benefits handbook' },
+      { ref_id: 'chunk-2', source_name: 'Benefits handbook' },
+      { ref_id: 'chunk-3', source_name: 'Expense guide' },
+    ]);
+
+    expect(documents.map(({ citation, sourceCount }) => ({
+      name: citation.source_name,
+      sourceCount,
+    }))).toEqual([
+      { name: 'Benefits handbook', sourceCount: 2 },
+      { name: 'Expense guide', sourceCount: 1 },
+    ]);
+  });
+
+  it('marks conflicting parent-document statuses as unknown', () => {
+    const [document] = groupCitationsByDocument([
+      {
+        ref_id: 'policy-s1',
+        source_name: 'Travel policy',
+        directive_id: 'DIR-1',
+        directive_version_id: 'DIR-1:v2',
+        mandatory_status: 'mandatory',
+      },
+      {
+        ref_id: 'policy-s2',
+        source_name: 'Travel policy',
+        directive_id: 'DIR-1',
+        directive_version_id: 'DIR-1:v2',
+        mandatory_status: 'non_mandatory',
+      },
+    ]);
+
+    expect(document.citation.mandatory_status).toBe('unknown');
   });
 });
