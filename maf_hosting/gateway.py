@@ -18,6 +18,7 @@ class ResolvedAgentState:
     inner_model_conversation_id: str
     bootstrap_required: bool
     release_id: str
+    revision: int
 
 
 def _resolve_timeout(
@@ -75,46 +76,69 @@ async def invoke_gateway_tool(
 
 
 async def resolve_agent_state(
-    outer_conversation_id: str,
+    outer_foundry_conversation_id: str,
     *,
     timeout: float = 30.0,
 ) -> ResolvedAgentState:
     payload = await _invoke_state_endpoint(
         "resolve",
-        outer_conversation_id,
+        outer_foundry_conversation_id,
         timeout=timeout,
     )
     inner_id = payload.get("inner_model_conversation_id")
     bootstrap_required = payload.get("bootstrap_required")
     release_id = payload.get("release_id")
+    revision = payload.get("revision")
     if (
         not isinstance(inner_id, str)
         or not inner_id.startswith("conv_")
         or not isinstance(bootstrap_required, bool)
         or not isinstance(release_id, str)
         or not release_id
+        or not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 1
     ):
         raise RuntimeError("Agent state gateway returned an invalid response")
-    return ResolvedAgentState(inner_id, bootstrap_required, release_id)
+    return ResolvedAgentState(
+        inner_id,
+        bootstrap_required,
+        release_id,
+        revision,
+    )
 
 
-async def complete_agent_state_bootstrap(
-    outer_conversation_id: str,
+async def complete_agent_state_turn(
+    outer_foundry_conversation_id: str,
     *,
     timeout: float = 30.0,
 ) -> None:
     payload = await _invoke_state_endpoint(
-        "bootstrap-complete",
-        outer_conversation_id,
+        "turn-complete",
+        outer_foundry_conversation_id,
         timeout=timeout,
     )
     if payload.get("status") != "ready":
-        raise RuntimeError("Agent state gateway rejected bootstrap completion")
+        raise RuntimeError("Agent state gateway rejected turn completion")
+
+
+async def fail_agent_state_turn(
+    outer_foundry_conversation_id: str,
+    *,
+    timeout: float = 30.0,
+) -> None:
+    payload = await _invoke_state_endpoint(
+        "turn-failed",
+        outer_foundry_conversation_id,
+        timeout=timeout,
+    )
+    if payload.get("status") != "failed":
+        raise RuntimeError("Agent state gateway rejected turn failure")
 
 
 async def _invoke_state_endpoint(
     action: str,
-    outer_conversation_id: str,
+    outer_foundry_conversation_id: str,
     *,
     timeout: float,
 ) -> dict[str, Any]:
@@ -129,12 +153,12 @@ async def _invoke_state_endpoint(
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(
             url,
-            headers={"Authorization": f"******"},
+            headers={"Authorization": "Bearer " + token.token},
             json={
                 "user_id": context.user_id,
                 "session_id": context.session_id,
                 "call_id": context.call_id,
-                "outer_conversation_id": outer_conversation_id,
+                "outer_foundry_conversation_id": outer_foundry_conversation_id,
             },
         )
         response.raise_for_status()

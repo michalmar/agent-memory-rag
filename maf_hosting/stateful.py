@@ -5,13 +5,18 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import AsyncIterable
+from contextlib import suppress
 from contextvars import ContextVar
 from typing import Any
 
 from agent_framework import AgentSession
 from agent_framework_foundry_hosting import ResponsesHostServer
 
-from .gateway import complete_agent_state_bootstrap, resolve_agent_state
+from .gateway import (
+    complete_agent_state_turn,
+    fail_agent_state_turn,
+    resolve_agent_state,
+)
 
 _active_session: ContextVar[AgentSession | None] = ContextVar(
     "active_agent_session",
@@ -77,10 +82,10 @@ class StatefulResponsesHostServer(ResponsesHostServer):
         request: Any,
         context: Any,
     ) -> AsyncIterable[Any]:
-        outer_id = getattr(context, "conversation_id", None)
-        if not isinstance(outer_id, str) or not outer_id:
+        outer_foundry_id = getattr(context, "conversation_id", None)
+        if not isinstance(outer_foundry_id, str) or not outer_foundry_id:
             raise RuntimeError("Outer Hosted Agent conversation is missing")
-        state = await resolve_agent_state(outer_id)
+        state = await resolve_agent_state(outer_foundry_id)
         expected_release = os.environ["DIRECTIVE_AGENT_RELEASE_ID"]
         if state.release_id != expected_release:
             raise RuntimeError("Directive Agent release binding mismatch")
@@ -92,17 +97,26 @@ class StatefulResponsesHostServer(ResponsesHostServer):
                     service_session_id=state.inner_model_conversation_id,
                 )
             )
+            turn_closed = False
             try:
                 proxy = _HistoryContext(
                     context,
                     include_history=state.bootstrap_required,
                 )
                 async for event in super()._handle_inner_agent(request, proxy):
-                    if (
-                        state.bootstrap_required
-                        and getattr(event, "type", None) == "response.completed"
-                    ):
-                        await complete_agent_state_bootstrap(outer_id)
+                    event_type = getattr(event, "type", None)
+                    if event_type == "response.completed":
+                        await complete_agent_state_turn(outer_foundry_id)
+                        turn_closed = True
+                    elif event_type == "response.failed":
+                        await fail_agent_state_turn(outer_foundry_id)
+                        turn_closed = True
                     yield event
             finally:
+                if not turn_closed:
+                    cleanup = asyncio.create_task(
+                        fail_agent_state_turn(outer_foundry_id)
+                    )
+                    with suppress(Exception, asyncio.CancelledError):
+                        await asyncio.shield(cleanup)
                 _active_session.reset(token)

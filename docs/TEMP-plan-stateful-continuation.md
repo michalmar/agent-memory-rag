@@ -1,6 +1,6 @@
 # Stateful Continuation Migration Plan
 
-Status: Captured as an active idea; implementation not started.
+Status: Implemented in code; deployment canary and operational acceptance remain.
 
 ## Decision
 

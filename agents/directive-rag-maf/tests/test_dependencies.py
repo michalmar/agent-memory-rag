@@ -12,20 +12,26 @@ REQUIREMENTS = (
     / "directive-rag-maf"
     / "requirements.txt"
 )
-HOSTING_REQUIREMENT = "agent-framework-foundry-hosting==1.0.0b260722"
+REQUIRED_STACK = {
+    "agent-framework-core==1.12.1",
+    "agent-framework-foundry==1.10.1",
+    "agent-framework-foundry-hosting==1.0.0b260722",
+    "agent-framework-openai==1.11.0",
+    "openai==2.48.0",
+}
 
 
 class DependencyCompatibilityTests(unittest.TestCase):
-    def test_hosting_dependency_pins_reasoning_replay_fix(self) -> None:
+    def test_stateful_directive_stack_is_fully_pinned(self) -> None:
         requirements = {
             line.strip()
             for line in REQUIREMENTS.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         }
 
-        self.assertIn(HOSTING_REQUIREMENT, requirements)
+        self.assertTrue(REQUIRED_STACK.issubset(requirements))
 
-    def test_stateless_directive_request_includes_encrypted_reasoning(self) -> None:
+    def test_stateful_directive_request_omits_encrypted_reasoning(self) -> None:
         from agent_framework import Message
         from agent_framework_openai._chat_client import RawOpenAIChatClient
 
@@ -33,11 +39,15 @@ class DependencyCompatibilityTests(unittest.TestCase):
         options = asyncio.run(
             client._prepare_options(
                 [Message("user", ["Hello"])],
-                {"model": "gpt-5.6-sol", "store": False},
+                {
+                    "model": "gpt-5.6-sol",
+                    "store": True,
+                    "conversation_id": "conv_inner",
+                },
             )
         )
 
-        self.assertIn(
+        self.assertNotIn(
             "reasoning.encrypted_content",
             options.get("include", []),
         )

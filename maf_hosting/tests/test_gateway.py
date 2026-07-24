@@ -154,6 +154,67 @@ class GatewayInvocationTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "context is incomplete"):
                 await gateway.invoke_gateway_tool("get_user_context", {})
 
+    async def test_state_resolution_is_authenticated_and_session_bound(self) -> None:
+        response = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "inner_model_conversation_id": "conv_inner",
+                "bootstrap_required": False,
+                "release_id": "release-1",
+                "revision": 1,
+            },
+        )
+        client = AsyncMock()
+        client.__aenter__.return_value = client
+        client.__aexit__.return_value = None
+        client.post.return_value = response
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "APP_TOOL_GATEWAY_URL": "https://frontend.example",
+                    "APP_TOOL_GATEWAY_SCOPE": "api://app/.default",
+                },
+                clear=True,
+            ),
+            patch.object(
+                gateway,
+                "get_request_context",
+                return_value=SimpleNamespace(
+                    user_id="tenant:user",
+                    session_id="session-1",
+                    call_id="call-1",
+                ),
+            ),
+            patch.object(
+                gateway._credential,
+                "get_token",
+                new=AsyncMock(return_value=SimpleNamespace(token="token")),
+            ),
+            patch.object(
+                gateway.httpx,
+                "AsyncClient",
+                return_value=client,
+            ),
+        ):
+            state = await gateway.resolve_agent_state("outer-foundry")
+
+        self.assertEqual(state.inner_model_conversation_id, "conv_inner")
+        request = client.post.await_args
+        self.assertEqual(
+            request.kwargs["headers"],
+            {"Authorization": "Bearer " + "token"},
+        )
+        self.assertEqual(
+            request.kwargs["json"],
+            {
+                "user_id": "tenant:user",
+                "session_id": "session-1",
+                "call_id": "call-1",
+                "outer_foundry_conversation_id": "outer-foundry",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

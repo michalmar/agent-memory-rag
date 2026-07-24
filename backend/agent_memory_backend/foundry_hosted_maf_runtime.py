@@ -375,6 +375,13 @@ class FoundryHostedMafRuntime:
             if bootstrap_required
             else InnerStateStatus.READY
         )
+        state.descriptor = RuntimeDescriptor(
+            agent_type=self._agent_type,
+            physical_agent_name=self._physical_agent_name,
+            release_id=self._release_id,
+            prompt_version=self._prompt_version,
+            observed_agent_version=state.descriptor.observed_agent_version,
+        )
         state.schema_version = 4
         return conversation.id
 
@@ -383,10 +390,24 @@ class FoundryHostedMafRuntime:
         inner_conversation_id: str,
         authenticated_user_id: str,
     ) -> None:
-        await self._require_openai().conversations.delete(
-            conversation_id=inner_conversation_id,
-            extra_headers=self._headers(authenticated_user_id),
+        await self._delete_conversation_if_present(
+            inner_conversation_id,
+            self._headers(authenticated_user_id),
         )
+
+    async def _delete_conversation_if_present(
+        self,
+        conversation_id: str,
+        headers: dict[str, str],
+    ) -> None:
+        try:
+            await self._require_openai().conversations.delete(
+                conversation_id=conversation_id,
+                extra_headers=headers,
+            )
+        except Exception as exc:
+            if getattr(exc, "status_code", None) != 404:
+                raise
 
     async def stream_turn(
         self, message: str, context: TurnContext
@@ -549,21 +570,25 @@ class FoundryHostedMafRuntime:
     ) -> None:
         headers = self._headers(authenticated_user_id)
         if state.inner_model_conversation_id:
-            await self._require_openai().conversations.delete(
-                conversation_id=state.inner_model_conversation_id,
-                extra_headers=headers,
+            await self._delete_conversation_if_present(
+                state.inner_model_conversation_id,
+                headers,
             )
         if state.foundry_conversation_id:
-            await self._require_openai().conversations.delete(
-                conversation_id=state.foundry_conversation_id,
-                extra_headers=headers,
+            await self._delete_conversation_if_present(
+                state.foundry_conversation_id,
+                headers,
             )
         if state.hosted_session_id:
-            await self._project.agents.delete_session(
-                agent_name=self._physical_agent_name,
-                session_id=state.hosted_session_id,
-                headers=headers,
-            )
+            try:
+                await self._project.agents.delete_session(
+                    agent_name=self._physical_agent_name,
+                    session_id=state.hosted_session_id,
+                    headers=headers,
+                )
+            except Exception as exc:
+                if getattr(exc, "status_code", None) != 404:
+                    raise
 
     async def health_check(self) -> None:
         if self._project is None or self._openai is None:

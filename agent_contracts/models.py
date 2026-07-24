@@ -124,6 +124,11 @@ class RuntimeState:
     hosted_session_id: str | None = None
     inner_model_conversation_id: str | None = None
     inner_state_status: InnerStateStatus | None = None
+    inner_pending_call_id: str | None = None
+    inner_pending_started_at: str | None = None
+    inner_last_completed_call_id: str | None = None
+    inner_last_failed_call_id: str | None = None
+    inner_state_revision: int = 0
     last_response_id: str | None = None
     schema_version: int = 4
 

@@ -63,7 +63,8 @@ channel tools.
   application-tool schemas, runtime state, citation/result envelopes, and
   normalized agent events.
 - **MAF hosting foundation** (`maf_hosting/`) - shared Hosted Agent identity,
-  observability middleware, gateway transport, and runtime startup.
+  observability middleware, gateway transport, runtime startup, and
+  directive-only stateful continuation.
 - **Native Prompt release** (`setup/agents/`) - idempotently publishes an immutable
   Prompt Agent definition containing exactly one Foundry IQ MCP tool.
 - **Hosted MAF agent** (`agents/customer-support-maf/`) - uses
@@ -72,9 +73,10 @@ channel tools.
   `gpt-4o-mini` calls from requesting unsupported encrypted reasoning content.
 - **Directive Hosted MAF agent** (`agents/directive-rag-maf/`) - separately
   packaged GPT-5.6 agent with exactly eight RequestContext-backed gateway tools
-  and no support IQ, order, profile, memory, or direct data-plane access; its
-  stateless multi-tool flow intentionally round-trips encrypted reasoning
-  between model calls.
+  and no support IQ, order, profile, memory, or direct data-plane access. A
+  backend-owned inner Foundry conversation and `AgentSession` provide
+  `store=true` continuation without replaying prior outer history after
+  bootstrap.
 - **Frontend** (`frontend/`) - Vite + Lit SPA with a login-first Entra gate,
   immutable agent selection, Markdown/citation streaming, and a constrained A2UI
   subset for internal tool cards.

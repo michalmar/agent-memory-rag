@@ -22,8 +22,9 @@ from .agent_mcp import application_tools_mcp_app
 from .agent_tool_gateway import (
     AgentStateRequest,
     AgentToolRequest,
-    complete_agent_state_bootstrap,
+    complete_agent_state_turn,
     dispatch_agent_tool,
+    fail_agent_state_turn,
     resolve_agent_state,
 )
 from .auth import AgentCaller, User, get_agent_caller, get_current_user
@@ -254,12 +255,20 @@ async def resolve_hosted_agent_state(
     return await resolve_agent_state(request, caller, history_store)
 
 
-@app.post("/internal/agent-state/bootstrap-complete")
-async def complete_hosted_agent_state_bootstrap(
+@app.post("/internal/agent-state/turn-complete")
+async def complete_hosted_agent_state_turn(
     request: AgentStateRequest,
     caller: AgentCaller = Depends(get_agent_caller),
 ):
-    return await complete_agent_state_bootstrap(request, caller, history_store)
+    return await complete_agent_state_turn(request, caller, history_store)
+
+
+@app.post("/internal/agent-state/turn-failed")
+async def fail_hosted_agent_state_turn(
+    request: AgentStateRequest,
+    caller: AgentCaller = Depends(get_agent_caller),
+):
+    return await fail_agent_state_turn(request, caller, history_store)
 
 
 @app.get("/profile")

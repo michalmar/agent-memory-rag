@@ -117,12 +117,12 @@ class ConversationCoordinator:
         document = await self._history.get_conversation(conversation_id, user_id)
         if document is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        await self._memory.delete_by_conversation(conversation_id, user_id)
         state = runtime_state_from_document(document)
         if state is not None and state.descriptor.agent_type in self._runtimes:
             await self._runtimes[state.descriptor.agent_type].delete_state(
                 state, user_id
             )
+        await self._memory.delete_by_conversation(conversation_id, user_id)
         if not await self._history.delete_conversation(conversation_id, user_id):
             raise HTTPException(status_code=404, detail="Conversation not found")
         self._registry.delete(conversation_id)

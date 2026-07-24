@@ -160,8 +160,9 @@ Logical name: `directive-rag-maf-hosted`
 - Runs as a separately versioned Foundry Hosted Agent using the GPT-5.6 Sol
   deployment and Hosted Responses protocol `2.0.0`.
 - Uses `agent-framework-foundry==1.10.1`,
-  `agent-framework-foundry-hosting==1.0.0b260722`, and the shared `maf_hosting`
-  foundation.
+  `agent-framework-foundry-hosting==1.0.0b260722`, Agent Framework Core
+  `1.12.1`, Agent Framework OpenAI `1.11.0`, OpenAI `2.48.0`, and the shared
+  `maf_hosting` foundation.
 - Exposes exactly eight RequestContext-backed gateway tools for directive
   identity resolution, discovery, manifests, full content, focused search,
   accepted relationships, precomputed summaries, and user mandate labels.
@@ -172,8 +173,14 @@ Logical name: `directive-rag-maf-hosted`
 - Defaults to 12 model/tool iterations, rejects values outside `1..30`, and
   keeps its 180-second Hosted gateway timeout above the backend's 120-second
   directive data-tool timeout.
-- Sets `store=False`; the backend continues to own conversation routing and
-  durable transcripts.
+- Keeps the outer Hosted conversation as the application transcript and stores
+  a separate backend-owned inner Foundry conversation for model/tool state.
+- Runs the inner agent with `store=True` and
+  `AgentSession(service_session_id=<inner conversation>)`; after one legacy
+  bootstrap, only new input is sent to the model.
+- Resolves inner state through the Agent-Identity-protected gateway, serializes
+  turns with a conditional Cosmos lease, and deletes inner state before the
+  outer conversation and Hosted session.
 
 ### 5.4 Shared contracts
 

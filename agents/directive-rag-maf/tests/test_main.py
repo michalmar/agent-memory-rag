@@ -67,7 +67,7 @@ class DirectiveHostedAgentTests(unittest.TestCase):
         self.assertNotIn("knowledge_base_retrieve", captured["tools"])
         self.assertNotIn("get_order_status", captured["tools"])
         self.assertIn("own retrieval planning", captured["instructions"])
-        self.assertEqual(captured["default_options"], {"store": False})
+        self.assertEqual(captured["default_options"], {"store": True})
 
     def test_iteration_ceiling_is_independent_and_bounded(self) -> None:
         with patch.dict(
