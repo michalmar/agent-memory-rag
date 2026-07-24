@@ -10,6 +10,7 @@ from typing import Any
 from agent_contracts import (
     AgentType,
     InnerStateStatus,
+    InnerTurnOutcome,
     MandatoryStatus,
     RuntimeDescriptor,
     RuntimeState,
@@ -49,6 +50,13 @@ def _runtime_metadata(state: RuntimeState) -> dict[str, Any]:
             ),
             "inner_pending_call_id": state.inner_pending_call_id,
             "inner_pending_started_at": state.inner_pending_started_at,
+            "inner_pending_revision": state.inner_pending_revision,
+            "inner_pending_outcome": (
+                state.inner_pending_outcome.value
+                if state.inner_pending_outcome
+                else None
+            ),
+            "inner_recovery_started_at": state.inner_recovery_started_at,
             "inner_last_completed_call_id": state.inner_last_completed_call_id,
             "inner_last_failed_call_id": state.inner_last_failed_call_id,
             "inner_state_revision": state.inner_state_revision,
@@ -64,6 +72,8 @@ def runtime_state_from_document(document: dict[str, Any]) -> RuntimeState | None
         return None
     private = metadata.get("runtime_state") or {}
     inner_status = private.get("inner_state_status")
+    pending_outcome = private.get("inner_pending_outcome")
+    pending_revision = private.get("inner_pending_revision")
     return RuntimeState(
         descriptor=RuntimeDescriptor(
             agent_type=AgentType(agent_type),
@@ -78,6 +88,13 @@ def runtime_state_from_document(document: dict[str, Any]) -> RuntimeState | None
         inner_state_status=InnerStateStatus(inner_status) if inner_status else None,
         inner_pending_call_id=private.get("inner_pending_call_id"),
         inner_pending_started_at=private.get("inner_pending_started_at"),
+        inner_pending_revision=(
+            int(pending_revision) if pending_revision is not None else None
+        ),
+        inner_pending_outcome=(
+            InnerTurnOutcome(pending_outcome) if pending_outcome else None
+        ),
+        inner_recovery_started_at=private.get("inner_recovery_started_at"),
         inner_last_completed_call_id=private.get(
             "inner_last_completed_call_id"
         ),
@@ -86,6 +103,59 @@ def runtime_state_from_document(document: dict[str, Any]) -> RuntimeState | None
         last_response_id=private.get("last_response_id"),
         schema_version=int(metadata.get("schema_version", 3)),
     )
+
+
+def _finalize_directive_turn(
+    persisted: RuntimeState | None,
+    observed: RuntimeState,
+) -> RuntimeState:
+    if (
+        persisted is None
+        or persisted.descriptor.agent_type is not AgentType.DIRECTIVE_RAG
+        or observed.descriptor.agent_type is not AgentType.DIRECTIVE_RAG
+        or persisted.descriptor.release_id != observed.descriptor.release_id
+        or persisted.foundry_conversation_id != observed.foundry_conversation_id
+        or persisted.hosted_session_id != observed.hosted_session_id
+        or persisted.inner_model_conversation_id
+        != observed.inner_model_conversation_id
+    ):
+        raise RuntimeError("Directive runtime binding changed during the turn")
+    if (
+        not persisted.inner_pending_call_id
+        or persisted.inner_pending_outcome is not InnerTurnOutcome.COMPLETED
+        or persisted.inner_state_status
+        not in {
+            InnerStateStatus.READY,
+            InnerStateStatus.BOOTSTRAP_REQUIRED,
+        }
+    ):
+        raise RuntimeError("Directive turn completion is not durable")
+
+    completed_call_id = persisted.inner_pending_call_id
+    persisted.inner_pending_call_id = None
+    persisted.inner_pending_started_at = None
+    persisted.inner_pending_revision = None
+    persisted.inner_pending_outcome = None
+    persisted.inner_recovery_started_at = None
+    persisted.inner_last_completed_call_id = completed_call_id
+    persisted.inner_state_status = InnerStateStatus.READY
+    persisted.inner_state_revision += 1
+    persisted.last_response_id = observed.last_response_id
+    persisted.schema_version = max(persisted.schema_version, observed.schema_version)
+    return persisted
+
+
+def _sync_directive_state(target: RuntimeState, source: RuntimeState) -> None:
+    target.inner_state_status = source.inner_state_status
+    target.inner_pending_call_id = source.inner_pending_call_id
+    target.inner_pending_started_at = source.inner_pending_started_at
+    target.inner_pending_revision = source.inner_pending_revision
+    target.inner_pending_outcome = source.inner_pending_outcome
+    target.inner_recovery_started_at = source.inner_recovery_started_at
+    target.inner_last_completed_call_id = source.inner_last_completed_call_id
+    target.inner_last_failed_call_id = source.inner_last_failed_call_id
+    target.inner_state_revision = source.inner_state_revision
+    target.schema_version = source.schema_version
 
 
 def _public_agent_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -358,13 +428,22 @@ class ConversationHistoryStore(CosmosContainerLifecycle):
             raise RuntimeError("Conversation does not exist")
         messages = list(existing.get("messages") or [])
         messages.extend(dict(message) for message in new_messages)
-        return await self._replace_conversation(
+        state_to_persist = runtime_state
+        if runtime_state.descriptor.agent_type is AgentType.DIRECTIVE_RAG:
+            state_to_persist = _finalize_directive_turn(
+                runtime_state_from_document(existing),
+                runtime_state,
+            )
+        replaced = await self._replace_conversation(
             existing,
             messages,
             title=title,
-            metadata=_runtime_metadata(runtime_state),
+            metadata=_runtime_metadata(state_to_persist),
             expected_etag=expected_etag or existing.get("_etag"),
         )
+        if state_to_persist is not runtime_state:
+            _sync_directive_state(runtime_state, state_to_persist)
+        return replaced
 
     async def list_conversations(
         self, user_id: str, limit: int = 50, offset: int = 0

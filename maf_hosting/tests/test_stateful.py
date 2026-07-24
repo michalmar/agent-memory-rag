@@ -76,7 +76,10 @@ class StatefulHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed["history"], [])
         self.assertIn("conv_inner", observed["service_session_id"])
         context.get_history.assert_not_awaited()
-        complete.assert_awaited_once_with("outer-conversation")
+        complete.assert_awaited_once_with(
+            "outer-conversation",
+            revision=1,
+        )
 
     async def test_bootstrap_loads_history_and_marks_completion(self) -> None:
         async def base_handler(self, request, context):
@@ -124,7 +127,10 @@ class StatefulHostTests(unittest.IsolatedAsyncioTestCase):
             ]
 
         context.get_history.assert_awaited_once_with()
-        complete.assert_awaited_once_with("outer-conversation")
+        complete.assert_awaited_once_with(
+            "outer-conversation",
+            revision=1,
+        )
 
     async def test_failed_response_releases_durable_turn_lease(self) -> None:
         async def base_handler(self, request, context):
@@ -167,7 +173,10 @@ class StatefulHostTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
 
-        fail.assert_awaited_once_with("outer-conversation")
+        fail.assert_awaited_once_with(
+            "outer-conversation",
+            revision=1,
+        )
 
     def test_pinned_host_override_signature_is_compatible(self) -> None:
         self.assertEqual(

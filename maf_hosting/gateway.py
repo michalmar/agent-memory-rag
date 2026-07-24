@@ -111,28 +111,32 @@ async def resolve_agent_state(
 async def complete_agent_state_turn(
     outer_foundry_conversation_id: str,
     *,
+    revision: int,
     timeout: float = 30.0,
 ) -> None:
     payload = await _invoke_state_endpoint(
         "turn-complete",
         outer_foundry_conversation_id,
+        revision=revision,
         timeout=timeout,
     )
-    if payload.get("status") != "ready":
+    if payload.get("status") not in {"completed", "ready"}:
         raise RuntimeError("Agent state gateway rejected turn completion")
 
 
 async def fail_agent_state_turn(
     outer_foundry_conversation_id: str,
     *,
+    revision: int,
     timeout: float = 30.0,
 ) -> None:
     payload = await _invoke_state_endpoint(
         "turn-failed",
         outer_foundry_conversation_id,
+        revision=revision,
         timeout=timeout,
     )
-    if payload.get("status") != "failed":
+    if payload.get("status") not in {"failed", "completed", "ready"}:
         raise RuntimeError("Agent state gateway rejected turn failure")
 
 
@@ -140,6 +144,7 @@ async def _invoke_state_endpoint(
     action: str,
     outer_foundry_conversation_id: str,
     *,
+    revision: int | None = None,
     timeout: float,
 ) -> dict[str, Any]:
     context = get_request_context()
@@ -151,15 +156,18 @@ async def _invoke_state_endpoint(
         f"agent-state/{action}"
     )
     async with httpx.AsyncClient(timeout=timeout) as client:
+        payload: dict[str, Any] = {
+            "user_id": context.user_id,
+            "session_id": context.session_id,
+            "call_id": context.call_id,
+            "outer_foundry_conversation_id": outer_foundry_conversation_id,
+        }
+        if revision is not None:
+            payload["revision"] = revision
         response = await client.post(
             url,
             headers={"Authorization": "Bearer " + token.token},
-            json={
-                "user_id": context.user_id,
-                "session_id": context.session_id,
-                "call_id": context.call_id,
-                "outer_foundry_conversation_id": outer_foundry_conversation_id,
-            },
+            json=payload,
         )
         response.raise_for_status()
         payload = response.json()

@@ -6,7 +6,7 @@ import os
 import unittest
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from ag_ui.core.events import CustomEvent
 from fastapi import HTTPException
@@ -337,6 +337,87 @@ class HostedRuntimeEndpointTests(unittest.IsolatedAsyncioTestCase):
         await runtime.health_check()
         await runtime.close()
 
+    async def test_directive_initialize_uses_state_probe_without_unbound_turn(
+        self,
+    ) -> None:
+        responses = SimpleNamespace(
+            create=AsyncMock(
+                side_effect=AssertionError("unbound response probe")
+            )
+        )
+        conversations = SimpleNamespace(
+            create=AsyncMock(
+                return_value=SimpleNamespace(id="health-conversation")
+            ),
+            delete=AsyncMock(),
+        )
+        hosted_openai = SimpleNamespace(
+            responses=responses,
+            close=AsyncMock(),
+        )
+        model_openai = SimpleNamespace(
+            conversations=conversations,
+            close=AsyncMock(),
+        )
+        agents = SimpleNamespace(
+            create_session=AsyncMock(
+                return_value=SimpleNamespace(agent_session_id="health-session")
+            ),
+            delete_session=AsyncMock(),
+        )
+        project = SimpleNamespace(
+            agents=agents,
+            get_openai_client=Mock(
+                side_effect=[hosted_openai, model_openai]
+            ),
+            close=AsyncMock(),
+        )
+        runtime = _hosted_runtime(
+            agent_type=AgentType.DIRECTIVE_RAG,
+            agent_name="directive-rag-maf-hosted",
+            release_id="directive-release",
+            prompt_version=DIRECTIVE_RAG_PROMPT_VERSION,
+        )
+
+        with (
+            patch(
+                "azure.ai.projects.aio.AIProjectClient",
+                return_value=project,
+            ),
+            patch(
+                "agent_memory_backend.foundry_hosted_maf_runtime.get_credential",
+                return_value=object(),
+            ),
+        ):
+            await runtime.initialize()
+
+        responses.create.assert_not_awaited()
+        project.get_openai_client.assert_has_calls(
+            [
+                call(
+                    agent_name="directive-rag-maf-hosted",
+                    base_url=(
+                        f"{_PROJECT_ENDPOINT}/agents/directive-rag-maf-hosted"
+                        "/endpoint/protocols/openai"
+                    ),
+                    default_query={"api-version": "v1"},
+                ),
+                call(),
+            ]
+        )
+        agents.create_session.assert_awaited_once()
+        conversations.create.assert_awaited_once_with(
+            items=[],
+            extra_headers={
+                "Foundry-Features": "HostedAgents=V1Preview",
+                "x-ms-user-identity": "runtime-health-probe",
+            },
+        )
+        conversations.delete.assert_awaited_once()
+        agents.delete_session.assert_awaited_once()
+        await runtime.health_check()
+        await runtime.close()
+
     async def test_probe_failure_closes_partially_initialized_clients(self) -> None:
         openai = SimpleNamespace(
             responses=SimpleNamespace(
@@ -549,10 +630,14 @@ class HostedRuntimeEndpointTests(unittest.IsolatedAsyncioTestCase):
         directive._openai = SimpleNamespace(
             conversations=SimpleNamespace(
                 create=AsyncMock(
-                    side_effect=[
-                        SimpleNamespace(id="directive-outer"),
-                        SimpleNamespace(id="conv_directive_inner"),
-                    ]
+                    return_value=SimpleNamespace(id="directive-outer")
+                )
+            )
+        )
+        directive._model_openai = SimpleNamespace(
+            conversations=SimpleNamespace(
+                create=AsyncMock(
+                    return_value=SimpleNamespace(id="conv_directive_inner")
                 )
             )
         )

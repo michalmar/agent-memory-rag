@@ -106,16 +106,25 @@ class StatefulResponsesHostServer(ResponsesHostServer):
                 async for event in super()._handle_inner_agent(request, proxy):
                     event_type = getattr(event, "type", None)
                     if event_type == "response.completed":
-                        await complete_agent_state_turn(outer_foundry_id)
+                        await complete_agent_state_turn(
+                            outer_foundry_id,
+                            revision=state.revision,
+                        )
                         turn_closed = True
                     elif event_type == "response.failed":
-                        await fail_agent_state_turn(outer_foundry_id)
+                        await fail_agent_state_turn(
+                            outer_foundry_id,
+                            revision=state.revision,
+                        )
                         turn_closed = True
                     yield event
             finally:
                 if not turn_closed:
                     cleanup = asyncio.create_task(
-                        fail_agent_state_turn(outer_foundry_id)
+                        fail_agent_state_turn(
+                            outer_foundry_id,
+                            revision=state.revision,
+                        )
                     )
                     with suppress(Exception, asyncio.CancelledError):
                         await asyncio.shield(cleanup)

@@ -21,6 +21,7 @@ from agent_contracts import (
 from .agent_mcp import application_tools_mcp_app
 from .agent_tool_gateway import (
     AgentStateRequest,
+    AgentStateTurnRequest,
     AgentToolRequest,
     complete_agent_state_turn,
     dispatch_agent_tool,
@@ -105,7 +106,12 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     message: str
-    conversation_id: str | None = None
+    conversation_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
     agent_type: AgentType
 
     @field_validator("message")
@@ -257,7 +263,7 @@ async def resolve_hosted_agent_state(
 
 @app.post("/internal/agent-state/turn-complete")
 async def complete_hosted_agent_state_turn(
-    request: AgentStateRequest,
+    request: AgentStateTurnRequest,
     caller: AgentCaller = Depends(get_agent_caller),
 ):
     return await complete_agent_state_turn(request, caller, history_store)
@@ -265,7 +271,7 @@ async def complete_hosted_agent_state_turn(
 
 @app.post("/internal/agent-state/turn-failed")
 async def fail_hosted_agent_state_turn(
-    request: AgentStateRequest,
+    request: AgentStateTurnRequest,
     caller: AgentCaller = Depends(get_agent_caller),
 ):
     return await fail_agent_state_turn(request, caller, history_store)

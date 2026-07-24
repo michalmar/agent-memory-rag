@@ -57,21 +57,49 @@ class ChatTurnService:
         agent_type: AgentType,
         user_id: str,
     ) -> StreamingResponse:
-        prepared = await self._coordinator.prepare(
-            conversation_id=conversation_id,
-            agent_type=agent_type,
-            user_id=user_id,
-            initial_title=message[:80],
-        )
-        conversation = prepared.conversation
-        runtime_state = conversation.runtime_state
-        if runtime_state is None:
-            raise HTTPException(
-                status_code=500,
-                detail="Runtime state is missing",
+        lease: ConversationLease | None = None
+        try:
+            if conversation_id is not None:
+                lease = await self._registry.acquire(conversation_id)
+            prepared = await self._coordinator.prepare(
+                conversation_id=conversation_id,
+                agent_type=agent_type,
+                user_id=user_id,
+                initial_title=message[:80],
             )
+            conversation = prepared.conversation
+            runtime_state = conversation.runtime_state
+            if runtime_state is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Runtime state is missing",
+                )
+            if lease is None:
+                lease = await self._registry.acquire(
+                    conversation.conversation_id
+                )
+        except asyncio.CancelledError:
+            if lease is not None:
+                if conversation_id is not None:
+                    await self._registry.release_and_prune(
+                        conversation_id,
+                        lease,
+                    )
+                else:
+                    await lease.release()
+            raise
+        except Exception:
+            if lease is not None:
+                if conversation_id is not None:
+                    await self._registry.release_and_prune(
+                        conversation_id,
+                        lease,
+                    )
+                else:
+                    await lease.release()
+            raise
 
-        lease = await self._registry.acquire(conversation.conversation_id)
+        assert lease is not None
         events = self._stream_events(
             message=message,
             agent_type=agent_type,

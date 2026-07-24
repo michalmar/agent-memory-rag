@@ -12,7 +12,7 @@ services:
         project: src/directive-rag-maf
         host: azure.ai.agent
         language: docker
-        image: agmem5df652acr.azurecr.io/directive-rag-maf-hosted:directive-consolidation-20260724100108
+        image: agmem5df652acr.azurecr.io/directive-rag-maf-hosted:directive-stateful-20260724-r1
         docker:
             path: Dockerfile
             context: ../../../..

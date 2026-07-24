@@ -246,7 +246,7 @@ variable "directive_foundry_agent_name" {
 
 variable "directive_agent_release_id" {
   type    = string
-  default = "directive-rag-20260723-r2"
+  default = "directive-stateful-20260724-r1"
 }
 
 variable "directive_search_knowledge_base_name" {

@@ -4,8 +4,14 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
-from agent_contracts import AgentType, RuntimeState
+from agent_contracts import (
+    AgentType,
+    InnerStateStatus,
+    InnerTurnOutcome,
+    RuntimeState,
+)
 from .agent_runtime_contracts import AgentRuntime
 from .conversation_history import ConversationHistoryStore, runtime_state_from_document
 from .conversation_memory import ConversationMemoryStore
@@ -13,6 +19,7 @@ from .conversation_registry import ConversationRegistry, LiveConversation
 from fastapi import HTTPException
 
 logger = logging.getLogger("conversation_coordinator")
+_RECOVERY_LEASE_TIMEOUT = timedelta(minutes=10)
 
 
 @dataclass(frozen=True)
@@ -152,6 +159,21 @@ class ConversationCoordinator:
                     state,
                     runtime,
                 )
+            elif (
+                state.descriptor.agent_type is AgentType.DIRECTIVE_RAG
+                and (
+                    state.inner_state_status is InnerStateStatus.RECOVERY_REQUIRED
+                    or state.inner_state_status is InnerStateStatus.RECOVERING
+                    or state.inner_pending_outcome is InnerTurnOutcome.COMPLETED
+                )
+            ):
+                state = await self._recover_directive_state(
+                    document,
+                    conversation_id,
+                    user_id,
+                    state,
+                    runtime,
+                )
             return state, runtime
 
         if requested_type is not AgentType.AGENT_FRAMEWORK:
@@ -219,6 +241,164 @@ class ConversationCoordinator:
             return winner_state
         return state
 
+    async def _recover_directive_state(
+        self,
+        document: dict,
+        conversation_id: str,
+        user_id: str,
+        state: RuntimeState,
+        runtime: AgentRuntime,
+    ) -> RuntimeState:
+        recover = getattr(runtime, "recover_inner_state", None)
+        delete_inner = getattr(runtime, "delete_inner_state", None)
+        if not callable(recover) or not callable(delete_inner):
+            raise RuntimeError("Directive runtime does not support state recovery")
+
+        if (
+            state.inner_state_status is InnerStateStatus.RECOVERING
+            and not _recovery_lease_is_stale(state.inner_recovery_started_at)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Directive state recovery is in progress",
+            )
+
+        state.inner_state_status = InnerStateStatus.RECOVERING
+        state.inner_recovery_started_at = datetime.now(timezone.utc).isoformat()
+        state.inner_state_revision += 1
+        state.schema_version = max(state.schema_version, 6)
+        try:
+            claim_document = await self._history.bind_runtime_state(
+                conversation_id,
+                user_id,
+                state,
+                expected_etag=document.get("_etag"),
+            )
+        except Exception as exc:
+            if getattr(exc, "status_code", None) != 412:
+                raise
+            return await self._recovery_winner(
+                conversation_id,
+                user_id,
+                exc,
+            )
+        if not isinstance(claim_document, dict) or not claim_document.get("_etag"):
+            raise RuntimeError("Directive recovery claim was not persisted")
+        claimed_state = runtime_state_from_document(claim_document)
+        if claimed_state is None or not claimed_state.inner_model_conversation_id:
+            raise RuntimeError("Directive recovery claim is invalid")
+
+        seed_messages = [
+            {
+                "role": message["role"],
+                "content": message["content"],
+            }
+            for message in claim_document.get("messages") or []
+            if message.get("role") in {"user", "assistant"}
+            and isinstance(message.get("content"), str)
+        ]
+        try:
+            replacement_id = await recover(
+                claimed_state,
+                user_id,
+                seed_messages=seed_messages,
+            )
+        except Exception:
+            await self._release_recovery_claim(
+                claim_document,
+                conversation_id,
+                user_id,
+            )
+            raise
+
+        try:
+            await self._history.bind_runtime_state(
+                conversation_id,
+                user_id,
+                claimed_state,
+                expected_etag=claim_document.get("_etag"),
+            )
+        except Exception as exc:
+            try:
+                winner = await self._history.get_conversation(
+                    conversation_id,
+                    user_id,
+                )
+            except Exception as read_exc:
+                raise RuntimeError(
+                    "Directive recovery finalization outcome is unknown"
+                ) from read_exc
+            winner_state = runtime_state_from_document(winner or {})
+            if (
+                winner_state is not None
+                and winner_state.inner_model_conversation_id == replacement_id
+            ):
+                return self._validated_recovery_winner(winner, exc)
+
+            if getattr(exc, "status_code", None) != 412:
+                raise RuntimeError(
+                    "Directive recovery finalization outcome is unknown"
+                ) from exc
+            await delete_inner(replacement_id, user_id)
+            return self._validated_recovery_winner(winner, exc)
+        return claimed_state
+
+    async def _release_recovery_claim(
+        self,
+        claim_document: dict,
+        conversation_id: str,
+        user_id: str,
+    ) -> None:
+        release_state = runtime_state_from_document(claim_document)
+        if release_state is None:
+            raise RuntimeError("Directive recovery claim is invalid")
+        release_state.inner_state_status = InnerStateStatus.RECOVERY_REQUIRED
+        release_state.inner_recovery_started_at = None
+        release_state.inner_state_revision += 1
+        try:
+            await self._history.bind_runtime_state(
+                conversation_id,
+                user_id,
+                release_state,
+                expected_etag=claim_document.get("_etag"),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Directive state recovery failed and its claim could not be released"
+            ) from exc
+
+    async def _recovery_winner(
+        self,
+        conversation_id: str,
+        user_id: str,
+        cause: Exception,
+    ) -> RuntimeState:
+        winner = await self._history.get_conversation(conversation_id, user_id)
+        return self._validated_recovery_winner(winner, cause)
+
+    @staticmethod
+    def _validated_recovery_winner(
+        winner: dict | None,
+        cause: Exception,
+    ) -> RuntimeState:
+        winner_state = runtime_state_from_document(winner or {})
+        if (
+            winner_state is not None
+            and winner_state.inner_model_conversation_id
+            and winner_state.inner_state_status
+            not in {
+                InnerStateStatus.RECOVERY_REQUIRED,
+                InnerStateStatus.RECOVERING,
+            }
+            and winner_state.inner_pending_outcome
+            is not InnerTurnOutcome.COMPLETED
+        ):
+            return winner_state
+        raise HTTPException(
+            status_code=409,
+            detail="Directive state recovery is in progress",
+        ) from cause
+
     @staticmethod
     async def _cleanup_unpersisted_state(
         runtime: AgentRuntime, state: RuntimeState, user_id: str
@@ -227,3 +407,15 @@ class ConversationCoordinator:
             await runtime.delete_state(state, user_id)
         except Exception:
             logger.exception("Failed to clean up unpersisted remote state")
+
+
+def _recovery_lease_is_stale(started_at: str | None) -> bool:
+    if not started_at:
+        return True
+    try:
+        started = datetime.fromisoformat(started_at)
+    except ValueError:
+        return True
+    if started.tzinfo is None:
+        return True
+    return datetime.now(timezone.utc) - started >= _RECOVERY_LEASE_TIMEOUT

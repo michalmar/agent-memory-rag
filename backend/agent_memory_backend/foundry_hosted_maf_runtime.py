@@ -38,9 +38,11 @@ from .foundry_runtime_base import (
 
 _PREVIEW_HEADERS = {"Foundry-Features": "HostedAgents=V1Preview"}
 _HEALTH_INPUT = "Health check. Reply exactly OK without calling tools."
+_HEALTH_USER_ID = "runtime-health-probe"
 _PROBE_CLEANUP_ATTEMPTS = 3
 _PROBE_CLEANUP_BACKOFF_SECONDS = 0.5
 _DEFAULT_PROGRESS_HEARTBEAT_SECONDS = 10.0
+_PROJECT_INNER_STATE_SCHEMA_VERSION = 7
 logger = logging.getLogger("foundry_hosted_maf")
 
 _TOOL_STAGES = {
@@ -110,8 +112,11 @@ class FoundryHostedMafRuntime:
         self._progress_heartbeat_seconds = progress_heartbeat_seconds
         self._project = None
         self._openai = None
+        self._model_openai = None
         self._endpoint_verified = False
         self._pending_probe_session_id: str | None = None
+        self._pending_probe_conversation_id: str | None = None
+        self._pending_probe_headers = dict(_PREVIEW_HEADERS)
         self._pending_probe_was_verified = False
         self._verified_probe_reclaimed = False
 
@@ -123,13 +128,17 @@ class FoundryHostedMafRuntime:
             credential=get_credential(),
             allow_preview=True,
         )
-        self._openai = self._project.get_openai_client(
-            agent_name=self._physical_agent_name,
-            base_url=self._physical_agent_endpoint,
-            default_query={"api-version": "v1"},
-        )
         try:
-            await self._verify_responses_endpoint()
+            self._openai = self._project.get_openai_client(
+                agent_name=self._physical_agent_name,
+                base_url=self._physical_agent_endpoint,
+                default_query={"api-version": "v1"},
+            )
+            if self._agent_type is AgentType.DIRECTIVE_RAG:
+                self._model_openai = self._project.get_openai_client()
+                await self._verify_stateful_endpoint()
+            else:
+                await self._verify_responses_endpoint()
         except (Exception, asyncio.CancelledError):
             try:
                 await self.close()
@@ -141,26 +150,51 @@ class FoundryHostedMafRuntime:
 
     async def close(self) -> None:
         openai = self._openai
+        model_openai = self._model_openai
         project = self._project
         self._endpoint_verified = False
         errors: list[Exception] = []
         cancellation: asyncio.CancelledError | None = None
-        if self._pending_probe_session_id and project is not None:
+        if (
+            self._pending_probe_conversation_id
+            or self._pending_probe_session_id
+        ):
             pending_probe_was_verified = self._pending_probe_was_verified
-            try:
-                await self._cleanup_probe_session()
-            except asyncio.CancelledError as exc:
-                cancellation = exc
-            except Exception as exc:
-                errors.append(exc)
-            else:
+            if (
+                self._pending_probe_conversation_id
+                and model_openai is not None
+            ):
+                try:
+                    await self._cleanup_probe_conversation()
+                except asyncio.CancelledError as exc:
+                    cancellation = exc
+                except Exception as exc:
+                    errors.append(exc)
+            if self._pending_probe_session_id and project is not None:
+                try:
+                    await self._cleanup_probe_session()
+                except asyncio.CancelledError as exc:
+                    cancellation = cancellation or exc
+                except Exception as exc:
+                    errors.append(exc)
+            if (
+                not self._pending_probe_conversation_id
+                and not self._pending_probe_session_id
+                and not errors
+                and cancellation is None
+            ):
                 self._verified_probe_reclaimed = pending_probe_was_verified
 
         self._openai = None
+        self._model_openai = None
         self._project = None
-        for client in (openai, project):
+        closed_clients: list[Any] = []
+        for client in (openai, model_openai, project):
             if client is None:
                 continue
+            if any(client is closed for closed in closed_clients):
+                continue
+            closed_clients.append(client)
             try:
                 await client.close()
             except asyncio.CancelledError as exc:
@@ -178,6 +212,16 @@ class FoundryHostedMafRuntime:
         if self._openai is None:
             raise RuntimeError("Hosted MAF runtime is not initialized")
         return self._openai
+
+    def _require_model_openai(self) -> Any:
+        if self._model_openai is None:
+            raise RuntimeError("Hosted MAF model state client is not initialized")
+        return self._model_openai
+
+    def _inner_state_openai(self, state: RuntimeState) -> Any:
+        if state.schema_version >= _PROJECT_INNER_STATE_SCHEMA_VERSION:
+            return self._require_model_openai()
+        return self._require_openai()
 
     @staticmethod
     def _headers(user_id: str) -> dict[str, str]:
@@ -246,6 +290,88 @@ class FoundryHostedMafRuntime:
         await self._cleanup_probe_session()
         self._endpoint_verified = True
 
+    async def _verify_stateful_endpoint(self) -> None:
+        if self._verified_probe_reclaimed:
+            self._verified_probe_reclaimed = False
+            self._endpoint_verified = True
+            return
+        if (
+            self._pending_probe_conversation_id
+            or self._pending_probe_session_id
+        ):
+            prior_probe_was_verified = self._pending_probe_was_verified
+            if self._pending_probe_conversation_id:
+                await self._cleanup_probe_conversation()
+            if self._pending_probe_session_id:
+                await self._cleanup_probe_session()
+            if prior_probe_was_verified:
+                self._endpoint_verified = True
+                return
+
+        probe_headers = self._headers(_HEALTH_USER_ID)
+        self._pending_probe_headers = probe_headers
+        session = await self._project.agents.create_session(
+            agent_name=self._physical_agent_name,
+            body={},
+            headers=probe_headers,
+        )
+        session_id = getattr(session, "agent_session_id", None)
+        if not isinstance(session_id, str) or not session_id:
+            raise RuntimeError(
+                "Hosted Agent state probe returned no session ID"
+            )
+        self._pending_probe_session_id = session_id
+
+        conversation = await self._require_model_openai().conversations.create(
+            items=[],
+            extra_headers=probe_headers,
+        )
+        conversation_id = getattr(conversation, "id", None)
+        if not isinstance(conversation_id, str) or not conversation_id:
+            raise RuntimeError(
+                "Hosted Agent state probe returned no conversation ID"
+            )
+        self._pending_probe_conversation_id = conversation_id
+        self._pending_probe_was_verified = True
+        await self._cleanup_probe_conversation()
+        await self._cleanup_probe_session()
+        self._endpoint_verified = True
+
+    async def _cleanup_probe_conversation(self) -> None:
+        conversation_id = self._pending_probe_conversation_id
+        if not conversation_id:
+            return
+        model_openai = self._model_openai
+        if model_openai is None:
+            raise RuntimeError(
+                "Hosted Agent model state client is unavailable for probe cleanup"
+            )
+
+        for attempt in range(1, _PROBE_CLEANUP_ATTEMPTS + 1):
+            try:
+                await model_openai.conversations.delete(
+                    conversation_id=conversation_id,
+                    extra_headers=self._pending_probe_headers,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if getattr(exc, "status_code", None) == 404:
+                    self._pending_probe_conversation_id = None
+                    self._reset_probe_tracking_if_clear()
+                    return
+                if attempt == _PROBE_CLEANUP_ATTEMPTS:
+                    raise RuntimeError(
+                        "Hosted Agent health-probe conversation cleanup failed"
+                    ) from exc
+                await asyncio.sleep(
+                    _PROBE_CLEANUP_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                )
+            else:
+                self._pending_probe_conversation_id = None
+                self._reset_probe_tracking_if_clear()
+                return
+
     async def _cleanup_probe_session(
         self,
         *,
@@ -264,11 +390,15 @@ class FoundryHostedMafRuntime:
                 await self._project.agents.delete_session(
                     agent_name=self._physical_agent_name,
                     session_id=session_id,
-                    headers=_PREVIEW_HEADERS,
+                    headers=self._pending_probe_headers,
                 )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if getattr(exc, "status_code", None) == 404:
+                    self._pending_probe_session_id = None
+                    self._reset_probe_tracking_if_clear()
+                    return
                 if attempt == _PROBE_CLEANUP_ATTEMPTS:
                     if suppress_failure:
                         logger.exception(
@@ -283,8 +413,17 @@ class FoundryHostedMafRuntime:
                 )
             else:
                 self._pending_probe_session_id = None
-                self._pending_probe_was_verified = False
+                self._reset_probe_tracking_if_clear()
                 return
+
+    def _reset_probe_tracking_if_clear(self) -> None:
+        if (
+            self._pending_probe_conversation_id
+            or self._pending_probe_session_id
+        ):
+            return
+        self._pending_probe_was_verified = False
+        self._pending_probe_headers = dict(_PREVIEW_HEADERS)
 
     async def create_state(
         self,
@@ -306,7 +445,7 @@ class FoundryHostedMafRuntime:
             inner_conversation = None
             if self._agent_type is AgentType.DIRECTIVE_RAG:
                 inner_conversation = (
-                    await self._require_openai().conversations.create(
+                    await self._require_model_openai().conversations.create(
                         items=[],
                         extra_headers=self._headers(authenticated_user_id),
                     )
@@ -365,7 +504,7 @@ class FoundryHostedMafRuntime:
             raise RuntimeError("Inner model state is directive-only")
         if state.inner_model_conversation_id:
             return state.inner_model_conversation_id
-        conversation = await self._require_openai().conversations.create(
+        conversation = await self._require_model_openai().conversations.create(
             items=[],
             extra_headers=self._headers(authenticated_user_id),
         )
@@ -382,8 +521,59 @@ class FoundryHostedMafRuntime:
             prompt_version=self._prompt_version,
             observed_agent_version=state.descriptor.observed_agent_version,
         )
-        state.schema_version = 4
+        state.schema_version = _PROJECT_INNER_STATE_SCHEMA_VERSION
         return conversation.id
+
+    async def recover_inner_state(
+        self,
+        state: RuntimeState,
+        authenticated_user_id: str,
+        *,
+        seed_messages: list[dict[str, str]],
+    ) -> str:
+        if self._agent_type is not AgentType.DIRECTIVE_RAG:
+            raise RuntimeError("Inner model state is directive-only")
+        previous_id = state.inner_model_conversation_id
+        if not previous_id:
+            raise RuntimeError("Directive inner model state is missing")
+
+        previous_openai = self._inner_state_openai(state)
+        model_openai = self._require_model_openai()
+        replacement = await model_openai.conversations.create(
+            items=seed_messages,
+            extra_headers=self._headers(authenticated_user_id),
+        )
+        try:
+            await self._delete_conversation_if_present(
+                previous_id,
+                self._headers(authenticated_user_id),
+                openai=previous_openai,
+            )
+        except Exception:
+            try:
+                await self._delete_conversation_if_present(
+                    replacement.id,
+                    self._headers(authenticated_user_id),
+                    openai=model_openai,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to clean up an unused recovery conversation"
+                )
+            raise
+
+        if state.inner_pending_call_id:
+            state.inner_last_failed_call_id = state.inner_pending_call_id
+        state.inner_model_conversation_id = replacement.id
+        state.inner_state_status = InnerStateStatus.READY
+        state.inner_pending_call_id = None
+        state.inner_pending_started_at = None
+        state.inner_pending_revision = None
+        state.inner_pending_outcome = None
+        state.inner_recovery_started_at = None
+        state.inner_state_revision += 1
+        state.schema_version = _PROJECT_INNER_STATE_SCHEMA_VERSION
+        return replacement.id
 
     async def delete_inner_state(
         self,
@@ -393,15 +583,19 @@ class FoundryHostedMafRuntime:
         await self._delete_conversation_if_present(
             inner_conversation_id,
             self._headers(authenticated_user_id),
+            openai=self._require_model_openai(),
         )
 
     async def _delete_conversation_if_present(
         self,
         conversation_id: str,
         headers: dict[str, str],
+        *,
+        openai: Any | None = None,
     ) -> None:
         try:
-            await self._require_openai().conversations.delete(
+            client = openai if openai is not None else self._require_openai()
+            await client.conversations.delete(
                 conversation_id=conversation_id,
                 extra_headers=headers,
             )
@@ -573,6 +767,7 @@ class FoundryHostedMafRuntime:
             await self._delete_conversation_if_present(
                 state.inner_model_conversation_id,
                 headers,
+                openai=self._inner_state_openai(state),
             )
         if state.foundry_conversation_id:
             await self._delete_conversation_if_present(
@@ -593,6 +788,11 @@ class FoundryHostedMafRuntime:
     async def health_check(self) -> None:
         if self._project is None or self._openai is None:
             raise RuntimeError("Hosted MAF runtime is not initialized")
+        if (
+            self._agent_type is AgentType.DIRECTIVE_RAG
+            and self._model_openai is None
+        ):
+            raise RuntimeError("Hosted MAF model state client is not initialized")
         if not self._endpoint_verified:
             raise RuntimeError("Hosted MAF Responses endpoint is not verified")
 

@@ -178,9 +178,12 @@ Logical name: `directive-rag-maf-hosted`
 - Runs the inner agent with `store=True` and
   `AgentSession(service_session_id=<inner conversation>)`; after one legacy
   bootstrap, only new input is sent to the model.
-- Resolves inner state through the Agent-Identity-protected gateway, serializes
-  turns with a conditional Cosmos lease, and deletes inner state before the
-  outer conversation and Hosted session.
+- Resolves inner state through the Agent-Identity-protected gateway and serializes
+  turns with a fenced conditional Cosmos lease. Model completion is finalized in
+  the same write that appends the outer transcript; failed, stale, or interrupted
+  turns require a CAS-claimed fresh inner conversation seeded only from committed
+  Cosmos messages before retry. Inner state is deleted before the outer
+  conversation and Hosted session.
 
 ### 5.4 Shared contracts
 
@@ -323,7 +326,10 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 - Cosmos DB history is partitioned by `/user_id`.
 - Point reads, writes, deletes, and list queries always use the authenticated
   partition.
-- Schema v3 stores agent type, release metadata, and private remote runtime state.
+- Schema v7 stores agent type, release metadata, private remote runtime state,
+  fenced lease revisions, pending turn outcomes, and the endpoint generation
+  used by inner model conversations. Schema v6 inner IDs are cleaned up through
+  the legacy physical-agent endpoint; v7 IDs use the project OpenAI endpoint.
 - Updates use ETag `IfNotModified` conditions.
 - Public DTOs use explicit allowlists and never expose owner keys, physical agent
   names, Foundry conversation IDs, Hosted session IDs, response IDs, ETags, or

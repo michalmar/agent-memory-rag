@@ -515,7 +515,8 @@ support agent or third-party stateless callers may still depend on it.
 - Existing outer conversation bootstraps history exactly once.
 - Later turns do not load or replay outer history into the model.
 - Streaming and non-streaming paths persist the same session state.
-- A failed model call does not advance the persisted revision.
+- A failed model call advances only the recovery ledger revision, never the
+  durable outer transcript; retry first rotates to a fresh inner conversation.
 - Owner, outer conversation, agent version, and schema mismatches fail closed.
 - Atomic file replacement survives an interrupted write.
 - A hosting dependency change that invalidates the private override fails its

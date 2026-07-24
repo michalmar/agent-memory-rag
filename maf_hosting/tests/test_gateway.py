@@ -215,6 +215,60 @@ class GatewayInvocationTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_terminal_state_transition_includes_fencing_revision(self) -> None:
+        response = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {"status": "completed"},
+        )
+        client = AsyncMock()
+        client.__aenter__.return_value = client
+        client.__aexit__.return_value = None
+        client.post.return_value = response
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "APP_TOOL_GATEWAY_URL": "https://frontend.example",
+                    "APP_TOOL_GATEWAY_SCOPE": "api://app/.default",
+                },
+                clear=True,
+            ),
+            patch.object(
+                gateway,
+                "get_request_context",
+                return_value=SimpleNamespace(
+                    user_id="tenant:user",
+                    session_id="session-1",
+                    call_id="call-1",
+                ),
+            ),
+            patch.object(
+                gateway._credential,
+                "get_token",
+                new=AsyncMock(return_value=SimpleNamespace(token="token")),
+            ),
+            patch.object(
+                gateway.httpx,
+                "AsyncClient",
+                return_value=client,
+            ),
+        ):
+            await gateway.complete_agent_state_turn(
+                "outer-foundry",
+                revision=7,
+            )
+
+        self.assertEqual(
+            client.post.await_args.kwargs["json"],
+            {
+                "user_id": "tenant:user",
+                "session_id": "session-1",
+                "call_id": "call-1",
+                "outer_foundry_conversation_id": "outer-foundry",
+                "revision": 7,
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

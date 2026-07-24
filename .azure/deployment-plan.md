@@ -1,6 +1,6 @@
 # Azure Deployment Plan - Hosted Agent Identity and Telemetry Remediation
 
-> **Status:** Deployed and verified - Citation UX document alignment follow-up
+> **Status:** Validated - stateful directive continuation release 2026-07-24
 
 Generated: 2026-07-15
 
@@ -454,6 +454,21 @@ Gate B is accepted only when:
 - [x] Complete final live and inventory acceptance
 
 ## 14. Validation proof
+
+### Revalidation proof - 2026-07-24
+
+- [x] Terraform installation: `terraform 1.13.3`
+- [x] Azure CLI installation: `azure-cli 2.80.0`
+- [x] Authentication: subscription `ME-MngEnvMCAP372348-mimarusa-1`
+  (`7bc68c68-f434-49ad-ab3e-b883ec39da86`) is enabled in tenant
+  `a7b1484c-f66a-496a-b1cf-35631a50396c`
+- [x] Initialize: `terraform -chdir=infra init -input=false -no-color`
+- [x] Syntax: `terraform -chdir=infra validate -no-color`
+- [x] Plan preview: `terraform -chdir=infra plan -refresh=false -out=tfplan -no-color`
+  completed with no infrastructure changes required
+- [x] Frontend build: `npm --prefix frontend run build` succeeded
+- [x] Backend tests: `uv run --project backend python -m unittest discover -s backend/tests`
+  passed all 113 tests
 
 ### All validation checks pass - Gate A - 2026-07-15
 
@@ -1668,6 +1683,622 @@ Verified at `2026-07-12T21:25:24+02:00`:
 Production URL:
 
 `https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io`
+
+## GitHub Actions CI/CD design proposal - 2026-07-24
+
+> **Status:** Proposed for review only. No workflow, Azure identity, GitHub
+> setting, infrastructure, or deployment change is approved or implemented by
+> this section.
+
+### CI/CD scope and design baseline
+
+This design covers every current release surface, not only the backend and
+frontend Container Apps:
+
+| Release domain | Current mechanism | Target ownership |
+|---|---|---|
+| Repository quality | Local commands | Unprivileged GitHub Actions CI |
+| Azure infrastructure and RBAC | Local Terraform state and local CLI identity | Protected Terraform plan/apply workflow |
+| Backend and frontend images | `scripts/deploy_images.sh`, ACR Tasks, `az containerapp update` | Application image release workflow |
+| Support Hosted Agent | ACR Tasks, mutable local azd environment, `azd deploy` | Independent protected Hosted Agent release |
+| Directive Hosted Agent | ACR Tasks, mutable local azd environment, `azd deploy` | Independent protected Hosted Agent release |
+| Search, Foundry IQ, Prompt Agent | `scripts/release_foundry_assets.sh` | Protected data-plane release workflow |
+| Directive ingestion image and publication | `scripts/deploy_directive_ingestion.sh` | Protected ingestion workflow |
+| Entra SPA/API registration and Hosted Agent application roles | Privileged manual scripts | Bootstrap/manual privileged workflow, never ordinary CI |
+
+The existing architecture remains Terraform plus Azure CLI for Container Apps
+and azd only for Foundry Hosted Agent deployment. Adopting azd for the root
+Terraform stack is not required for this CI/CD conversion.
+
+### CI/CD current-state findings
+
+| Area | Finding | Consequence |
+|---|---|---|
+| Workflows | `.github/workflows/` does not exist | No automated PR or release gate |
+| Repository governance | `main` has no branch protection or ruleset | A direct push can bypass every future workflow |
+| Actions policy | All actions are allowed and full-SHA pinning is not required | Workflow dependencies are not supply-chain constrained |
+| GitHub environments | Only unprotected `copilot` exists | No deployment approval, branch restriction, or environment-scoped OIDC subject |
+| Actions configuration | No repository/environment Actions variables or secrets exist | Azure workload identity is not configured |
+| Public repository | Forks are allowed | Pull-request code and metadata must be treated as untrusted |
+| Existing GitHub security | Secret scanning and push protection are enabled | Preserve both controls |
+| Dependency security | Dependabot security updates are disabled | Dependency and action updates are not automated |
+| Terraform state | No `backend "azurerm"` block exists; state and backups are local | A hosted runner cannot safely plan or apply the existing stack |
+| Terraform providers | `infra/.terraform.lock.hcl` exists locally but is ignored and untracked | Provider resolution is not reproducible in CI |
+| Terraform inputs | The real `terraform.tfvars` is correctly ignored | Environment inputs must move to protected GitHub configuration |
+| Terraform RBAC | Seven role assignments use `data.azurerm_client_config.current.object_id` | Plans differ by caller and CI can replace human/operator assignments |
+| Terraform custom role | The backend Foundry consumer role is defined and assignable at subscription scope | Ordinary CI apply would require high-impact subscription role-definition rights |
+| Image ownership | Terraform intentionally ignores deployed image changes | Terraform and application CD need separate ownership and drift checks |
+| Registry authorization | One classic-RBAC ACR stores app, Hosted Agent, and ingestion images | Repository-scoped publisher isolation is unavailable without ACR ABAC or separate registries |
+| Release discovery | All release scripts read names with `terraform output` | Unchanged scripts would give release jobs unnecessary state access |
+| Application release | `deploy_images.sh` couples backend, frontend, and support Hosted Agent builds | Unrelated components cannot release or roll back independently |
+| Image identity | App tags are caller/timestamp values; deployment uses tags | A tag can be ambiguous; the deployed digest is not the release input |
+| Hosted manifests | Both `azure.yaml` files contain environment-specific endpoints and image tags | They are not reusable across environments |
+| Hosted build helper | `--configure-azd` edits checked-in `azure.yaml` and local azd state | A clean ephemeral runner cannot use it as a deterministic release contract |
+| ACA rollout | Backend and frontend use single-revision mode | Failed provisioning is safe, but there is no pre-traffic labeled canary |
+| Health | Backend has startup, liveness, and readiness probes; frontend has none | Frontend rollout readiness is weaker than backend readiness |
+| Test assets | Backend and directive ingestion have tracked uv locks; frontend has `package-lock.json` | These surfaces can run frozen installs |
+| Hosted dependencies | Hosted requirements pin direct packages, but shared hosting has no tracked lock | Transitive Hosted image builds can drift |
+| Release evidence | Prior releases record tags, digests, revisions, smoke checks, and rollback targets manually | Preserve this evidence as a generated release manifest |
+
+The current single environment is a small demo/POC. The first CI/CD iteration
+therefore targets only the existing `demo` environment. Adding `staging` or
+`production` requires environment-aware Terraform naming, separate state keys,
+separate resource groups, and separate federated identities; copying the current
+state or resource names is not safe.
+
+### CI/CD required prerequisites
+
+These changes precede any workflow that receives an Azure token.
+
+1. **Protect `main`.** Add an active ruleset that requires a pull request, one
+   approval, all CI checks, resolved conversations, and CODEOWNER approval for
+   `.github/workflows/**`, `infra/**`, deployment scripts, Dockerfiles, and
+   authentication configuration. Block force pushes and deletion.
+2. **Bootstrap remote Terraform state.** Create a separate, protected state
+   resource group, Storage account, and private blob container. Use Microsoft
+   Entra data-plane authentication, disable shared-key access, enable blob
+   versioning and soft delete, add a resource lock, and use one key per
+   environment such as `agent-memory-rag/demo.tfstate`. Public network access
+   may remain enabled for GitHub-hosted runners only if Entra-only access meets
+   policy; otherwise use a VNet-connected self-hosted runner.
+3. **Migrate state once under change control.** Back up and checksum the current
+   local state, run `terraform init -migrate-state`, verify the same resource
+   count, run a full-refresh no-change plan, then securely retain the migration
+   backup outside the repository. Never upload state or a raw plan to a public
+   workflow log.
+4. **Track provider selection.** Stop ignoring
+   `infra/.terraform.lock.hcl`, regenerate it for the supported runner platform,
+   and commit it. Pin the Terraform CLI to the currently validated version
+   before upgrading deliberately.
+5. **Make principals explicit and narrow custom-role management.** Replace caller-derived deployer assignments
+   with variables or sets for stable operator, Terraform apply, Foundry release,
+   and break-glass principal IDs. A plan identity must never become an
+   application data-plane contributor merely because it ran `terraform plan`.
+   Narrow the Foundry consumer custom role to the smallest valid assignable
+   scope, or bootstrap that stable role once and have the application stack
+   reference it. Ordinary CI apply should not retain subscription-wide
+   `roleDefinitions/write` when a narrower design is possible.
+6. **Separate pipeline identities from runtime identities.** Bootstrap
+   user-assigned managed identities in a resource group outside the application
+   stack and federate them to GitHub environment subjects. Do not reuse the
+   backend, frontend, ingestion, or Foundry runtime identities.
+7. **Decouple release scripts and state discovery.** Split build, publish,
+   deploy, verify, and rollback operations. No application release command
+   should implicitly build a Hosted Agent, and no build command should mutate a
+   tracked manifest. Release scripts must accept explicit, validated deployment
+   targets from environment-scoped configuration or a sanitized Terraform
+   deployment-target manifest; they must not call `terraform output` or receive
+   access to the Terraform state.
+8. **Externalize environment-specific Hosted values.** Treat each Hosted
+   `azure.yaml` as a source template and render a temporary release manifest, or
+   pass supported azd environment values without modifying the checkout.
+9. **Complete release health contracts.** Add a dependency-free frontend health
+   endpoint and Terraform startup/liveness/readiness probes. Keep deep agent
+   invocation out of liveness and readiness.
+10. **Complete dependency locking.** Preserve frozen backend, frontend, and
+    ingestion installs and add a tracked lock/constraints strategy for
+    `maf_hosting` plus both Hosted Agent packages. Pin container base images by
+    digest and update them through reviewed dependency PRs.
+11. **Verify runner reachability.** Prove that every Terraform plan/apply call
+    uses an ARM control-plane endpoint reachable from a GitHub-hosted runner.
+    Keep private Cosmos, Blob, and Document Intelligence data-plane checks in
+    the VNet-injected application/job. If a required management or state path
+    becomes private, move the affected job to a controlled VNet runner.
+
+### GitHub environments and workload identities
+
+Use environment-scoped federated credentials with issuer
+`https://token.actions.githubusercontent.com`, audience
+`api://AzureADTokenExchange`, and subjects bound to this repository and the
+exact GitHub environment. Do not create branch-wide or pull-request-wide Azure
+trust for this public repository.
+
+| GitHub environment | Purpose | Protection |
+|---|---|---|
+| `demo-plan` | Authenticated plan and scheduled drift detection | Main or manually approved reviewed ref; no deployment |
+| `demo` | Terraform apply and backend/frontend release | Main only, required reviewer, prevent self-review |
+| `demo-privileged` | Foundry assets, Hosted Agents, ingestion, and directory role assignment | Main only, required reviewer; use the narrowest eligible administrators |
+
+Use distinct identities even when two identities trust the same environment
+subject:
+
+| Identity | Minimum responsibility |
+|---|---|
+| Terraform plan | Read managed Azure resources and acquire/release the state lease; no resource mutation |
+| Terraform apply | Mutate the application scopes, state blob, RBAC assignments, and the existing subscription-scoped custom role |
+| Shared image builder | Run approved ACR builds and read resulting manifests; no Container Apps, Foundry, job, Terraform, or Graph deployment rights |
+| Application release | Update only the backend/frontend Container Apps to an approved digest; no ACR push or Terraform state access |
+| Foundry release | Publish Search/Foundry/Prompt assets through explicitly assigned data-plane roles |
+| Hosted release | Deploy only the selected, prebuilt Foundry Hosted Agent digest; no ACR push or Terraform state access |
+| Ingestion release | Update/start only the directive Container Apps Job with a prebuilt digest; no ACR push or Terraform state access |
+| Directory role assignment | Assign only the required application roles; kept separate because Microsoft Graph permissions are tenant-wide and high risk |
+
+Prefer custom roles scoped to the exact resources where built-in roles are too
+broad. The Terraform apply identity needs explicit RBAC-management permission
+because the stack creates role assignments and a subscription-scoped custom
+role until that role is narrowed or bootstrapped. The application release
+identity does not need Terraform, state, ACR push, Cosmos, Search, Foundry, or
+Microsoft Graph access.
+
+The existing registry uses classic RBAC, so ACR push/build permission cannot be
+restricted to one repository. The initial demo design therefore uses one shared
+build-only identity and keeps all deployment rights out of it. Application,
+Hosted Agent, and ingestion deployers can deploy only already approved digests
+to their own targets. Repository-level build isolation requires a reviewed ACR
+ABAC migration with repository reader/writer roles, or separate registries.
+Until then, the weaker publisher boundary is an explicit accepted demo risk,
+not a claimed least-privilege control.
+
+The Azure client, tenant, and subscription IDs are not client secrets, but store
+them as environment-scoped GitHub secrets or variables so each environment can
+override them. No Azure client secret, ACR password, storage key, publish
+profile, or long-lived user token is permitted.
+
+### Workflow catalog
+
+#### `ci.yml` - required pull-request quality gate
+
+Triggers:
+
+- `pull_request` for all relevant code and configuration paths;
+- reusable `workflow_call` so protected-main release workflows can execute the
+  same checks;
+- optional `push` to `main` for a post-merge baseline.
+
+Security:
+
+- no `id-token: write`;
+- no Azure login, registry push, deployment environment, or repository write;
+- `contents: read` only;
+- never use `pull_request_target`;
+- do not interpolate untrusted PR metadata directly into shell commands.
+
+Jobs:
+
+| Job | Required checks |
+|---|---|
+| Backend | Python 3.11, frozen `backend/uv.lock`, complete backend unittest suite |
+| Shared/Hosted agents | Python 3.13, locked dependencies, shared hosting plus support/directive unittest suites |
+| Directive ingestion | Python 3.11, frozen ingestion lock with test extra, complete pytest suite |
+| Frontend | Node 20, `npm ci`, Vitest, TypeScript/Vite production build |
+| Terraform static | Exact Terraform version, `init -backend=false`, recursive format check, validation, IaC security scan |
+| Shell | `bash -n` and ShellCheck for deployment scripts |
+| Containers | Build changed Dockerfiles without push; start and smoke-test backend/frontend images where practical |
+| Security | CodeQL for Python and JavaScript/TypeScript, dependency review, secret scanning, and workflow scanning |
+
+Path dependencies must include shared code:
+
+| Image/test surface | Paths that invalidate it |
+|---|---|
+| Backend | `backend/**`, `agent_contracts/**`, `directive_contracts/**` |
+| Frontend | `frontend/**` |
+| Support Hosted Agent | `agents/customer-support-maf/**`, `maf_hosting/**`, `agent_contracts/**` |
+| Directive Hosted Agent | `agents/directive-rag-maf/**`, `maf_hosting/**`, `agent_contracts/**` |
+| Directive ingestion | `setup/directive_ingest/**`, `setup/directives/**`, `directive_contracts/**` |
+| Infrastructure | `infra/**`, deployment scripts, relevant manifests |
+
+#### `terraform.yml` - plan, apply, and drift
+
+- Every PR receives static Terraform checks with no Azure credentials.
+- Because the repository is public, an Azure-authenticated PR plan runs only
+  through an explicitly approved `workflow_dispatch` for an exact reviewed
+  commit. A fork PR never receives an OIDC token.
+- A protected-main infrastructure change runs an authenticated plan using the
+  read-only identity.
+- Export a sanitized plan summary to the job summary. Keep the binary plan as a
+  short-retention object in a separate private, Entra-only `tfplans` blob
+  container when the apply job must consume that exact plan. Do not upload a
+  binary Terraform plan as a GitHub Actions artifact in this public repository.
+  Name the object by trusted run ID and commit, record its SHA-256 checksum, and
+  delete it after apply or expiry.
+- Parse plan JSON and fail closed on any delete or replacement of active data,
+  identity, networking, monitoring, Foundry, or agent-state resources unless a
+  separate destructive approval is recorded.
+- The apply job uses `demo`, waits for approval, downloads the exact plan from
+  the private plan container, verifies the trusted workflow run, commit,
+  provider lock, Terraform version, and checksum, and applies it. It never runs
+  `terraform apply` against an unreviewed fresh plan.
+- Use one non-canceling concurrency group per Terraform state key and a bounded
+  lock timeout.
+- A weekly scheduled main-branch plan detects drift. It opens or updates one
+  issue with a sanitized summary and never applies drift automatically.
+- After apply, run a full-refresh no-change plan and record the result.
+
+#### `app-release.yml` - backend/frontend release
+
+- Trigger after the reusable CI passes for a protected-main commit, plus
+  `workflow_dispatch` for a selected known commit.
+- Determine changed images from trusted git history. Allow an explicit rebuild
+  of either component for base-image/security updates.
+- Keep ACR Tasks for the first cutover to preserve the validated build path.
+  The shared build-only identity uses unique source-SHA tags, rejects an
+  existing tag, captures the ACR run ID and resulting manifest digest, and
+  hands that digest to the component-specific deploy job. Deployment uses the
+  digest rather than the tag.
+- Generate and attach an SBOM, scan the pushed digest, and add signed
+  provenance/Notation signing once the Artifact Signing bootstrap is available.
+- Record a release manifest containing commit, workflow run, component, build
+  context, Dockerfile, tag, digest, ACR run ID, prior digest/revision, new
+  revision, timestamps, and smoke results.
+- Deploy backend first. Wait for its revision to be provisioned and running,
+  then verify `/api/health/live` and `/api/health/ready` through the existing
+  frontend proxy.
+- Deploy frontend second. Verify its dedicated health endpoint, `/config.js`,
+  application root, backend liveness/readiness, and anonymous `401` boundaries.
+- Do not store a user password to automate delegated-user acceptance. Deep
+  Prompt/Hosted/directive conversation tests remain a protected manual
+  acceptance step until a non-human test identity flow is explicitly designed.
+- If post-deployment checks fail, restore the prior known-good digest, verify
+  health, and mark the deployment failed. Never hide the failed candidate.
+
+Single-revision mode is acceptable for the current demo because Container Apps
+keeps traffic on the old revision until the new revision passes startup and
+readiness. Before a production environment is introduced, switch to multiple
+revisions with deterministic suffixes and blue/green labels so the candidate
+can be tested at a label-specific FQDN before traffic moves.
+
+#### `hosted-agent-release.yml` - independent Hosted Agent release
+
+- Manual only, protected by `demo-privileged`.
+- Select exactly one agent (`support` or `directive`) and one reviewed commit.
+- Run that agent's unit tests, `azd ai agent doctor`, and provisioning preview.
+- Build one immutable ACR image, capture its digest, and render a temporary azd
+  manifest that references the digest. Do not edit the checked-in manifest or
+  persist mutable azd state in the checkout.
+- Run `azd deploy --no-prompt` only for the selected package and capture the
+  Foundry version, endpoint, package ID, published principal ID, and prior
+  active version.
+- Run directory application-role assignment as a separate
+  `demo-privileged` job. Its identity must not be available to the image build.
+- Preserve the backend principal allowlist. A newly generated principal is
+  introduced through a reviewed GitOps change to explicit Terraform inputs,
+  followed by Terraform/backend rollout, before that agent becomes visible.
+- Smoke the version-specific endpoint and required tools. Activate/advertise
+  the version only after identity, gateway, isolation, and telemetry checks.
+- Rollback switches to the prior immutable Foundry version and feature flags;
+  it does not delete the failed version during the rollback window.
+
+#### `foundry-assets-release.yml`
+
+- Manual only, protected by `demo-privileged`.
+- Accept `knowledge`, `prompt`, or `all`; default to the narrowest requested
+  operation.
+- Use a frozen release environment and explicit release ID.
+- Execute the existing idempotent setup code with the dedicated Foundry release
+  identity, not whichever identity last ran Terraform.
+- Record Search schema/knowledge source/knowledge base identifiers, Prompt
+  version and prompt hash, and smoke results.
+- Immutable Prompt versions are rollback targets. Search data-plane mutations
+  require versioned assets or a separately reviewed forward recovery; do not
+  claim automatic rollback for in-place index changes.
+
+#### `directive-ingestion-release.yml`
+
+- Protected main-path or manual trigger under `demo-privileged`; concurrency is
+  one per environment.
+- Build and scan the ingestion image, deploy by digest, wait for exact job RBAC,
+  run preflight, publication, and verification, and retain execution logs.
+- Add failure cleanup that restores the job's normal `run-daily` command even
+  when preflight, publication, or verification fails. The current script only
+  restores this mode on the success path.
+- Record source fixture commit, image digest, job executions, published
+  processing version, Search/Cosmos/Blob verification, and prior digest.
+
+#### `rollback.yml`
+
+- Manual, environment-protected, and limited to release manifests created by a
+  successful trusted workflow.
+- Backend/frontend rollback redeploys the previous digest and verifies the same
+  health and authorization contract.
+- Hosted rollback selects a retained immutable Foundry version and restores
+  admission/visibility flags.
+- Prompt rollback selects a retained immutable Prompt version.
+- Directive data recovery republishes an explicitly selected prior content
+  version; it never deletes current data automatically.
+- Infrastructure recovery is a reviewed forward fix. Never automate state-file
+  rollback, `terraform destroy`, or deletion of active data services.
+
+### Release security and governance
+
+1. Keep the repository default `GITHUB_TOKEN` permission read-only and declare
+   minimal permissions per job. Only Azure jobs receive `id-token: write`.
+2. Restrict allowed actions to reviewed GitHub, Azure, Docker, HashiCorp, and
+   signing/scanning publishers. Pin every action to a verified full commit SHA
+   and enable repository SHA-pinning enforcement.
+3. Add CODEOWNERS for workflows, Terraform, deployment scripts, Dockerfiles,
+   Entra configuration, and agent manifests.
+4. Enable Dependabot security updates and scheduled update groups for GitHub
+   Actions, npm, Python/uv, Docker, and Terraform providers.
+5. Generate SBOM and provenance for every released image. Sign production-bound
+   digests with Notation and Azure Artifact Signing when that service is
+   bootstrapped.
+6. Do not reuse untrusted PR caches or artifacts in privileged jobs. Release
+   workflows check out the exact protected-main SHA and produce their own
+   artifacts. Terraform binary plans use the private Azure plan container
+   described above, not GitHub artifacts.
+7. Add explicit workflow/job timeouts. CI may cancel superseded branch runs;
+   Terraform applies, releases, and rollbacks must never be canceled by a newer
+   run.
+8. Mask any derived token immediately and avoid verbose Azure CLI output that
+   can expose response bodies. Upload only sanitized failure logs.
+9. Configure ACR retention only after the rollback window. Never purge a digest
+   referenced by an active ACA revision or retained Hosted Agent version.
+
+### Deployment evidence and drift
+
+Every successful write workflow creates a GitHub deployment and job summary and
+retains a machine-readable release manifest. For the application environment,
+the deployment URL is the frontend FQDN.
+
+Terraform remains authoritative for infrastructure but intentionally ignores
+application image fields. Therefore two drift checks are required:
+
+- Terraform drift compares remote state and Azure resources.
+- Release drift compares active ACA/Hosted digests and versions with the latest
+  successful release manifests.
+
+Alerts must identify drift without mutating Azure. Failed deployments retain
+their evidence and logs; they are not reported as successful after rollback.
+
+### Planned repository and platform artifacts
+
+Implementation is expected to add or change:
+
+- `.github/workflows/ci.yml`
+- `.github/workflows/terraform.yml`
+- `.github/workflows/app-release.yml`
+- `.github/workflows/hosted-agent-release.yml`
+- `.github/workflows/foundry-assets-release.yml`
+- `.github/workflows/directive-ingestion-release.yml`
+- `.github/workflows/rollback.yml`
+- `.github/CODEOWNERS`
+- `.github/dependabot.yml`
+- `.azure/pipeline-setup.md`
+- remote-state bootstrap automation and partial backend configuration
+- tracked Terraform and Hosted dependency locks
+- refactored release scripts with build/deploy/verify/rollback boundaries
+- environment-scoped deployment target configuration that does not read state
+- frontend health endpoint and probes
+- templated Hosted Agent manifests
+- release-manifest schema and sanitized plan-summary tooling
+
+GitHub rulesets, environments, Actions policy, environment variables/secrets,
+Azure managed identities, federated credentials, RBAC, state storage, and
+optional Artifact Signing are platform changes and must be reviewed alongside
+the repository PR.
+
+### Phased implementation order
+
+| Phase | Outcome | Exit gate |
+|---|---|---|
+| 0 | Ruleset, CODEOWNERS, action policy, and protected environments | Direct main bypass and unpinned actions are blocked |
+| 1 | State backend, state migration, provider lock, explicit principals, OIDC identities | Change-controlled operator migration plan is no-change; state checksum and resource count match |
+| 2 | Unprivileged CI and security scans | Required checks pass on a representative PR and a fork PR receives no Azure token |
+| 3 | Protected Terraform plan/apply and drift workflow | Two consecutive CI plans are no-change; reviewed no-op apply and drift test pass |
+| 4 | Backend/frontend digest release and rollback | One release and one deliberate rollback pass |
+| 5 | Foundry, Hosted Agent, and ingestion workflows | Independent release and rollback evidence exists for each domain |
+| 6 | SBOM, signing, provenance verification, retention, and operational alerts | Unsigned or unverified production-bound digests are rejected |
+
+### Acceptance criteria
+
+- No static Azure, ACR, storage, publish-profile, Microsoft Graph, or user
+  credential exists in GitHub.
+- A pull request, including a fork pull request, can run full CI without Azure
+  authentication or repository write permission.
+- `main` cannot change without the required review and checks.
+- Terraform state is remote, locked, versioned, Entra-authenticated, and
+  recoverable; the provider lock is tracked.
+- Terraform plans are caller-independent and destructive changes fail closed.
+- Binary Terraform plans never become public GitHub artifacts and apply
+  verifies the private plan object's identity and checksum.
+- Application components build and release independently.
+- The shared registry builder cannot deploy, and component deployers cannot
+  build/push or read Terraform state.
+- Each image is immutable, digest-addressed, scanned, attributable to one
+  commit, and accompanied by a release manifest.
+- ACA deployment verifies readiness before success and has a tested prior-digest
+  rollback.
+- Hosted Agents, Prompt assets, and directive ingestion retain independent
+  release cadence and rollback evidence.
+- Scheduled infrastructure and release drift detection is non-mutating.
+- A failed verification cannot leave the directive job in preflight/verify mode
+  or silently report deployment success.
+
+### Decisions to confirm before implementation
+
+Recommended defaults for the first iteration:
+
+1. Target only the existing `demo` environment; design the files for later
+   environment expansion without creating `staging` or `production` yet.
+2. Require approval for every Azure write workflow initially. Consider
+   automatic backend/frontend demo deployment only after rollback has been
+   exercised successfully.
+3. Retain ACR Tasks and one isolated shared build identity for the initial
+   cutover. Accept that classic-RBAC ACR cannot isolate publishers by
+   repository in demo; evaluate ACR ABAC or separate registries before
+   production, and evaluate Buildx if single-build local smoke testing and
+   richer native provenance justify the change.
+4. Retain single-revision ACA mode for demo; require blue/green multiple
+   revisions before any production environment.
+5. Keep Microsoft Graph role assignment in the separately approved privileged
+   workflow, with manual execution as the fallback.
+
+### Primary references
+
+- [Azure Login with GitHub OIDC](https://learn.microsoft.com/azure/developer/github/connect-from-azure-openid-connect)
+- [Terraform state in Azure Storage](https://learn.microsoft.com/azure/developer/terraform/store-state-in-azure-storage)
+- [Deploy Azure infrastructure with GitHub Actions](https://learn.microsoft.com/devops/deliver/iac-github-actions)
+- [Azure Container Apps revisions](https://learn.microsoft.com/azure/container-apps/revisions)
+- [Azure Container Apps blue/green deployment](https://learn.microsoft.com/azure/container-apps/blue-green-deployment)
+- [Sign ACR images from GitHub workflows](https://learn.microsoft.com/azure/container-registry/container-registry-tutorial-github-sign-notation-artifact-signing)
+- [GitHub Actions secure-use reference](https://docs.github.com/en/actions/reference/security/secure-use)
+- [GitHub repository rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets)
+
+
+## 27. Stateful directive continuation release - 2026-07-24
+
+> **Status:** Deployed and verified
+
+### 27.1 Scope and release identity
+
+- Deploy the reviewed stateful directive continuation change from merge
+  `34e3423` plus the lifecycle/concurrency remediation in the current working
+  tree.
+- Build and deploy backend image
+  `backend:directive-stateful-20260724-r2`. The r2 backend-only hotfix preserves
+  the r1 conversation protocol binding.
+- Build and publish directive Hosted Agent image
+  `directive-rag-maf-hosted:directive-stateful-20260724-r1`.
+- Advance `DIRECTIVE_AGENT_RELEASE_ID` from
+  `directive-rag-20260723-r2` to `directive-stateful-20260724-r1`.
+- Preserve the default subscription
+  `ME-MngEnvMCAP372348-mimarusa-1`
+  (`7bc68c68-f434-49ad-ab3e-b883ec39da86`), resource group
+  `rg-agent-memory-rag`, and existing `eastus2` locations.
+- No resource creation, deletion, scaling, networking, data migration, role
+  change, frontend image update, support Hosted Agent update, or Search/IQ
+  release is in scope.
+
+### 27.2 Validation proof
+
+Validated at `2026-07-24T16:14:52Z`.
+
+- [x] Independent multi-axis review approved the remediation after verifying
+  startup, transcript/lifecycle atomicity, ambiguous-failure recovery,
+  idempotent callbacks, fenced stale leases, CAS recovery ordering, and
+  lost-response reconciliation.
+- [x] Backend tests: all 129 passed after the live-acceptance endpoint fix and
+  legacy-cleanup regressions.
+- [x] Shared Hosted foundation tests: all 19 passed.
+- [x] Directive Hosted Agent tests: all 6 passed against the pinned directive
+  Agent Framework dependency stack.
+- [x] Frontend production build completed successfully.
+- [x] Terraform `1.13.3` initialized successfully, passed recursive format
+  checking, validated successfully, and loaded all 94 managed state entries.
+- [x] Terraform preview contains one in-place
+  `azurerm_container_app.backend` update, changing only
+  `DIRECTIVE_AGENT_RELEASE_ID`; there are no creates, replacements, or destroys.
+- [x] Azure CLI `2.80.0` resolves the enabled default subscription and tenant;
+  `rg-agent-memory-rag` is `Succeeded` in `eastus2`.
+- [x] Six inherited/subscription policy assignments remain applicable; this
+  image-and-environment update introduces no new policy-sensitive resource.
+- [x] Static RBAC definitions remain unchanged. Live backend assignments still
+  include least-privilege ACR pull, Foundry invocation, model invocation,
+  Search read, directive Blob read, and telemetry publication scopes.
+- [x] No unresolved Go-style environment templates exist in Terraform inputs.
+- [x] Both immutable ACR tags were confirmed absent before deployment.
+
+Validation artifacts:
+
+- `$COPILOT_HOME/session-state/66eb7df8-7f52-4fab-a8fa-4e498508b30b/files/stateful-normal.tfplan`
+- `$COPILOT_HOME/session-state/66eb7df8-7f52-4fab-a8fa-4e498508b30b/files/stateful-normal-plan.txt`
+
+### 27.3 Deployment sequence
+
+1. Build the backend image in ACR while the current release remains active.
+2. Apply a reviewed Terraform plan with `directive_agent_visible=false` and the
+   new release ID, creating a controlled maintenance gate for directive turns.
+3. Build and pin the directive Hosted image with the authoritative
+   `build_hosted_agent_image.sh --configure-azd` path.
+4. Publish the new directive Hosted Agent version with `azd deploy`.
+5. Roll the hidden backend to the new backend image and verify readiness.
+6. Apply the final reviewed Terraform plan restoring
+   `directive_agent_visible=true`.
+7. Verify application health, authenticated directive continuation, deletion,
+   release bindings, active revisions, image digests, and live RBAC.
+
+### 27.4 Rollback
+
+- Keep backend revision `ca-agmem-backend--0000046` and its image
+  `backend:directive-rag-20260723-r1-errorcontract1` available.
+- Keep hidden backend revision `ca-agmem-backend--0000051` on the verified r2
+  image as the immediate maintenance-mode rollback target.
+- Keep the currently published directive Hosted Agent version and
+  `directive-rag-maf-hosted:directive-consolidation-20260724100108` available.
+- On failed acceptance, hide the directive agent first, restore the prior
+  backend image and release ID, then restore visibility only after readiness
+  passes. Do not delete failed revisions, images, conversations, or Hosted
+  Agent versions during rollback.
+
+### 27.5 Deployment and acceptance results
+
+Verified on 2026-07-24 in the default subscription, resource group, and
+`eastus2` deployment:
+
+- The initial build produced backend r1, digest
+  `sha256:95acd7049bc9c68096a9f7569987913b5bf8893672c9e42f27d5f941f2a49d0c`.
+  ACR build `ch31` produced the corrected backend r2, digest
+  `sha256:fff2f899d0e5afb87f317f87426d19ce48232dec9d477f17d1165c6714979870`.
+- Directive image `directive-rag-maf-hosted:directive-stateful-20260724-r1`,
+  digest
+  `sha256:75b9f98f334472cd3f5edb623827dbca83cf33a3a000dfeb2eee45d2e88181cc`,
+  is active as Hosted Agent version 4 with release binding
+  `directive-stateful-20260724-r1`.
+- Initial r1 live acceptance exposed an endpoint-namespace defect: the backend
+  created the private inner conversation through the physical Hosted Agent
+  endpoint, while the hosted `FoundryChatClient` continued it through the
+  project OpenAI endpoint. The service returned `conversation_not_found`.
+  Directive visibility was immediately disabled again; the failed turn left no
+  public transcript.
+- The independently approved r2 hotfix separates the outer Hosted Agent client
+  from the project-level inner model-state client. Runtime schema v7 identifies
+  project-level inner IDs; schema-v6 IDs retain legacy physical-endpoint cleanup.
+  The failed r1 acceptance conversation was deleted through the legacy endpoint
+  and then returned HTTP `404`.
+- Hidden revision `ca-agmem-backend--0000051` proved that the startup probe
+  creates and deletes model state through `/openai/v1/conversations`. Final
+  revision `ca-agmem-backend--0000052` is healthy, provisioned, has one replica,
+  runs `backend:directive-stateful-20260724-r2`, retains the r1 release binding,
+  exposes the directive, and receives 100% of backend traffic.
+- The exact final Terraform plan changed only
+  `DIRECTIVE_AGENT_VISIBLE=false -> true`; it preserved the r2 image and r1
+  release binding and contained zero creates, replacements, or destroys.
+- Production liveness and readiness return HTTP `200`; every reported Cosmos,
+  Search, Foundry, directive-data, and gateway dependency is `ok`.
+  Anonymous `/api/me` returns HTTP `401`; authenticated `/api/me` and `/api/agents`
+  return HTTP `200`; `directive-rag` is available.
+- A two-turn authenticated directive conversation completed twice with
+  `RUN_FINISHED` and no `RUN_ERROR`. Turn one returned the current 25-day annual
+  vacation allowance and the signed-in user's mandatory classification. The
+  context-dependent follow-up correctly compared the previous allowance:
+  20 days for the first four years, a five-day increase in v2, and no change
+  from the fifth anniversary.
+- Endpoint logs show one project-level inner-conversation creation and two outer
+  Hosted Agent Responses calls for those turns. The persisted public transcript
+  contained four ordered user/assistant messages and no runtime, Foundry,
+  Hosted-session, inner-conversation, response, owner, or ETag fields.
+- Deleting the acceptance conversation removed the project-level inner
+  conversation before the physical outer conversation; the public conversation
+  then returned HTTP `404`.
+- Live RBAC remains unchanged and least privilege. The backend UAMI retains
+  ACR pull, Foundry agent invocation, model invocation, Search read, directive
+  Blob read, telemetry publish, and scoped Cosmos data access. The directive
+  Hosted identity retains exactly `AgentTools.Invoke` and
+  `Agent365.Observability.OtelWrite`, and remains in the backend directive caller
+  allowlist.
+- The final full-refresh Terraform plan exited `0` with
+  `No changes. Your infrastructure matches the configuration.` Evidence is in
+  `$COPILOT_HOME/session-state/66eb7df8-7f52-4fab-a8fa-4e498508b30b/files/stateful-r2-final-drift.txt`.
 
 ## 20. MAF Hosted Agent consolidation - 2026-07-24
 

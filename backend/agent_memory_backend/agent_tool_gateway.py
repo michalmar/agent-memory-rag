@@ -14,6 +14,8 @@ from agent_contracts import (
     COMMON_TOOL_DEFINITIONS,
     DIRECTIVE_TOOL_DEFINITIONS,
     InnerStateStatus,
+    InnerTurnOutcome,
+    RuntimeState,
     ToolResultEnvelope,
 )
 from .agent_tools import ToolExecutionError, ToolExecutor
@@ -64,6 +66,10 @@ class AgentStateRequest(BaseModel):
     outer_foundry_conversation_id: str = Field(min_length=1, max_length=256)
 
 
+class AgentStateTurnRequest(AgentStateRequest):
+    revision: int = Field(ge=1)
+
+
 async def resolve_agent_state(
     request: AgentStateRequest,
     caller: AgentCaller,
@@ -74,6 +80,14 @@ async def resolve_agent_state(
     )
     if not state.inner_model_conversation_id or state.inner_state_status is None:
         raise HTTPException(status_code=409, detail="Directive continuation state missing")
+    if state.inner_state_status in {
+        InnerStateStatus.RECOVERY_REQUIRED,
+        InnerStateStatus.RECOVERING,
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail="Directive continuation state requires recovery",
+        )
     if state.inner_last_completed_call_id == request.call_id:
         raise HTTPException(status_code=409, detail="Directive turn already completed")
     if state.inner_last_failed_call_id == request.call_id:
@@ -83,6 +97,25 @@ async def resolve_agent_state(
         )
     if state.inner_pending_call_id:
         if state.inner_pending_call_id == request.call_id:
+            if state.inner_pending_outcome is InnerTurnOutcome.COMPLETED:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Directive turn is awaiting transcript commit",
+                )
+            if (
+                state.inner_pending_revision is not None
+                and not _pending_lease_is_stale(
+                    state.inner_pending_started_at
+                )
+            ):
+                return _resolved_state_payload(state)
+            state.inner_last_failed_call_id = request.call_id
+            await _mark_recovery_required(
+                document,
+                state,
+                request.user_id,
+                history_store,
+            )
             raise HTTPException(
                 status_code=409,
                 detail="Directive turn outcome requires recovery",
@@ -93,13 +126,137 @@ async def resolve_agent_state(
                 detail="Directive conversation is busy",
             )
         state.inner_last_failed_call_id = state.inner_pending_call_id
+        await _mark_recovery_required(
+            document,
+            state,
+            request.user_id,
+            history_store,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="Directive continuation state requires recovery",
+        )
     state.inner_pending_call_id = request.call_id
     state.inner_pending_started_at = datetime.now(timezone.utc).isoformat()
     state.inner_state_revision += 1
+    state.inner_pending_revision = state.inner_state_revision
+    state.inner_pending_outcome = None
+    await _persist_runtime_state(
+        document,
+        request.user_id,
+        state,
+        history_store,
+    )
+    return _resolved_state_payload(state)
+
+
+def _resolved_state_payload(state: RuntimeState) -> dict[str, Any]:
+    return {
+        "inner_model_conversation_id": state.inner_model_conversation_id,
+        "bootstrap_required": (
+            state.inner_state_status is InnerStateStatus.BOOTSTRAP_REQUIRED
+        ),
+        "release_id": state.descriptor.release_id,
+        "revision": state.inner_pending_revision,
+    }
+
+
+async def complete_agent_state_turn(
+    request: AgentStateTurnRequest,
+    caller: AgentCaller,
+    history_store: ConversationHistoryStore,
+) -> dict[str, str]:
+    document, state = await _bound_directive_state(
+        request, caller, history_store
+    )
+    if state.inner_last_completed_call_id == request.call_id:
+        return {"status": "ready"}
+    if state.inner_last_failed_call_id == request.call_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Directive turn outcome requires recovery",
+        )
+    if (
+        state.inner_pending_call_id != request.call_id
+        or state.inner_pending_revision != request.revision
+    ):
+        raise HTTPException(status_code=409, detail="Directive turn lease mismatch")
+    if state.inner_pending_outcome is InnerTurnOutcome.COMPLETED:
+        return {"status": "completed"}
+    state.inner_pending_outcome = InnerTurnOutcome.COMPLETED
+    state.inner_state_revision += 1
+    await _persist_runtime_state(
+        document,
+        request.user_id,
+        state,
+        history_store,
+    )
+    return {"status": "completed"}
+
+
+async def fail_agent_state_turn(
+    request: AgentStateTurnRequest,
+    caller: AgentCaller,
+    history_store: ConversationHistoryStore,
+) -> dict[str, str]:
+    document, state = await _bound_directive_state(
+        request, caller, history_store
+    )
+    if state.inner_last_failed_call_id == request.call_id:
+        return {"status": "failed"}
+    if state.inner_last_completed_call_id == request.call_id:
+        return {"status": "ready"}
+    if (
+        state.inner_pending_call_id != request.call_id
+        or state.inner_pending_revision != request.revision
+    ):
+        raise HTTPException(status_code=409, detail="Directive turn lease mismatch")
+    if state.inner_pending_outcome is InnerTurnOutcome.COMPLETED:
+        return {"status": "completed"}
+    state.inner_last_failed_call_id = request.call_id
+    state.inner_state_status = InnerStateStatus.RECOVERY_REQUIRED
+    state.inner_recovery_started_at = None
+    _clear_pending_turn(state)
+    state.inner_state_revision += 1
+    await _persist_runtime_state(
+        document,
+        request.user_id,
+        state,
+        history_store,
+    )
+    return {"status": "failed"}
+
+
+def _clear_pending_turn(state: RuntimeState) -> None:
+    state.inner_pending_call_id = None
+    state.inner_pending_started_at = None
+    state.inner_pending_revision = None
+    state.inner_pending_outcome = None
+
+
+async def _mark_recovery_required(
+    document: dict[str, Any],
+    state: RuntimeState,
+    user_id: str,
+    history_store: ConversationHistoryStore,
+) -> None:
+    _clear_pending_turn(state)
+    state.inner_state_status = InnerStateStatus.RECOVERY_REQUIRED
+    state.inner_recovery_started_at = None
+    state.inner_state_revision += 1
+    await _persist_runtime_state(document, user_id, state, history_store)
+
+
+async def _persist_runtime_state(
+    document: dict[str, Any],
+    user_id: str,
+    state: RuntimeState,
+    history_store: ConversationHistoryStore,
+) -> None:
     try:
         await history_store.bind_runtime_state(
             str(document["id"]),
-            request.user_id,
+            user_id,
             state,
             expected_etag=document.get("_etag"),
         )
@@ -110,61 +267,6 @@ async def resolve_agent_state(
                 detail="Directive conversation is busy",
             ) from exc
         raise
-    return {
-        "inner_model_conversation_id": state.inner_model_conversation_id,
-        "bootstrap_required": (
-            state.inner_state_status is InnerStateStatus.BOOTSTRAP_REQUIRED
-        ),
-        "release_id": state.descriptor.release_id,
-        "revision": state.inner_state_revision,
-    }
-
-
-async def complete_agent_state_turn(
-    request: AgentStateRequest,
-    caller: AgentCaller,
-    history_store: ConversationHistoryStore,
-) -> dict[str, str]:
-    document, state = await _bound_directive_state(
-        request, caller, history_store
-    )
-    if state.inner_pending_call_id != request.call_id:
-        raise HTTPException(status_code=409, detail="Directive turn lease mismatch")
-    state.inner_pending_call_id = None
-    state.inner_pending_started_at = None
-    state.inner_last_completed_call_id = request.call_id
-    state.inner_state_status = InnerStateStatus.READY
-    state.inner_state_revision += 1
-    await history_store.bind_runtime_state(
-        str(document["id"]),
-        request.user_id,
-        state,
-        expected_etag=document.get("_etag"),
-    )
-    return {"status": "ready"}
-
-
-async def fail_agent_state_turn(
-    request: AgentStateRequest,
-    caller: AgentCaller,
-    history_store: ConversationHistoryStore,
-) -> dict[str, str]:
-    document, state = await _bound_directive_state(
-        request, caller, history_store
-    )
-    if state.inner_pending_call_id != request.call_id:
-        raise HTTPException(status_code=409, detail="Directive turn lease mismatch")
-    state.inner_pending_call_id = None
-    state.inner_pending_started_at = None
-    state.inner_last_failed_call_id = request.call_id
-    state.inner_state_revision += 1
-    await history_store.bind_runtime_state(
-        str(document["id"]),
-        request.user_id,
-        state,
-        expected_etag=document.get("_etag"),
-    )
-    return {"status": "failed"}
 
 
 def _pending_lease_is_stale(started_at: str | None) -> bool:
@@ -183,7 +285,7 @@ async def _bound_directive_state(
     request: AgentStateRequest,
     caller: AgentCaller,
     history_store: ConversationHistoryStore,
-) -> tuple[dict[str, Any], Any]:
+) -> tuple[dict[str, Any], RuntimeState]:
     document = await history_store.get_by_hosted_session(
         request.user_id, request.session_id
     )

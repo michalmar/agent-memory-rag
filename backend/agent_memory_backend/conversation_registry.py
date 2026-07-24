@@ -106,6 +106,20 @@ class ConversationRegistry:
         await lock.acquire()
         return ConversationLease(lock)
 
+    async def release_and_prune(
+        self,
+        conversation_id: str,
+        lease: ConversationLease,
+    ) -> None:
+        await lease.release()
+        lock = self._locks.get(conversation_id)
+        if (
+            lock is lease._lock
+            and not lock.locked()
+            and conversation_id not in self._conversations
+        ):
+            self._locks.pop(conversation_id, None)
+
     def _evict_if_needed(self) -> None:
         overflow = len(self._conversations) - MAX_CONVERSATIONS
         if overflow <= 0:

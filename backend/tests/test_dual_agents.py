@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -16,6 +17,7 @@ from agent_contracts import (
     Citation,
     CitationsEvent,
     InnerStateStatus,
+    InnerTurnOutcome,
     RuntimeCompletedEvent,
     RuntimeDescriptor,
     RuntimeState,
@@ -33,9 +35,11 @@ from agent_memory_backend.agent_mcp import (
 )
 from agent_memory_backend.agent_tool_gateway import (
     AgentStateRequest,
+    AgentStateTurnRequest,
     AgentToolRequest,
     complete_agent_state_turn,
     dispatch_agent_tool,
+    fail_agent_state_turn,
     resolve_agent_state,
 )
 from agent_memory_backend.agent_tools import ToolExecutor
@@ -95,7 +99,7 @@ def _document(state: RuntimeState, *, user_id: str = "tenant:user") -> dict:
         "user_id": user_id,
         "messages": [],
         "metadata": {
-            "schema_version": 3,
+            "schema_version": state.schema_version,
             "agent_type": state.descriptor.agent_type.value,
             "physical_agent_name": state.descriptor.physical_agent_name,
             "release_id": state.descriptor.release_id,
@@ -112,6 +116,13 @@ def _document(state: RuntimeState, *, user_id: str = "tenant:user") -> dict:
                 ),
                 "inner_pending_call_id": state.inner_pending_call_id,
                 "inner_pending_started_at": state.inner_pending_started_at,
+                "inner_pending_revision": state.inner_pending_revision,
+                "inner_pending_outcome": (
+                    state.inner_pending_outcome.value
+                    if state.inner_pending_outcome
+                    else None
+                ),
+                "inner_recovery_started_at": state.inner_recovery_started_at,
                 "inner_last_completed_call_id": (
                     state.inner_last_completed_call_id
                 ),
@@ -186,7 +197,7 @@ class AgentGatewayTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(raised.exception.status_code, 403)
 
-    async def test_bootstrap_completion_is_conditionally_persisted(self) -> None:
+    async def test_completion_waits_for_atomic_transcript_commit(self) -> None:
         state = _runtime_state(
             AgentType.DIRECTIVE_RAG,
             hosted_id="hosted-session-1",
@@ -194,6 +205,8 @@ class AgentGatewayTests(unittest.IsolatedAsyncioTestCase):
         state.inner_model_conversation_id = "conv_inner"
         state.inner_state_status = InnerStateStatus.BOOTSTRAP_REQUIRED
         state.inner_pending_call_id = "call-1"
+        state.inner_pending_revision = 1
+        state.inner_state_revision = 1
         document = _document(state, user_id="tenant:user")
         document["_etag"] = "etag-1"
         history = SimpleNamespace(
@@ -208,6 +221,58 @@ class AgentGatewayTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             result = await complete_agent_state_turn(
+                AgentStateTurnRequest(
+                    user_id="tenant:user",
+                    session_id="hosted-session-1",
+                    call_id="call-1",
+                    outer_foundry_conversation_id="foundry-conversation",
+                    revision=1,
+                ),
+                AgentCaller("directive-principal", "tenant"),
+                history,
+            )
+
+        self.assertEqual(result, {"status": "completed"})
+        persisted_state = history.bind_runtime_state.await_args.args[2]
+        self.assertIs(
+            persisted_state.inner_state_status,
+            InnerStateStatus.BOOTSTRAP_REQUIRED,
+        )
+        self.assertEqual(persisted_state.inner_pending_call_id, "call-1")
+        self.assertIs(
+            persisted_state.inner_pending_outcome,
+            InnerTurnOutcome.COMPLETED,
+        )
+        self.assertEqual(
+            history.bind_runtime_state.await_args.kwargs["expected_etag"],
+            "etag-1",
+        )
+
+    async def test_state_resolver_retry_reuses_same_fenced_lease(self) -> None:
+        state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session-1",
+        )
+        state.inner_model_conversation_id = "conv_inner"
+        state.inner_state_status = InnerStateStatus.READY
+        state.inner_pending_call_id = "call-1"
+        state.inner_pending_started_at = datetime.now(timezone.utc).isoformat()
+        state.inner_pending_revision = 4
+        state.inner_state_revision = 4
+        history = SimpleNamespace(
+            get_by_hosted_session=AsyncMock(
+                return_value=_document(state, user_id="tenant:user")
+            ),
+            bind_runtime_state=AsyncMock(),
+        )
+
+        with patch(
+            "agent_memory_backend.agent_tool_gateway.get_settings",
+            return_value=SimpleNamespace(
+                directive_hosted_agent_principal_ids=("directive-principal",)
+            ),
+        ):
+            result = await resolve_agent_state(
                 AgentStateRequest(
                     user_id="tenant:user",
                     session_id="hosted-session-1",
@@ -218,13 +283,182 @@ class AgentGatewayTests(unittest.IsolatedAsyncioTestCase):
                 history,
             )
 
-        self.assertEqual(result, {"status": "ready"})
-        persisted_state = history.bind_runtime_state.await_args.args[2]
-        self.assertIs(persisted_state.inner_state_status, InnerStateStatus.READY)
-        self.assertEqual(
-            history.bind_runtime_state.await_args.kwargs["expected_etag"],
-            "etag-1",
+        self.assertEqual(result["revision"], 4)
+        history.bind_runtime_state.assert_not_awaited()
+
+    async def test_completion_callback_retry_is_idempotent(self) -> None:
+        state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session-1",
         )
+        state.inner_model_conversation_id = "conv_inner"
+        state.inner_state_status = InnerStateStatus.READY
+        state.inner_pending_call_id = "call-1"
+        state.inner_pending_revision = 4
+        state.inner_pending_outcome = InnerTurnOutcome.COMPLETED
+        state.inner_state_revision = 5
+        history = SimpleNamespace(
+            get_by_hosted_session=AsyncMock(
+                return_value=_document(state, user_id="tenant:user")
+            ),
+            bind_runtime_state=AsyncMock(),
+        )
+
+        with patch(
+            "agent_memory_backend.agent_tool_gateway.get_settings",
+            return_value=SimpleNamespace(
+                directive_hosted_agent_principal_ids=("directive-principal",)
+            ),
+        ):
+            result = await complete_agent_state_turn(
+                AgentStateTurnRequest(
+                    user_id="tenant:user",
+                    session_id="hosted-session-1",
+                    call_id="call-1",
+                    outer_foundry_conversation_id="foundry-conversation",
+                    revision=4,
+                ),
+                AgentCaller("directive-principal", "tenant"),
+                history,
+            )
+
+        self.assertEqual(result, {"status": "completed"})
+        history.bind_runtime_state.assert_not_awaited()
+
+    async def test_terminal_callback_rejects_stale_fencing_revision(self) -> None:
+        state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session-1",
+        )
+        state.inner_model_conversation_id = "conv_inner"
+        state.inner_state_status = InnerStateStatus.READY
+        state.inner_pending_call_id = "call-1"
+        state.inner_pending_revision = 4
+        state.inner_state_revision = 4
+        history = SimpleNamespace(
+            get_by_hosted_session=AsyncMock(
+                return_value=_document(state, user_id="tenant:user")
+            ),
+            bind_runtime_state=AsyncMock(),
+        )
+
+        with (
+            patch(
+                "agent_memory_backend.agent_tool_gateway.get_settings",
+                return_value=SimpleNamespace(
+                    directive_hosted_agent_principal_ids=("directive-principal",)
+                ),
+            ),
+            self.assertRaises(HTTPException) as raised,
+        ):
+            await complete_agent_state_turn(
+                AgentStateTurnRequest(
+                    user_id="tenant:user",
+                    session_id="hosted-session-1",
+                    call_id="call-1",
+                    outer_foundry_conversation_id="foundry-conversation",
+                    revision=3,
+                ),
+                AgentCaller("directive-principal", "tenant"),
+                history,
+            )
+
+        self.assertEqual(raised.exception.status_code, 409)
+        history.bind_runtime_state.assert_not_awaited()
+
+    async def test_failed_turn_requires_fresh_inner_state(self) -> None:
+        state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session-1",
+        )
+        state.inner_model_conversation_id = "conv_inner"
+        state.inner_state_status = InnerStateStatus.BOOTSTRAP_REQUIRED
+        state.inner_pending_call_id = "call-1"
+        state.inner_pending_started_at = datetime.now(timezone.utc).isoformat()
+        state.inner_pending_revision = 2
+        state.inner_state_revision = 2
+        document = _document(state, user_id="tenant:user")
+        document["_etag"] = "etag-1"
+        history = SimpleNamespace(
+            get_by_hosted_session=AsyncMock(return_value=document),
+            bind_runtime_state=AsyncMock(),
+        )
+
+        with patch(
+            "agent_memory_backend.agent_tool_gateway.get_settings",
+            return_value=SimpleNamespace(
+                directive_hosted_agent_principal_ids=("directive-principal",)
+            ),
+        ):
+            result = await fail_agent_state_turn(
+                AgentStateTurnRequest(
+                    user_id="tenant:user",
+                    session_id="hosted-session-1",
+                    call_id="call-1",
+                    outer_foundry_conversation_id="foundry-conversation",
+                    revision=2,
+                ),
+                AgentCaller("directive-principal", "tenant"),
+                history,
+            )
+
+        self.assertEqual(result, {"status": "failed"})
+        persisted = history.bind_runtime_state.await_args.args[2]
+        self.assertIs(
+            persisted.inner_state_status,
+            InnerStateStatus.RECOVERY_REQUIRED,
+        )
+        self.assertIsNone(persisted.inner_pending_call_id)
+        self.assertEqual(persisted.inner_last_failed_call_id, "call-1")
+
+    async def test_stale_lease_is_recovered_instead_of_taken_over(self) -> None:
+        state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session-1",
+        )
+        state.inner_model_conversation_id = "conv_inner"
+        state.inner_state_status = InnerStateStatus.READY
+        state.inner_pending_call_id = "call-old"
+        state.inner_pending_started_at = (
+            datetime.now(timezone.utc) - timedelta(minutes=11)
+        ).isoformat()
+        state.inner_pending_revision = 2
+        state.inner_state_revision = 2
+        document = _document(state, user_id="tenant:user")
+        document["_etag"] = "etag-1"
+        history = SimpleNamespace(
+            get_by_hosted_session=AsyncMock(return_value=document),
+            bind_runtime_state=AsyncMock(),
+        )
+
+        with (
+            patch(
+                "agent_memory_backend.agent_tool_gateway.get_settings",
+                return_value=SimpleNamespace(
+                    directive_hosted_agent_principal_ids=("directive-principal",)
+                ),
+            ),
+            self.assertRaises(HTTPException) as raised,
+        ):
+            await resolve_agent_state(
+                AgentStateRequest(
+                    user_id="tenant:user",
+                    session_id="hosted-session-1",
+                    call_id="call-new",
+                    outer_foundry_conversation_id="foundry-conversation",
+                ),
+                AgentCaller("directive-principal", "tenant"),
+                history,
+            )
+
+        self.assertEqual(raised.exception.status_code, 409)
+        persisted = history.bind_runtime_state.await_args.args[2]
+        self.assertIs(
+            persisted.inner_state_status,
+            InnerStateStatus.RECOVERY_REQUIRED,
+        )
+        self.assertEqual(persisted.inner_last_failed_call_id, "call-old")
+        self.assertIsNone(persisted.inner_pending_call_id)
 
     async def test_gateway_uses_bound_user_and_hosted_session(self) -> None:
         state = _runtime_state(
@@ -315,6 +549,16 @@ class AgentGatewayTests(unittest.IsolatedAsyncioTestCase):
                     "tenant_id": "attacker",
                 }
             )
+
+    def test_chat_request_bounds_conversation_identifier(self) -> None:
+        for conversation_id in ("x" * 129, "../conversation"):
+            with self.subTest(conversation_id=conversation_id):
+                with self.assertRaises(ValidationError):
+                    server.ChatRequest(
+                        message="hello",
+                        conversation_id=conversation_id,
+                        agent_type=AgentType.FOUNDRY_PROMPT,
+                    )
 
 
 class AgentMcpTests(unittest.IsolatedAsyncioTestCase):
@@ -418,7 +662,14 @@ class AgentTokenPolicyTests(unittest.TestCase):
 class RemoteRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_directive_state_deletes_inner_before_outer_and_session(self) -> None:
         order = []
-        conversations = SimpleNamespace(
+        inner_conversations = SimpleNamespace(
+            delete=AsyncMock(
+                side_effect=lambda **kwargs: order.append(
+                    ("conversation", kwargs["conversation_id"])
+                )
+            )
+        )
+        outer_conversations = SimpleNamespace(
             delete=AsyncMock(
                 side_effect=lambda **kwargs: order.append(
                     ("conversation", kwargs["conversation_id"])
@@ -436,7 +687,10 @@ class RemoteRuntimeTests(unittest.IsolatedAsyncioTestCase):
             AgentType.DIRECTIVE_RAG,
             agent_name="directive-agent",
         )
-        runtime._openai = SimpleNamespace(conversations=conversations)
+        runtime._openai = SimpleNamespace(conversations=outer_conversations)
+        runtime._model_openai = SimpleNamespace(
+            conversations=inner_conversations
+        )
         runtime._project = SimpleNamespace(agents=agents)
         state = _runtime_state(
             AgentType.DIRECTIVE_RAG,
@@ -444,6 +698,7 @@ class RemoteRuntimeTests(unittest.IsolatedAsyncioTestCase):
             hosted_id="hosted-session",
         )
         state.inner_model_conversation_id = "conv_inner"
+        state.schema_version = 7
 
         await runtime.delete_state(state, "tenant:user")
 
@@ -456,12 +711,51 @@ class RemoteRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_legacy_directive_state_deletes_inner_through_physical_endpoint(
+        self,
+    ) -> None:
+        physical_conversations = SimpleNamespace(delete=AsyncMock())
+        model_conversations = SimpleNamespace(delete=AsyncMock())
+        runtime = _hosted_runtime(
+            AgentType.DIRECTIVE_RAG,
+            agent_name="directive-agent",
+        )
+        runtime._openai = SimpleNamespace(
+            conversations=physical_conversations
+        )
+        runtime._model_openai = SimpleNamespace(
+            conversations=model_conversations
+        )
+        runtime._project = SimpleNamespace(
+            agents=SimpleNamespace(delete_session=AsyncMock())
+        )
+        state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            foundry_id="outer-conversation",
+        )
+        state.inner_model_conversation_id = "legacy-inner"
+        state.schema_version = 6
+
+        await runtime.delete_state(state, "tenant:user")
+
+        self.assertEqual(physical_conversations.delete.await_count, 2)
+        self.assertEqual(
+            physical_conversations.delete.await_args_list[0].kwargs[
+                "conversation_id"
+            ],
+            "legacy-inner",
+        )
+        model_conversations.delete.assert_not_awaited()
+
     async def test_directive_state_deletion_tolerates_absent_resources(self) -> None:
         class NotFoundError(Exception):
             status_code = 404
 
-        conversations = SimpleNamespace(
-            delete=AsyncMock(side_effect=[NotFoundError(), None])
+        inner_conversations = SimpleNamespace(
+            delete=AsyncMock(side_effect=NotFoundError())
+        )
+        outer_conversations = SimpleNamespace(
+            delete=AsyncMock()
         )
         agents = SimpleNamespace(
             delete_session=AsyncMock(side_effect=NotFoundError())
@@ -470,7 +764,10 @@ class RemoteRuntimeTests(unittest.IsolatedAsyncioTestCase):
             AgentType.DIRECTIVE_RAG,
             agent_name="directive-agent",
         )
-        runtime._openai = SimpleNamespace(conversations=conversations)
+        runtime._openai = SimpleNamespace(conversations=outer_conversations)
+        runtime._model_openai = SimpleNamespace(
+            conversations=inner_conversations
+        )
         runtime._project = SimpleNamespace(agents=agents)
         state = _runtime_state(
             AgentType.DIRECTIVE_RAG,
@@ -481,18 +778,19 @@ class RemoteRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         await runtime.delete_state(state, "tenant:user")
 
-        self.assertEqual(conversations.delete.await_count, 2)
+        inner_conversations.delete.assert_awaited_once()
+        outer_conversations.delete.assert_awaited_once()
         agents.delete_session.assert_awaited_once()
 
     async def test_directive_creation_cleans_partial_remote_state(self) -> None:
-        conversations = SimpleNamespace(
+        outer_conversations = SimpleNamespace(
             create=AsyncMock(
-                side_effect=[
-                    SimpleNamespace(id="outer-conversation"),
-                    RuntimeError("inner creation failed"),
-                ]
+                return_value=SimpleNamespace(id="outer-conversation")
             ),
             delete=AsyncMock(),
+        )
+        inner_conversations = SimpleNamespace(
+            create=AsyncMock(side_effect=RuntimeError("inner creation failed"))
         )
         agents = SimpleNamespace(
             create_session=AsyncMock(
@@ -504,18 +802,118 @@ class RemoteRuntimeTests(unittest.IsolatedAsyncioTestCase):
             AgentType.DIRECTIVE_RAG,
             agent_name="directive-agent",
         )
-        runtime._openai = SimpleNamespace(conversations=conversations)
+        runtime._openai = SimpleNamespace(conversations=outer_conversations)
+        runtime._model_openai = SimpleNamespace(
+            conversations=inner_conversations
+        )
         runtime._project = SimpleNamespace(agents=agents)
 
         with self.assertRaisesRegex(RuntimeError, "inner creation failed"):
             await runtime.create_state("application-1", "tenant:user")
 
-        conversations.delete.assert_awaited_once()
+        outer_conversations.delete.assert_awaited_once()
         self.assertEqual(
-            conversations.delete.await_args.kwargs["conversation_id"],
+            outer_conversations.delete.await_args.kwargs["conversation_id"],
             "outer-conversation",
         )
         agents.delete_session.assert_awaited_once()
+
+    async def test_directive_recovery_replaces_legacy_inner_state(self) -> None:
+        model_conversations = SimpleNamespace(
+            create=AsyncMock(return_value=SimpleNamespace(id="conv_replacement")),
+            delete=AsyncMock(),
+        )
+        physical_conversations = SimpleNamespace(delete=AsyncMock())
+        runtime = _hosted_runtime(
+            AgentType.DIRECTIVE_RAG,
+            agent_name="directive-agent",
+        )
+        runtime._openai = SimpleNamespace(
+            conversations=physical_conversations
+        )
+        runtime._model_openai = SimpleNamespace(
+            conversations=model_conversations
+        )
+        state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session",
+        )
+        state.inner_model_conversation_id = "conv_uncertain"
+        state.inner_state_status = InnerStateStatus.RECOVERY_REQUIRED
+        state.inner_pending_call_id = "call-1"
+        state.inner_pending_revision = 4
+        state.inner_state_revision = 4
+        state.schema_version = 6
+
+        replacement_id = await runtime.recover_inner_state(
+            state,
+            "tenant:user",
+            seed_messages=[
+                {"role": "user", "content": "Committed question"},
+                {"role": "assistant", "content": "Committed answer"},
+            ],
+        )
+
+        self.assertEqual(replacement_id, "conv_replacement")
+        self.assertEqual(state.inner_model_conversation_id, replacement_id)
+        self.assertIs(state.inner_state_status, InnerStateStatus.READY)
+        model_conversations.create.assert_awaited_once_with(
+            items=[
+                {"role": "user", "content": "Committed question"},
+                {"role": "assistant", "content": "Committed answer"},
+            ],
+            extra_headers={
+                "Foundry-Features": "HostedAgents=V1Preview",
+                "x-ms-user-identity": "tenant:user",
+            },
+        )
+        self.assertIsNone(state.inner_pending_call_id)
+        self.assertEqual(state.inner_last_failed_call_id, "call-1")
+        self.assertEqual(state.inner_state_revision, 5)
+        physical_conversations.delete.assert_awaited_once()
+        self.assertEqual(
+            physical_conversations.delete.await_args.kwargs["conversation_id"],
+            "conv_uncertain",
+        )
+        model_conversations.delete.assert_not_awaited()
+        self.assertEqual(state.schema_version, 7)
+
+    async def test_directive_recovery_replaces_project_inner_state(self) -> None:
+        model_conversations = SimpleNamespace(
+            create=AsyncMock(return_value=SimpleNamespace(id="conv_replacement")),
+            delete=AsyncMock(),
+        )
+        physical_conversations = SimpleNamespace(delete=AsyncMock())
+        runtime = _hosted_runtime(
+            AgentType.DIRECTIVE_RAG,
+            agent_name="directive-agent",
+        )
+        runtime._openai = SimpleNamespace(
+            conversations=physical_conversations
+        )
+        runtime._model_openai = SimpleNamespace(
+            conversations=model_conversations
+        )
+        state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session",
+        )
+        state.inner_model_conversation_id = "conv_project"
+        state.inner_state_status = InnerStateStatus.RECOVERY_REQUIRED
+        state.schema_version = 7
+
+        await runtime.recover_inner_state(
+            state,
+            "tenant:user",
+            seed_messages=[],
+        )
+
+        model_conversations.delete.assert_awaited_once()
+        self.assertEqual(
+            model_conversations.delete.await_args.kwargs["conversation_id"],
+            "conv_project",
+        )
+        physical_conversations.delete.assert_not_awaited()
 
     async def test_prompt_mock_does_not_expose_application_tools(self) -> None:
         runtime = MockAgentRuntime(
@@ -768,6 +1166,220 @@ class RoutingAndPersistenceTests(unittest.IsolatedAsyncioTestCase):
         history.bind_runtime_state.assert_awaited_once()
         runtime.delete_inner_state.assert_not_awaited()
 
+    async def test_recovery_rotates_inner_state_before_retry(self) -> None:
+        state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session",
+        )
+        state.inner_model_conversation_id = "conv_uncertain"
+        state.inner_state_status = InnerStateStatus.RECOVERY_REQUIRED
+        state.inner_last_failed_call_id = "call-1"
+        document = _document(state, user_id="tenant:user")
+        document["_etag"] = "etag-2"
+        document["messages"] = [{"role": "user", "content": "previous"}]
+
+        async def recover(runtime_state, user_id, *, seed_messages):
+            order.append("recover")
+            self.assertEqual(user_id, "tenant:user")
+            self.assertEqual(
+                seed_messages,
+                [{"role": "user", "content": "previous"}],
+            )
+            runtime_state.inner_model_conversation_id = "conv_replacement"
+            runtime_state.inner_state_status = InnerStateStatus.READY
+            runtime_state.inner_recovery_started_at = None
+            runtime_state.inner_state_revision += 1
+            return "conv_replacement"
+
+        runtime = SimpleNamespace(
+            recover_inner_state=AsyncMock(side_effect=recover),
+            delete_inner_state=AsyncMock(),
+        )
+        etags = iter(("etag-claim", "etag-final"))
+        order: list[str] = []
+
+        async def bind_runtime_state(
+            conversation_id,
+            user_id,
+            runtime_state,
+            *,
+            expected_etag,
+        ):
+            order.append(f"bind:{runtime_state.inner_state_status.value}")
+            self.assertEqual(conversation_id, "conversation-1")
+            self.assertEqual(user_id, "tenant:user")
+            persisted = _document(runtime_state, user_id=user_id)
+            persisted["messages"] = list(document["messages"])
+            persisted["_etag"] = next(etags)
+            return persisted
+
+        history = SimpleNamespace(
+            bind_runtime_state=AsyncMock(side_effect=bind_runtime_state),
+        )
+        coordinator = ConversationCoordinator(
+            ConversationRegistry(),
+            history,
+            SimpleNamespace(),
+            {AgentType.DIRECTIVE_RAG: runtime},
+        )
+
+        restored, _ = await coordinator._restore_runtime(
+            document,
+            "conversation-1",
+            "tenant:user",
+            AgentType.DIRECTIVE_RAG,
+        )
+
+        self.assertEqual(
+            restored.inner_model_conversation_id,
+            "conv_replacement",
+        )
+        self.assertIs(restored.inner_state_status, InnerStateStatus.READY)
+        self.assertEqual(history.bind_runtime_state.await_count, 2)
+        self.assertEqual(
+            order,
+            ["bind:recovering", "recover", "bind:ready"],
+        )
+        claimed_state = history.bind_runtime_state.await_args_list[0].args[2]
+        self.assertIs(
+            claimed_state.inner_state_status,
+            InnerStateStatus.RECOVERING,
+        )
+        self.assertIsNotNone(claimed_state.inner_recovery_started_at)
+        runtime.delete_inner_state.assert_not_awaited()
+
+    async def test_transcript_commit_winning_recovery_cas_keeps_inner_state(
+        self,
+    ) -> None:
+        class PreconditionFailed(Exception):
+            status_code = 412
+
+        state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session",
+        )
+        state.inner_model_conversation_id = "conv_inner"
+        state.inner_state_status = InnerStateStatus.READY
+        state.inner_pending_call_id = "call-1"
+        state.inner_pending_revision = 1
+        state.inner_pending_outcome = InnerTurnOutcome.COMPLETED
+        document = _document(state, user_id="tenant:user")
+        document["_etag"] = "etag-completed"
+
+        winner_state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session",
+        )
+        winner_state.inner_model_conversation_id = "conv_inner"
+        winner_state.inner_state_status = InnerStateStatus.READY
+        winner_state.inner_last_completed_call_id = "call-1"
+        winner = _document(winner_state, user_id="tenant:user")
+        winner["_etag"] = "etag-transcript"
+        runtime = SimpleNamespace(
+            recover_inner_state=AsyncMock(),
+            delete_inner_state=AsyncMock(),
+        )
+        history = SimpleNamespace(
+            bind_runtime_state=AsyncMock(side_effect=PreconditionFailed()),
+            get_conversation=AsyncMock(return_value=winner),
+        )
+        coordinator = ConversationCoordinator(
+            ConversationRegistry(),
+            history,
+            SimpleNamespace(),
+            {AgentType.DIRECTIVE_RAG: runtime},
+        )
+
+        restored, _ = await coordinator._restore_runtime(
+            document,
+            "conversation-1",
+            "tenant:user",
+            AgentType.DIRECTIVE_RAG,
+        )
+
+        self.assertEqual(restored.inner_last_completed_call_id, "call-1")
+        runtime.recover_inner_state.assert_not_awaited()
+        runtime.delete_inner_state.assert_not_awaited()
+
+    async def test_lost_final_cas_response_preserves_committed_replacement(
+        self,
+    ) -> None:
+        state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session",
+        )
+        state.inner_model_conversation_id = "conv_uncertain"
+        state.inner_state_status = InnerStateStatus.RECOVERY_REQUIRED
+        document = _document(state, user_id="tenant:user")
+        document["_etag"] = "etag-recovery"
+        document["messages"] = [{"role": "user", "content": "committed"}]
+
+        async def recover(runtime_state, user_id, *, seed_messages):
+            self.assertEqual(user_id, "tenant:user")
+            self.assertEqual(
+                seed_messages,
+                [{"role": "user", "content": "committed"}],
+            )
+            runtime_state.inner_model_conversation_id = "conv_replacement"
+            runtime_state.inner_state_status = InnerStateStatus.READY
+            runtime_state.inner_recovery_started_at = None
+            runtime_state.inner_state_revision += 1
+            return "conv_replacement"
+
+        runtime = SimpleNamespace(
+            recover_inner_state=AsyncMock(side_effect=recover),
+            delete_inner_state=AsyncMock(),
+        )
+
+        class History:
+            def __init__(self):
+                self.calls = 0
+                self.current = document
+
+            async def bind_runtime_state(
+                history_self,
+                conversation_id,
+                user_id,
+                runtime_state,
+                *,
+                expected_etag,
+            ):
+                history_self.calls += 1
+                persisted = _document(runtime_state, user_id=user_id)
+                persisted["messages"] = list(document["messages"])
+                if history_self.calls == 1:
+                    persisted["_etag"] = "etag-claim"
+                    history_self.current = persisted
+                    return persisted
+                persisted["_etag"] = "etag-final"
+                history_self.current = persisted
+                raise RuntimeError("Cosmos response lost")
+
+            async def get_conversation(history_self, conversation_id, user_id):
+                return history_self.current
+
+        history = History()
+        coordinator = ConversationCoordinator(
+            ConversationRegistry(),
+            history,
+            SimpleNamespace(),
+            {AgentType.DIRECTIVE_RAG: runtime},
+        )
+
+        restored, _ = await coordinator._restore_runtime(
+            document,
+            "conversation-1",
+            "tenant:user",
+            AgentType.DIRECTIVE_RAG,
+        )
+
+        self.assertEqual(
+            restored.inner_model_conversation_id,
+            "conv_replacement",
+        )
+        self.assertIs(restored.inner_state_status, InnerStateStatus.READY)
+        runtime.delete_inner_state.assert_not_awaited()
+
     async def test_existing_conversation_agent_is_immutable(self) -> None:
         state = _runtime_state(AgentType.FOUNDRY_PROMPT)
 
@@ -956,6 +1568,30 @@ class RoutingAndPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 409)
         self.assertEqual(raised.exception.detail, "CONVERSATION_BUSY")
 
+    async def test_prepare_failure_releases_existing_conversation_lock(self) -> None:
+        registry = ConversationRegistry()
+        coordinator = SimpleNamespace(
+            prepare=AsyncMock(side_effect=RuntimeError("restore failed"))
+        )
+        service = server.ChatTurnService(
+            coordinator,
+            registry,
+            SimpleNamespace(),
+        )
+
+        for index in range(100):
+            with self.assertRaisesRegex(RuntimeError, "restore failed"):
+                await service.create_response(
+                    message="question",
+                    conversation_id=f"conversation-{index}",
+                    agent_type=AgentType.DIRECTIVE_RAG,
+                    user_id="tenant:user",
+                )
+
+        self.assertEqual(registry._locks, {})
+        lease = await registry.acquire("conversation-retry")
+        await lease.release()
+
 
 class _EtagContainer:
     def __init__(self) -> None:
@@ -1047,6 +1683,87 @@ class ConversationEtagTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(messages[-1]["usage"]["output_tokens"], 4)
         self.assertEqual(messages[-1]["tools"], ["knowledge_base_retrieve"])
         self.assertEqual(messages[-1]["citations"], [citation])
+
+    async def test_directive_append_atomically_finalizes_latest_lifecycle(
+        self,
+    ) -> None:
+        store = ConversationHistoryStore()
+        container = _EtagContainer()
+        persisted = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session",
+        )
+        persisted.inner_model_conversation_id = "conv_inner"
+        persisted.inner_state_status = InnerStateStatus.BOOTSTRAP_REQUIRED
+        persisted.inner_pending_call_id = "call-1"
+        persisted.inner_pending_started_at = datetime.now(timezone.utc).isoformat()
+        persisted.inner_pending_revision = 1
+        persisted.inner_pending_outcome = InnerTurnOutcome.COMPLETED
+        persisted.inner_state_revision = 2
+        container.document = _document(persisted)
+        container.document["_etag"] = "etag-2"
+        store._container = container
+
+        observed = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session",
+        )
+        observed.inner_model_conversation_id = "conv_inner"
+        observed.inner_state_status = InnerStateStatus.BOOTSTRAP_REQUIRED
+        observed.last_response_id = "response-1"
+        await store.append_messages(
+            "conversation-1",
+            "tenant:user",
+            [
+                {"role": "user", "content": "Question"},
+                {"role": "assistant", "content": "Answer"},
+            ],
+            observed,
+        )
+
+        private = container.replace_kwargs["body"]["metadata"]["runtime_state"]
+        self.assertEqual(private["inner_state_status"], "ready")
+        self.assertIsNone(private["inner_pending_call_id"])
+        self.assertEqual(private["inner_last_completed_call_id"], "call-1")
+        self.assertEqual(private["inner_state_revision"], 3)
+        self.assertEqual(private["last_response_id"], "response-1")
+        self.assertIs(observed.inner_state_status, InnerStateStatus.READY)
+        self.assertEqual(observed.inner_last_completed_call_id, "call-1")
+
+    async def test_directive_append_cannot_finalize_recovery_claim(self) -> None:
+        store = ConversationHistoryStore()
+        container = _EtagContainer()
+        persisted = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session",
+        )
+        persisted.inner_model_conversation_id = "conv_inner"
+        persisted.inner_state_status = InnerStateStatus.RECOVERING
+        persisted.inner_pending_call_id = "call-1"
+        persisted.inner_pending_revision = 1
+        persisted.inner_pending_outcome = InnerTurnOutcome.COMPLETED
+        persisted.inner_recovery_started_at = datetime.now(timezone.utc).isoformat()
+        container.document = _document(persisted)
+        container.document["_etag"] = "etag-recovery"
+        store._container = container
+
+        observed = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session",
+        )
+        observed.inner_model_conversation_id = "conv_inner"
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "completion is not durable",
+        ):
+            await store.append_messages(
+                "conversation-1",
+                "tenant:user",
+                [{"role": "assistant", "content": "Answer"}],
+                observed,
+            )
+
+        self.assertIsNone(container.replace_kwargs)
 
 
 class _ProfileContainer:
