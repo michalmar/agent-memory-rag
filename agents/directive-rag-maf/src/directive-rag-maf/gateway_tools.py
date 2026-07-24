@@ -2,43 +2,19 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
-import httpx
 from agent_framework import tool
-from azure.ai.agentserver.core import get_request_context
-from azure.identity.aio import DefaultAzureCredential
-
-_credential = DefaultAzureCredential()
+from maf_hosting import invoke_gateway_tool
 
 
 async def _invoke(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    context = get_request_context()
-    if not context.user_id or not context.session_id or not context.call_id:
-        raise RuntimeError("Foundry request context is incomplete")
-    token = await _credential.get_token(os.environ["APP_TOOL_GATEWAY_SCOPE"])
-    url = (
-        f"{os.environ['APP_TOOL_GATEWAY_URL'].rstrip('/')}/internal/"
-        f"agent-tools/{tool_name}"
+    return await invoke_gateway_tool(
+        tool_name,
+        arguments,
+        timeout_env_var="DIRECTIVE_TOOL_HTTP_TIMEOUT_SECONDS",
+        default_timeout=180.0,
     )
-    timeout = float(os.environ.get("DIRECTIVE_TOOL_HTTP_TIMEOUT_SECONDS", "180"))
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            url,
-            headers={"Authorization": f"Bearer {token.token}"},
-            json={
-                "user_id": context.user_id,
-                "session_id": context.session_id,
-                "call_id": context.call_id,
-                "arguments": arguments,
-            },
-        )
-        response.raise_for_status()
-        payload = response.json()
-    if not isinstance(payload, dict):
-        raise RuntimeError("Agent tool gateway returned an invalid response")
-    return payload
 
 
 def _arguments(**values: Any) -> dict[str, Any]:

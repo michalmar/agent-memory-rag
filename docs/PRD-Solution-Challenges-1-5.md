@@ -11,26 +11,29 @@ intentionally excluded.
 
 Deliver a secure customer-support chat application that combines five memory
 layers with grounded enterprise retrieval. Before starting a conversation, the
-user selects one of two agents hosted in the same Microsoft Foundry project:
+user selects one of three agents hosted in the same Microsoft Foundry project:
 
 1. **Foundry Prompt Agent** - a native, versioned Prompt Agent with Foundry IQ as
    its only tool.
-2. **Hosted Agent Framework** - a Microsoft Agent Framework agent deployed as a
-   Foundry Hosted Agent with Foundry IQ and protected application tools.
+2. **Hosted Agent Framework** - a customer-support Microsoft Agent Framework
+   agent deployed as a Foundry Hosted Agent with Foundry IQ and protected
+   application tools.
+3. **Directive Assistant** - a separately versioned Foundry Hosted Microsoft
+   Agent Framework agent with strict backend directive tools.
 
-Both agents use the same AG-UI streaming contract. Agent choice is required for a
-new conversation and immutable afterward.
+All three agents use the same AG-UI streaming contract. Agent choice is required
+for a new conversation and immutable afterward.
 
 ## 2. Governing decisions
 
 | Area | Current decision | Rationale |
 | --- | --- | --- |
-| Foundry topology | One Foundry Basic Setup account and project contains both logical agents, model deployments, and the Foundry IQ connection | Keeps model, connection, identity, agent, and telemetry governance together |
+| Foundry topology | One Foundry Basic Setup account and project contains all three logical agents, model deployments, and the Foundry IQ connection | Keeps model, connection, identity, agent, and telemetry governance together |
 | Model hosting | The same active Foundry account serves agent models, backend chat/embedding calls, and Foundry IQ query planning | Eliminates the legacy duplicate AI account while retaining identity-scoped model access |
-| Agent implementations | Native Prompt Agent plus Foundry-hosted Microsoft Agent Framework | Compares native and code-based agents without moving the trust boundary |
+| Agent implementations | Native Prompt Agent plus separately versioned support and directive Foundry-hosted Microsoft Agent Framework agents | Compares native and code-based agents while isolating capabilities and release cadence |
 | Prompt Agent capability | Foundry IQ `knowledge_base_retrieve` only | Keeps the native agent knowledge-only and prevents application-tool access |
-| Hosted MAF capability | Foundry IQ, stateless order MCP, and session-bound profile/memory tools | Uses Foundry-managed Agent Identity for app-only MCP calls while preserving owner binding for personal data |
-| Retrieval | Foundry IQ only | Removes classic RAG, no-retrieval modes, and runtime retrieval switching |
+| Hosted MAF capability | Support uses Foundry IQ, stateless order MCP, and session-bound profile/memory tools; directive uses eight strict backend directive tools | Uses Foundry-managed Agent Identity for app-only calls while keeping personal and directive data policy in FastAPI |
+| Retrieval | Support knowledge uses Foundry IQ; directive knowledge uses strict backend gateway tools over the directive data plane | Removes classic RAG, no-retrieval modes, and runtime retrieval switching while preserving purpose-built directive policy |
 | Agent selection | Explicit for new chats and immutable per conversation | Prevents silent behavior changes and state corruption |
 | Failover | No automatic cross-agent failover | A conversation remains bound to its original runtime and state |
 | Trust boundary | FastAPI owns authentication, authorization, persistence, tool policy, and public DTOs | Models and Hosted runtime identities never become application-data authorities |
@@ -41,7 +44,7 @@ new conversation and immutable afterward.
 | Session coordination | Bounded in-memory cache and one backend replica | Redis is intentionally absent |
 | Infrastructure | Terraform manages Azure resources; Entra app registration remains manual | Separates subscription governance from directory governance |
 | Observability | One workspace-based Application Insights resource receives backend, Prompt, Hosted MAF, and Foundry telemetry | Provides a single operational view with RBAC-restricted, 30-day retention |
-| Release execution | Foundry IQ and Prompt publication run directly; Hosted MAF remains container-based; no setup Container Apps Jobs remain | Removes unnecessary setup identities, jobs, and images while retaining the supported Hosted deployment |
+| Release execution | Foundry IQ and Prompt publication run directly; both Hosted MAF agents share `maf_hosting` but retain independent, pinned container images deployed through azd | Removes duplicate hosting code while preserving isolated rollback and the supported Hosted deployment |
 
 ## 3. Scope
 
@@ -52,7 +55,8 @@ new conversation and immutable afterward.
 - Challenge 03: semantic conversation memory in Cosmos DB with vector search.
 - Challenge 04: durable user profile memory.
 - Challenge 05: grounded retrieval through Foundry IQ.
-- User-selectable native Prompt and Hosted MAF agents.
+- User-selectable native Prompt, support Hosted MAF, and directive Hosted MAF
+  agents.
 - AG-UI streaming, Markdown/citation rendering, and constrained A2UI tool cards.
 - Entra user authentication and application-only Hosted Agent authorization.
 - Terraform-managed Azure infrastructure and RBAC.
@@ -63,7 +67,7 @@ new conversation and immutable afterward.
 - Classic application-side RAG or a no-retrieval production mode.
 - Changing agents inside an existing conversation.
 - Automatic failover between agents.
-- Direct application-data roles for the Hosted Agent identity.
+- Direct application-data roles for Hosted Agent identities.
 - Redis or multi-replica backend coordination.
 - Foundry preview memory as a replacement for application-owned memory.
 - Terraform management of the Entra app registration.
@@ -76,7 +80,8 @@ flowchart LR
     U[Browser] -->|Entra delegated token| F[Frontend Container App]
     F -->|Private ACA ingress| B[FastAPI Backend]
     B -->|Application UAMI / public Foundry endpoint| P[Native Prompt Agent]
-    B -->|Application UAMI / public Foundry endpoint| H[Hosted MAF Agent]
+    B -->|Application UAMI / public Foundry endpoint| H[Support Hosted MAF Agent]
+    B -->|Application UAMI / public Foundry endpoint| D[Directive Hosted MAF Agent]
     P -->|Project MI / MCP| IQ[Foundry IQ Knowledge Base]
     H -->|Project connection / MCP| IQ
     IQ -->|Search identity| S[Public Entra-only AI Search]
@@ -84,20 +89,23 @@ flowchart LR
     H -->|Agent Identity / Remote MCP| F
     F -->|Authenticated MCP proxy| MT[Stateless MCP Tools]
     H -->|Session-bound app token| F
+    D -->|Agent Identity / directive gateway| F
     F -->|Restricted reverse proxy| G[Personal Tool Gateway]
     MT --> B
     G -->|Application UAMI| C[(Cosmos History, Profile, and Semantic Memory)]
     B -->|Application UAMI| C
+    B -->|Application UAMI| R[(Directive Catalog, Artifacts, and Search)]
     B -->|Application UAMI / public endpoint| M
     P --> O[Project Application Insights]
     H --> O
+    D --> O
     B -->|Application UAMI / AMPLS| O
 ```
 
 The FastAPI backend is the policy-enforcement point. It authenticates users,
 derives tenant-scoped ownership, creates remote state, persists routing, invokes
-both agents, normalizes remote events, emits AG-UI, and mediates all application
-tools.
+all three agents, normalizes remote events, emits AG-UI, and mediates all
+application tools.
 
 The frontend is public. The backend uses internal Container Apps ingress and is
 reachable from the frontend environment, not directly from the internet.
@@ -126,6 +134,11 @@ Logical name: `customer-support-maf-hosted`
 - Runs inside Foundry with Hosted Responses protocol `2.0.0`.
 - Uses `agent-framework-foundry==1.10.1` and
   `agent-framework-foundry-hosting==1.0.0a260709`.
+- Pins Agent Framework Core `1.11.0`, Agent Framework OpenAI `1.10.1`, and
+  OpenAI `2.46.0` because later stateless client behavior requests encrypted
+  reasoning content that the support model does not accept.
+- Uses `maf_hosting` for shared Hosted identity, observability middleware,
+  authenticated gateway transport, and runtime startup.
 - Uses the shared Foundry IQ MCP connection and the
   `customer-support-tools-mcp` `RemoteTool` connection.
 - Exposes stateless `get_order_status` through MCP with
@@ -140,12 +153,35 @@ Logical name: `customer-support-maf-hosted`
 - Sets `store=False`; durable application routing and transcripts remain owned by
   the backend.
 
-### 5.3 Shared contracts
+### 5.3 Directive Hosted Microsoft Agent Framework agent
+
+Logical name: `directive-rag-maf-hosted`
+
+- Runs as a separately versioned Foundry Hosted Agent using the GPT-5.6 Sol
+  deployment and Hosted Responses protocol `2.0.0`.
+- Uses `agent-framework-foundry==1.10.1`,
+  `agent-framework-foundry-hosting==1.0.0b260722`, and the shared `maf_hosting`
+  foundation.
+- Exposes exactly eight RequestContext-backed gateway tools for directive
+  identity resolution, discovery, manifests, full content, focused search,
+  accepted relationships, precomputed summaries, and user mandate labels.
+- Reads trusted `user_id`, `session_id`, and `call_id` from Foundry request
+  context and never accepts ownership fields from model arguments.
+- Has no customer-support IQ connection, order, profile, memory, or direct
+  Search, Cosmos DB, Blob Storage, or Document Intelligence role.
+- Defaults to 12 model/tool iterations, rejects values outside `1..30`, and
+  keeps its 180-second Hosted gateway timeout above the backend's 120-second
+  directive data-tool timeout.
+- Sets `store=False`; the backend continues to own conversation routing and
+  durable transcripts.
+
+### 5.4 Shared contracts
 
 `agent_contracts/` is the single source for:
 
 - `AgentType`;
-- separate Prompt Agent and Hosted MAF prompts and SHA-256 versions;
+- separate Prompt, support Hosted MAF, and directive Hosted MAF prompts and
+  SHA-256 versions;
 - strict application-tool definitions and Pydantic argument models;
 - result and citation envelopes;
 - runtime descriptors and private runtime state;
@@ -154,14 +190,26 @@ Logical name: `customer-support-maf-hosted`
 The browser and model-visible schemas never contain user, tenant, principal, or
 session ownership fields.
 
-## 6. Foundry IQ retrieval
+`maf_hosting/` is the shared source for Hosted identity setup, Agent 365
+middleware, authenticated gateway transport, and `ResponsesHostServer` startup.
+Agent prompts, tools, dependency compatibility pins, iteration ceilings, and
+timeouts remain explicitly agent-specific.
 
-- Foundry IQ is the only production retrieval architecture.
+## 6. Grounded retrieval
+
+- Customer-support retrieval uses Foundry IQ as its only production retrieval
+  architecture.
 - Azure AI Search hosts the knowledge base and its knowledge sources.
 - The current knowledge base combines order and return-policy sources.
-- Both agents call `knowledge_base_retrieve` through the project connection.
+- The Prompt and support Hosted agents call `knowledge_base_retrieve` through
+  the project connection.
+- The directive Hosted agent uses only its strict application gateway tools and
+  does not access the customer-support Foundry IQ connection. Those tools enforce
+  version resolution and evidence boundaries over the directive catalog,
+  artifacts, and Search indexes.
 - The connection uses `ProjectManagedIdentity` and the Search audience.
-- Grounded claims include citations returned by Foundry IQ.
+- Grounded claims include citations returned by Foundry IQ or the strict
+  directive tools.
 - Missing or failed retrieval is surfaced; the system never silently falls back to
   another retrieval path.
 - The Prompt Agent's lack of application tools is a capability boundary, not a
@@ -184,10 +232,10 @@ session ownership fields.
 
 | Principal | Required access |
 | --- | --- |
-| Backend application UAMI | ACR pull, active Foundry invocation, trusted user impersonation, remote conversation create/delete, chat/embedding model use, Cosmos data, Search read, and telemetry publish |
+| Backend application UAMI | ACR pull, active Foundry invocation, trusted user impersonation, remote conversation create/delete, chat/embedding model use, Cosmos data, Search read, directive artifact Blob read, and telemetry publish |
 | Frontend UAMI | ACR pull |
 | Foundry project managed identity | Foundry user, Search index read, ACR pull, Log Analytics read, and Foundry IQ connection authentication |
-| Hosted Agent service principal | Backend `AgentTools.Invoke` plus `Agent365.Observability.OtelWrite`; no direct application-data role |
+| Hosted Agent service principals | Backend `AgentTools.Invoke` plus `Agent365.Observability.OtelWrite`; no direct application-data role |
 | Search system identity | Active Foundry model access required by the knowledge base |
 | Deployment principal | Foundry project management, active model invocation, and Search service/index contribution used by direct IQ and Prompt releases |
 
@@ -225,7 +273,7 @@ create/delete operations to those actions.
   application-created binding and are not made available through app-only MCP.
 - The public frontend route has a bounded request body and rate limiting, then
   proxies to the internal backend.
-- The Hosted identity receives no Cosmos DB, Search, or other
+- Hosted identities receive no Cosmos DB, Search, or other
   application-data role.
 
 ## 8. Networking
@@ -234,10 +282,11 @@ create/delete operations to those actions.
 | --- | --- | --- | --- |
 | Frontend Container App | Public | Entra for user APIs; app-only Entra for Hosted MCP/gateway routes | Public application and MCP entry point |
 | Backend Container App | Internal ACA ingress | Validated frontend/user request or Hosted app-only token | Never directly internet-addressable |
-| Foundry agent account/project and models | Public endpoint only | Entra/RBAC only; local auth disabled | Hosts both agents and all application/knowledge-base model deployments |
-| Azure AI Search / Foundry IQ | Public endpoint only | Entra/RBAC only; local auth disabled | Avoids private DNS that the non-injected Hosted runtime cannot resolve |
+| Foundry agent account/project and models | Public endpoint only | Entra/RBAC only; local auth disabled | Hosts all three agents and all application/knowledge-base model deployments |
+| Azure AI Search / Foundry IQ | Public endpoint only | Entra/RBAC only; local auth disabled | Serves support Foundry IQ and the directive index without private DNS that the non-injected Hosted runtime cannot resolve |
 | Azure Container Registry | Public endpoint plus private endpoint | Entra/RBAC only; admin and anonymous pull disabled | Hosted runtime pulls publicly; ACA resolves and pulls privately |
-| Cosmos DB | Private endpoint only | Application UAMI; local auth disabled | Protects history, profile, and semantic-memory data |
+| Cosmos DB | Private endpoint only | Application UAMI; local auth disabled | Protects history, profile, semantic-memory, directive catalog, and mandate data |
+| Directive artifact Storage | Private endpoint only | Application UAMI; shared keys and public Blob access disabled | Protects canonical directive content and generated artifacts |
 | Application Insights / Log Analytics | Public platform path plus private AMPLS path for ACA | Backend uses UAMI; Foundry project uses its App Insights connection | Unifies Prompt, Hosted, backend, and platform telemetry |
 
 Foundry uses Basic Setup without outbound VNet injection. Standard Setup with BYO
@@ -256,7 +305,7 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 ### F1 - Session memory
 
 - Foundry conversations are authoritative remote runtime state.
-- Hosted MAF additionally has a Foundry Hosted session.
+- Each Hosted MAF agent additionally has a Foundry Hosted session.
 - The backend keeps bounded in-memory runtime mappings and per-conversation locks.
 - Durable Cosmos metadata restores remote mappings after restart.
 - The backend remains pinned to one replica while Redis is absent.
@@ -284,28 +333,33 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 - Upserts use optimistic concurrency and preserve the original creation time.
 - Semantic-memory outages are reported as an optional degraded readiness
   dependency and do not remove the backend from ingress.
-- Hosted MAF calls `check_memory` only when the user explicitly asks to recall a
-  prior conversation.
+- The support Hosted MAF agent calls `check_memory` only when the user explicitly
+  asks to recall a prior conversation.
 - The Prompt Agent has no semantic-memory tool.
 
 ### F4 - User profile memory
 
 - Cosmos DB profiles are partitioned by `/user_id`.
 - Reads and patches execute only under authenticated backend context.
-- Hosted MAF uses `get_user_context` when personalization is relevant.
-- Hosted MAF uses `update_user_profile` only for durable facts explicitly stated
-  by the user.
+- The support Hosted MAF agent uses `get_user_context` when personalization is
+  relevant.
+- The support Hosted MAF agent uses `update_user_profile` only for durable facts
+  explicitly stated by the user.
 - Profile updates validate strict outer schemas and reject unknown fields.
 - The Prompt Agent has no profile tools.
 - Profile data is not dynamically injected into the system prompt.
 
 ### F5 - Knowledge retrieval
 
-- Foundry IQ provides grounded enterprise retrieval for both agents.
+- Foundry IQ provides grounded enterprise retrieval for the Prompt and support
+  Hosted agents.
+- The directive Hosted agent provides separately grounded retrieval through its
+  strict backend data tools.
 - Knowledge sources, indexes, and citations are governed independently from
   application history, profile, and semantic-memory stores.
-- The project managed identity reads Search; neither end-user tokens nor model
-  arguments authorize retrieval.
+- The project managed identity reads the support Search indexes; the backend UAMI
+  reads directive Search, catalog, and artifacts. Neither end-user tokens nor
+  model arguments authorize retrieval.
 
 ## 10. Conversation and API contract
 
@@ -336,7 +390,7 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 
 ### Other endpoints
 
-- `/agents` - available agents and fixed Foundry IQ retrieval capability.
+- `/agents` - available agents and the project-level Foundry IQ capability.
 - `/conversations*` - owner-scoped summaries, details, title updates, and deletion.
 - `/profile*` - owner-scoped profile operations.
 - `/memories*` - owner-scoped semantic-memory operations.
@@ -366,8 +420,8 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
   is the only production identity provider.
 - Start interactive authentication only from the explicit sign-in action. Expired
   sessions return to the sign-in screen instead of triggering API-initiated popups.
-- Show **Foundry Prompt Agent** and **Hosted Agent Framework** before the first
-  turn.
+- Show **Foundry Prompt Agent**, **Hosted Agent Framework**, and the independently
+  gated **Directive Assistant** before the first turn.
 - Lock selection after a conversation ID exists.
 - Changing a locked selection starts a new conversation.
 - Restore only safe agent metadata from history.
@@ -382,9 +436,9 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 
 - The Foundry project has an explicit connection to the project Application
   Insights resource.
-- Prompt Agent platform spans, Hosted MAF OpenTelemetry traces/dependencies, backend
-  telemetry, and Foundry account diagnostics target the same workspace-backed
-  observability boundary.
+- Prompt Agent platform spans, Hosted MAF OpenTelemetry traces/dependencies,
+  backend telemetry, and Foundry account diagnostics target the same
+  workspace-backed observability boundary.
 - The active Foundry account exports `Audit`, `RequestResponse`,
   `AzureOpenAIRequestUsage`, `Trace`, and `AllMetrics` through its diagnostic
   setting.
@@ -398,7 +452,7 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
   retention is 30 days.
 - Additional Agent Framework sensitive-data instrumentation remains disabled to
   avoid duplicate content capture.
-- Agent 365 is an independent export path. The Hosted Agent identity requires
+- Agent 365 is an independent export path. Hosted Agent identities require
   `Agent365.Observability.OtelWrite`; a failure there must not be interpreted as
   an Application Insights outage or an agent execution failure.
 - Agent 365 downstream ingestion requires tenant onboarding and at least one user
@@ -434,13 +488,19 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 - `scripts/release_foundry_assets.sh` runs Search/Foundry IQ setup and native Prompt
   Agent publication directly with the authenticated deployment principal.
 - No setup Container Apps Job or bootstrap identity is required.
-- Hosted MAF remains a container image in ACR and a Foundry Hosted Agent deployment.
+- Both Hosted MAF agents remain independently versioned container images in ACR
+  and Foundry Hosted Agent deployments.
+- `scripts/build_hosted_agent_image.sh` is the authoritative repository-root ACR
+  build path for both images. With `--configure-azd`, it pins the exact prebuilt
+  image in both the azd environment and `azure.yaml` because the beta extension
+  materializes resolved image substitutions into the manifest.
 - Hosted Agent source-code deployment without a container is preview and remains a
   future simplification to reassess after general availability.
 - Prompt definitions are immutable, versioned releases.
-- Hosted images use release-ID tags. The deployment process must supply a unique
-  `agent_release_id` for each release to prevent tag overwrite and preserve image
-  rollback; the helper script does not enforce uniqueness.
+- Hosted images use independent release-ID tags. The deployment process must
+  supply a unique tag for each support and directive release to prevent overwrite
+  and preserve image rollback; the build helper rejects existing ACR tags before
+  starting a build.
 - `scripts/assign_hosted_agent_access.sh` grants the gateway and Agent 365
   application roles, including discovery of the shared project Agent Identity,
   and configures the application MCP connection plus concrete Foundry project
@@ -471,7 +531,8 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 
 ## 15. Acceptance criteria
 
-- One Foundry Basic Setup project contains both logical agents.
+- One Foundry Basic Setup project contains the native Prompt Agent plus the
+  support and directive Hosted Agent definitions.
 - No legacy Foundry account, Foundry/Search private endpoint, stale private DNS
   zone, setup UAMI/job, jump VM, or Bastion remains.
 - No setup Container Apps Job remains.
@@ -479,10 +540,13 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
   `knowledge_base_retrieve`.
 - Hosted MAF runs in Foundry and exposes Foundry IQ, app-only order MCP, and three
   owner-scoped application tools.
+- Directive MAF runs in Foundry and exposes only its eight strict directive
+  gateway tools.
 - The backend has no production Agent Framework hosting dependency.
-- Both agents produce the same normalized AG-UI contract and grounded citations
-  on application and Foundry surfaces. Microsoft 365 Copilot and Teams publishing
-  currently suppress citation and streaming rendering.
+- All three agents produce the same normalized AG-UI contract. Grounded support
+  and directive responses retain their source-specific citations on application
+  and Foundry surfaces. Microsoft 365 Copilot and Teams publishing currently
+  suppress citation and streaming rendering.
 - Backend Foundry invocation uses managed identity against the public Entra-only
   endpoint.
 - Hosted application-tool traffic crosses only the documented public frontend

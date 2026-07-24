@@ -1,6 +1,6 @@
 # Backend — FastAPI + AG-UI SSE
 
-FastAPI trust boundary for the support-chat app. Production invokes two remote
+FastAPI trust boundary for the support-chat app. Production invokes three remote
 Foundry agents; local mode provides matching mock runtimes without Azure.
 
 ## Requirements
@@ -23,7 +23,7 @@ uv pip install --python .venv/bin/python -e ../agent_contracts -e .
 | POST | `/chat` | AG-UI event stream (SSE). Accepts one new message and returns `X-Conversation-ID`. |
 | GET | `/me` | Current authenticated user. |
 | GET | `/prompts/customer-support` | Shared stable agent prompt. |
-| GET | `/agents` | Available agent types and Foundry IQ capability. |
+| GET | `/agents` | Available agent types and project-level Foundry IQ capability. |
 | GET/PUT/DELETE | `/conversations*` | Owner-scoped durable history. |
 | POST | `/internal/agent-tools/{name}` | App-only Hosted Agent tool gateway. |
 | GET | `/health/live` | Process liveness; does not call dependencies. |
@@ -55,8 +55,9 @@ curl -N -X POST http://localhost:8000/chat \
 
 `LLM_MODE=mock|real` selects local mock runtimes or the configured Foundry project.
 Production backend traffic uses the Entra/RBAC-only public Foundry endpoint.
-Production exposes `foundry-prompt` and `agent-framework`. Agent type is required
-for new conversations and immutable afterward.
+Production exposes `foundry-prompt`, `agent-framework`, and the independently
+gated `directive-rag` agent. Agent type is required for new conversations and
+immutable afterward.
 
 ## Notes
 
@@ -70,10 +71,11 @@ for new conversations and immutable afterward.
 - Production uses the Container App user-assigned managed identity for Foundry,
   AI Search, Cosmos DB, and Azure Monitor. Local Cosmos key settings remain
   available only for local development.
-- Foundry IQ is the only production retrieval architecture; there is no retrieval
-  mode request field or fallback.
-- The native Prompt Agent exposes only Foundry IQ knowledge retrieval. The Hosted
-  MAF Agent additionally calls application tools through the app-only public
-  frontend proxy; the backend ingress remains internal.
+- Customer-support retrieval uses Foundry IQ with no request-selectable mode or
+  fallback. Directive retrieval uses only its strict backend gateway tools.
+- The native Prompt Agent exposes only Foundry IQ knowledge retrieval. The
+  support Hosted MAF Agent additionally calls application tools through the
+  app-only public frontend proxy. The directive Hosted MAF Agent has a separate
+  gateway/tool allowlist; backend ingress remains internal.
 - Public history DTOs expose safe agent labels/version metadata but never owner,
   physical routing, Foundry conversation, Hosted session, response, or ETag data.

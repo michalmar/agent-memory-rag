@@ -1,6 +1,6 @@
 # Azure Deployment Plan - Hosted Agent Identity and Telemetry Remediation
 
-> **Status:** Deployed - Citation UX frontend release active
+> **Status:** Deployed and verified - MAF Hosted Agent consolidation active
 
 Generated: 2026-07-15
 
@@ -1668,6 +1668,129 @@ Verified at `2026-07-12T21:25:24+02:00`:
 Production URL:
 
 `https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io`
+
+## 20. MAF Hosted Agent consolidation - 2026-07-24
+
+**Scope:** Deploy the reviewed shared `maf_hosting` package, symmetric Hosted
+Agent layouts, authoritative repo-root ACR build path, prebuilt azd
+configuration, opt-in directive orchestration, and directive runtime
+configuration hardening. Preserve prompts, tool contracts, agent visibility,
+principal allow-lists, and all existing infrastructure.
+
+### 20.1 Execution checklist
+
+- [x] Implement and independently review required consolidation phases 1-5.
+- [x] All validation checks pass.
+  - [x] Shared, agent-specific, and targeted backend contract tests pass.
+  - [x] Both hosted-agent packages select the intended prebuilt images.
+  - [x] Both local azd diagnostics pass.
+  - [x] Terraform format and syntax validation pass.
+  - [x] Terraform full-refresh plan reports no infrastructure changes.
+  - [x] Static RBAC review confirms no role-assignment changes.
+  - [x] Shell syntax, Python compilation, YAML parsing, and diff checks pass.
+- [x] Build both Hosted Agent images with new immutable release IDs.
+- [x] Deploy support and directive Hosted Agents through their azd projects.
+- [x] Verify both deployed agent versions, images, and production tool calls.
+
+### 20.2 Validation proof
+
+Validated for subscription `ME-MngEnvMCAP372348-mimarusa-1`
+(`7bc68c68-f434-49ad-ab3e-b883ec39da86`), tenant
+`a7b1484c-f66a-496a-b1cf-35631a50396c`, resource group
+`rg-agent-memory-rag`, and location `eastus2`.
+
+- `terraform -chdir=infra fmt -check -recursive` and
+  `terraform -chdir=infra validate` pass.
+- The live directive Terraform inputs were reconciled locally to preserve
+  `DIRECTIVE_AGENT_ENABLED=true`, `DIRECTIVE_AGENT_VISIBLE=true`, and principal
+  IDs `5054c2c8-1110-4867-8762-7a44193084dd` and
+  `f3d4b5d4-24c0-4fb8-b1e3-530e5a83c1c1`.
+- The resulting full-refresh Terraform plan reports: `No changes. Your
+  infrastructure matches the configuration.`
+- Saved plan:
+  `/Users/mimarusa/.copilot/session-state/11140c2a-88c1-420c-b0c8-6f2ab4ebc36b/files/deploy-readiness.tfplan`.
+- Shared hosting suite: 13 tests passed.
+- Support Hosted Agent suite: 3 tests passed.
+- Directive Hosted Agent suite: 3 tests passed.
+- Targeted backend contract suite: 74 tests passed.
+- Both azd provisioning previews report nothing to provision; both package
+  checks and local diagnostics pass with the intended prebuilt image settings.
+- Independent full-diff review approved required phases 1-5 with no remaining
+  high-confidence blocking findings.
+
+### 20.3 Deployment and rollback
+
+- Do not reuse support tag `mcp-agent-id-20260720-r6` or directive tag
+  `directive-rag-20260723-r2`; choose new immutable release IDs before build.
+- Build each agent through the authoritative
+  `scripts/build_hosted_agent_image.sh --configure-azd` path, without rebuilding
+  or rolling unrelated backend and frontend images.
+- Deploy each agent only after its image build succeeds.
+- Preserve support version 7/image `r6` and directive version 2/image `r2` as
+  rollback targets until production acceptance passes.
+- Do not apply Terraform for this release; the reviewed plan contains no
+  infrastructure changes.
+
+### 20.4 Deployment results
+
+Verified at `2026-07-24T08:43:58Z`:
+
+- ACR build `ch2m` published
+  `directive-rag-maf-hosted:directive-consolidation-20260724100108`, digest
+  `sha256:5d21e29e6115d2f030a9da4c835f7575d8085db278375699b32756889abe6ba4`.
+- Directive Hosted Agent version 3 is active on that exact image. Its instance
+  principal remains `f3d4b5d4-24c0-4fb8-b1e3-530e5a83c1c1`.
+- The first support build exposed unbounded transitive Agent Framework drift:
+  the rebuilt image selected `agent-framework-openai==1.11.0`, which
+  unconditionally requested encrypted reasoning content that `gpt-4o-mini`
+  rejects. Production acceptance caught the resulting model HTTP 400 before
+  release sign-off.
+- The reviewed support-only hotfix pins the known-good compatible versions:
+  Agent Framework Core `1.11.0`, Agent Framework OpenAI `1.10.1`, and OpenAI
+  `2.46.0`. Dependency resolution, package integrity, the compatibility probe,
+  13 shared tests, and 3 support tests pass.
+- ACR build `ch2v` published
+  `customer-support-maf-hosted:support-consolidation-20260724100108-r2`, digest
+  `sha256:c904b933bd93862960dcc233f87658dbc2615f8a4b41e0c54501bb1d292e08d0`.
+- Support Hosted Agent version 9 is active on that exact image. Its instance
+  principal remains `a15ba753-8d64-45a3-a34c-5fb507ce34a8`.
+- The authoritative build helper now pins the immutable image in both the azd
+  environment and `azure.yaml`. This corrects the beta extension behavior that
+  materializes resolved image substitutions into the manifest and otherwise
+  causes a later deployment to reuse a stale image.
+- Focused reviews approved both the support compatibility hotfix and the
+  deterministic azd manifest pinning change.
+- Final release review found that the umbrella deployment script still sourced
+  Hosted tags from stale Terraform release IDs. Both build entry points now
+  require explicit support/directive tags and reject tags already present in ACR,
+  preserving the retained rollback images and active manifest pins.
+- Production root, liveness, and readiness return HTTP `200`; readiness reports
+  `ready`, no degraded dependencies, and all three configured agents available.
+- Anonymous `/api/me` remains protected with HTTP `401`; authenticated
+  `/api/agents` returns all three configured agents as available.
+- A direct support version 9 invocation and an authenticated application turn
+  both called `get_order_status` and returned `ORD-003` as delivered.
+- An authenticated directive version 3 turn called directive discovery,
+  resolution, manifest, content, and mandate tools and returned a complete
+  cited summary of directive `95315332` version `2.0`.
+- Both application smoke-test conversations, including the failed pre-hotfix
+  support conversation, were deleted and subsequently returned HTTP `404`.
+- Live authorization verification confirms the Foundry project retains
+  `AcrPull`, the backend retains `Agent Memory Foundry Agent Consumer`, and both
+  published agent principals remain in their intended gateway allow-lists.
+- Rollback images `customer-support-maf-hosted:mcp-agent-id-20260720-r6` and
+  `directive-rag-maf-hosted:directive-rag-20260723-r2` remain present.
+- The final full-refresh Terraform plan reports no drift:
+  `/Users/mimarusa/.copilot/session-state/11140c2a-88c1-420c-b0c8-6f2ab4ebc36b/files/post-hosted-consolidation-plan.txt`.
+
+Production URL:
+
+`https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io`
+
+Hosted Agent endpoints:
+
+- `https://agmem5df652aif2.services.ai.azure.com/api/projects/agmem-agents/agents/customer-support-maf-hosted/endpoint/protocols/openai/responses?api-version=v1`
+- `https://agmem5df652aif2.services.ai.azure.com/api/projects/agmem-agents/agents/directive-rag-maf-hosted/endpoint/protocols/openai/responses?api-version=v1`
 
 ## 23. Citation UX frontend release - 2026-07-24
 

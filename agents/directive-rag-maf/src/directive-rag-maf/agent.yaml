@@ -8,6 +8,9 @@ protocols:
 resources:
   cpu: "0.5"
   memory: 1Gi
+# The gateway HTTP timeout defaults to 180 seconds in code. Keep any
+# DIRECTIVE_TOOL_HTTP_TIMEOUT_SECONDS override >= the backend
+# DIRECTIVE_TOOL_TIMEOUT_SECONDS value (120 seconds by default).
 environment_variables:
   - name: DIRECTIVE_MODEL_DEPLOYMENT
     value: ${DIRECTIVE_MODEL_DEPLOYMENT}

@@ -1,7 +1,7 @@
 # Implementation Plan - Selectable Dual Foundry Agents
 
-**Status:** Version 7 application and published-channel acceptance passed;
-Agent 365 Defender-table provisioning pending
+**Status:** Hosted consolidation deployed and verified (support version 9,
+directive version 3); Agent 365 Defender-table provisioning pending
 
 ## 1. Target
 
@@ -209,6 +209,19 @@ strict application tools and owner-scoped application data.
 - [x] Extended the identity setup script to grant `AgentTools.Invoke` and
   `Agent365.Observability.OtelWrite` and configure the MCP connection in azd.
 - [x] Added and validated the Hosted Agent `agent.yaml` runtime contract.
+- [x] Co-located each Hosted Agent's Dockerfile and `agent.yaml`, standardized
+  repository-root ACR Tasks through `scripts/build_hosted_agent_image.sh` as the
+  authoritative image build path, and retained `azure.yaml` for prebuilt-image deploys
+  with automatic azd prebuilt-image configuration plus a correctly rooted
+  server-side fallback required by azd core validation.
+- [x] Added the directive Hosted image to `scripts/deploy_images.sh` behind the
+  explicit `--with-directive` flag; default deployments remain support-only.
+- [x] Required explicit support/directive release tags and added ACR collision
+  preflight checks so release automation cannot overwrite rollback images or
+  repin azd to stale Terraform release IDs.
+- [x] Hardened `DIRECTIVE_MAX_ITERATIONS` parsing and documented that the
+  directive agent's 180-second gateway timeout must remain at least the
+  backend's 120-second data-tool timeout.
 - [x] Made identity setup repair the concrete Foundry project endpoint so azd
   cannot persist a self-referential `${FOUNDRY_PROJECT_ENDPOINT}` value; the
   existing-project endpoint is explicit in the nested deployment manifest.
@@ -265,6 +278,22 @@ strict application tools and owner-scoped application data.
 - [x] Preserved the shared `demo-swe` project and its four unrelated agents.
   `customer-support-maf-hosted` remains enabled on active version 7, and a
   post-cleanup `ORD-003` request returned the authoritative delivered result.
+- [x] Extracted shared Hosted identity, observability middleware, gateway
+  transport, and runtime startup into the pip-installable `maf_hosting` package.
+- [x] Deployed directive release
+  `directive-consolidation-20260724100108` as active version 3 and confirmed a
+  complete cited summary of directive `95315332` version `2.0`.
+- [x] Caught support model incompatibility from unbounded transitive Agent
+  Framework drift during production acceptance, pinned the known-good
+  support-only client versions, and independently reviewed the correction.
+- [x] Deployed support release
+  `support-consolidation-20260724100108-r2` as active version 9 and confirmed
+  direct plus application-routed `ORD-003` retrieval.
+- [x] Hardened the authoritative build helper to pin exact images in both azd
+  environment state and `azure.yaml`, preventing the beta extension from reusing
+  a materialized stale image.
+- [x] Confirmed production readiness, live authorization, smoke-conversation
+  cleanup, rollback tags, and a final full-refresh Terraform no-drift plan.
 - [ ] Verify either published-channel trace in Defender `CloudAppEvents`. Graph
   advanced hunting currently reports that the table does not exist, so tenant
   Defender/Agent 365 backend provisioning remains incomplete.

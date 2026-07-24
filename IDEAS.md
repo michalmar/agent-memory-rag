@@ -2,14 +2,6 @@
 
 Use this file to collect workshop and project ideas. Active ideas stay here; implemented ideas are moved to the Archive section. New ideas are added first.
 
-## Consolidate the MAF Hosted agents
-
-Remove accidental divergence between the two Foundry Hosted MAF agents (`customer-support-maf` and the new `directive-rag-maf` Directive Assistant) while keeping their intentional scope differences. Extract the duplicated identity/observability/middleware bootstrap and the gateway tool-invoke transport into one shared `maf_hosting` package, symmetrize the two agents' folder layout, reconcile the `azure.yaml`/azd build path with the script-based build, add the directive agent to `deploy_images.sh`, and harden the `DIRECTIVE_MAX_ITERATIONS` parse and tool-timeout layering. Consolidation only — no change to prompts, tool schemas, the public citation model, or the backend runtime.
-
-**Implementation plan:** [`TEMP-plan-maf-hosted-agent-consolidation.md`](docs/TEMP-plan-maf-hosted-agent-consolidation.md)
-
-<sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** No</sub>
-
 ## Use Azure Blob Storage as the directive source
 
 Store uploaded directive PDFs in a dedicated `directive-source` container in the existing directive storage account. Add a managed-identity Blob source adapter while keeping generated immutable PDFs, canonical Markdown, sections, manifests, and summaries in the existing `directive-artifacts` container.
@@ -44,9 +36,39 @@ Add leading slash commands to directive agents, such as `/search`, `/compare`, a
 
 # Archive
 
+## Investigate encrypted reasoning in the directive agent
+
+Confirmed encrypted reasoning is required for the directive agent's stateless
+(`store=false`) GPT-5.6 multi-tool flow. The Responses API requires encrypted
+reasoning items to preserve reasoning context across those turns, and the
+directive hosting package must round-trip that opaque payload. It is not
+required by the `gpt-4o-mini` support agent, which rejects the OpenAI adapter
+1.11.0 behavior that adds `reasoning.encrypted_content` to every stateless
+request.
+
+The support image therefore keeps its known-good Core 1.11.0, Foundry 1.10.1,
+Foundry Hosting `1.0.0a260709`, OpenAI adapter 1.10.1, and OpenAI SDK 2.46.0
+stack behind dependency and request-shape guard tests. The directive agent
+retains Foundry Hosting `1.0.0b260722` and its encrypted-reasoning round-trip
+guard. Upgrade support only after the adapter makes encrypted reasoning
+capability-aware or explicitly configurable and both model-specific guards
+pass.
+
+See [Encrypted reasoning items in the Azure OpenAI Responses API](https://learn.microsoft.com/azure/foundry/openai/how-to/responses#encrypted-reasoning-items).
+
+<sub>**Date:** 2026-07-24 · **Author:** Unknown · **Implemented:** Yes · **Implemented date:** 2026-07-24</sub>
+
+## Consolidate the MAF Hosted agents
+
+Removed accidental divergence between the two Foundry Hosted MAF agents while preserving their separate prompts, tools, citation models, and runtime contracts. Both agents now use the shared `maf_hosting` package, have symmetric co-located layouts, build only through the repo-root ACR script, support opt-in directive orchestration, and use hardened directive iteration and timeout configuration.
+
+**Implementation plan:** [`TEMP-plan-maf-hosted-agent-consolidation.md`](docs/TEMP-plan-maf-hosted-agent-consolidation.md)
+
+<sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** Yes · **Implemented date:** 2026-07-24</sub>
+
 ## Investigate the directive agent's local Docker dependency
 
-Confirmed local Docker is not required anywhere. All container images build server-side via ACR Tasks (`az acr build` in `scripts/deploy_images.sh`, `build_hosted_agent_image.sh`, `deploy_directive_ingestion.sh`) and azd remote build (`docker.remoteBuild: true` in both agent `azure.yaml` files). Local dev runs native processes (`uv`/`uvicorn`, `npm run dev`), and there is no CI that builds images. A repo-wide sweep for local `docker build/run/compose/push` found none.
+Confirmed local Docker is not required anywhere. All container images build server-side via ACR Tasks (`az acr build` in `scripts/deploy_images.sh`, `build_hosted_agent_image.sh`, and `deploy_directive_ingestion.sh`); Hosted Agent `azure.yaml` files deploy those prebuilt images without a separate azd build. Local dev runs native processes (`uv`/`uvicorn`, `npm run dev`), and there is no CI that builds images.
 
 <sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** Yes · **Implemented date:** 2026-07-23</sub>
 

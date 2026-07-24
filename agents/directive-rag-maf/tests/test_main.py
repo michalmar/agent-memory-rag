@@ -9,9 +9,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
 SOURCE_DIR = (
     Path(__file__).resolve().parents[1] / "src" / "directive-rag-maf"
 )
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SOURCE_DIR))
 
 spec = importlib.util.spec_from_file_location(
@@ -65,6 +67,7 @@ class DirectiveHostedAgentTests(unittest.TestCase):
         self.assertNotIn("knowledge_base_retrieve", captured["tools"])
         self.assertNotIn("get_order_status", captured["tools"])
         self.assertIn("own retrieval planning", captured["instructions"])
+        self.assertEqual(captured["default_options"], {"store": False})
 
     def test_iteration_ceiling_is_independent_and_bounded(self) -> None:
         with patch.dict(
@@ -73,91 +76,35 @@ class DirectiveHostedAgentTests(unittest.TestCase):
             clear=True,
         ):
             self.assertEqual(hosted_main._max_iterations(), 8)
-        for value in ("0", "31"):
+        for value in ("", "not-a-number", "0", "31"):
             with patch.dict(
                 os.environ,
                 {"DIRECTIVE_MAX_ITERATIONS": value},
                 clear=True,
             ):
-                with self.assertRaises(RuntimeError):
+                with self.assertRaisesRegex(RuntimeError, "range 1..30"):
                     hosted_main._max_iterations()
 
-    def test_observability_identity_uses_deployment_tenant(self) -> None:
-        with patch.dict(
-            os.environ,
-            {"ENTRA_TENANT_ID": "tenant"},
-            clear=True,
+    def test_tool_wrapper_preserves_directive_timeout_configuration(self) -> None:
+        invoke_gateway_tool = AsyncMock(
+            return_value={"status": "ok", "data": {}}
+        )
+
+        with patch.object(
+            gateway_tools,
+            "invoke_gateway_tool",
+            new=invoke_gateway_tool,
         ):
-            self.assertEqual(
-                hosted_main._configure_observability_identity(),
-                ("tenant", None),
-            )
-            self.assertEqual(
-                os.environ["FOUNDRY_AGENT_TENANT_ID"],
-                "tenant",
+            result = asyncio.run(
+                gateway_tools.get_user_directive_mandates(["10000001"])
             )
 
-    def test_tool_wrapper_injects_request_context_not_model_identity(self) -> None:
-        response = SimpleNamespace(
-            raise_for_status=lambda: None,
-            json=lambda: {"status": "ok", "data": {}},
-        )
-        client = AsyncMock()
-        client.__aenter__.return_value = client
-        client.__aexit__.return_value = None
-        client.post.return_value = response
-        token = SimpleNamespace(token="token")
-
-        async def invoke():
-            with (
-                patch.dict(
-                    os.environ,
-                    {
-                        "APP_TOOL_GATEWAY_URL": "https://frontend.example/api",
-                        "APP_TOOL_GATEWAY_SCOPE": "api://app/.default",
-                    },
-                    clear=True,
-                ),
-                patch.object(
-                    gateway_tools,
-                    "get_request_context",
-                    return_value=SimpleNamespace(
-                        user_id="tenant:user",
-                        session_id="session-1",
-                        call_id="call-1",
-                    ),
-                ),
-                patch.object(
-                    gateway_tools._credential,
-                    "get_token",
-                    new=AsyncMock(return_value=token),
-                ),
-                patch.object(
-                    gateway_tools.httpx,
-                    "AsyncClient",
-                    return_value=client,
-                ),
-            ):
-                return await gateway_tools.get_user_directive_mandates(
-                    ["10000001"]
-                )
-
-        result = asyncio.run(invoke())
         self.assertEqual(result["status"], "ok")
-        request = client.post.await_args
-        self.assertEqual(
-            request.args[0],
-            "https://frontend.example/api/internal/agent-tools/"
+        invoke_gateway_tool.assert_awaited_once_with(
             "get_user_directive_mandates",
-        )
-        self.assertEqual(
-            request.kwargs["json"],
-            {
-                "user_id": "tenant:user",
-                "session_id": "session-1",
-                "call_id": "call-1",
-                "arguments": {"directive_ids": ["10000001"]},
-            },
+            {"directive_ids": ["10000001"]},
+            timeout_env_var="DIRECTIVE_TOOL_HTTP_TIMEOUT_SECONDS",
+            default_timeout=180.0,
         )
 
 

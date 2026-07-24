@@ -1,6 +1,8 @@
 **
 !agent_contracts/
 !agent_contracts/**
+!maf_hosting/
+!maf_hosting/**
 !directive_contracts/
 !directive_contracts/**
 !agents/

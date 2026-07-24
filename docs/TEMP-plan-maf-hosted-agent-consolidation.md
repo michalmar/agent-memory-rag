@@ -1,6 +1,6 @@
 # Plan: Consolidate the MAF Hosted agents (customer-support + directive-rag)
 
-**Status:** Ready for implementation
+**Status:** Implemented (required Phases 1-5; optional Phase 6 deferred)
 
 **Date:** 2026-07-23
 
@@ -67,21 +67,21 @@ The problems worth fixing are **not** in the agent logic. They are:
   per-agent principal allow-lists, or `config.py`.
 - Keep server-side ACR builds; no local Docker requirement is introduced.
 
-## Open decisions (confirm before/with Phase 2)
+## Resolved decisions
 
-- **D1 — Layout convention.** Choose one:
-  - **Option A (recommended): co-locate** `Dockerfile` + `agent.yaml` under
-    `agents/<agent>/src/<agent>/` (matches `customer-support-maf` today).
-    Simpler; everything for one agent lives in one folder.
-  - **Option B: separate** a top-level `agents/<agent>.Dockerfile` +
-    `agents/<agent>/deployment/<agent>/agent.yaml` (matches `directive-rag-maf`
-    today). Cleaner manifest/source separation but more folders.
-- **D2 — Authoritative build path.** Is azd (`azure.yaml`,
-  `docker.remoteBuild: true`) a real deploy path, or is
-  `scripts/build_hosted_agent_image.sh` the single source of truth? This
-  determines whether Phase 3 fixes `azure.yaml` or removes its build service.
+- **D1 — Layout convention:** Option A. Each agent co-locates its `Dockerfile`
+  and `agent.yaml` under `agents/<agent>/src/<agent>/`.
+- **D2 — Authoritative build path:** `scripts/build_hosted_agent_image.sh`
+  performs the authoritative image build from the repository-root ACR context.
+  With `--configure-azd`, it pins the exact image in both the azd environment
+  and `azure.yaml`, and sets the current beta extension's required
+  `AZD_AGENT_SKIP_ACR=true` marker. Pinning both surfaces is required because
+  the extension materializes resolved image substitutions into the manifest.
+  Because azd core validates a Docker target before the extension selects that
+  image, both manifests retain a server-side fallback with explicit repo-root
+  `docker.context`.
 
-## Current implementation facts (for the implementer)
+## Pre-implementation facts (for the implementer)
 
 - Both Dockerfiles `COPY` from the **repo root** (`COPY agent_contracts`,
   `COPY agents/<agent>/src/<agent>`), so the working build context is the repo
@@ -242,8 +242,9 @@ directory as build context.
   support one, e.g. `build_hosted_agent_image.sh --agent directive` gated behind
   the directive feature flag / a `--with-directive` argument (default off to avoid
   surprising existing runs).
-- Read `directive_foundry_agent_name` / `directive_agent_release_id` from
-  terraform outputs (already used by `build_hosted_agent_image.sh`).
+- Read `directive_foundry_agent_name` from Terraform, but require explicit
+  support/directive release tags and reject tags already present in ACR so stale
+  Terraform inputs cannot overwrite rollback images.
 - Match whatever publish/rollout step support uses (Container App update vs.
   Foundry publish); if the hosted agents are published via azd/Foundry rather than
   `az containerapp update`, mirror that step, do not invent a Container App update
@@ -315,6 +316,8 @@ touches the support UX and the Foundry-IQ citation path.
   `azure.yaml` build settings until the context behavior is confirmed.
 - **Orchestrator surprise** — default the directive build off in
   `deploy_images.sh`; require an explicit flag.
+- **Rollback tag overwrite** — require explicit Hosted release tags and preflight
+  both repositories before any application or Hosted image build.
 - **Hidden behavior drift during extraction** — port existing tests verbatim into
   `maf_hosting/tests/` first, then delete the duplicated agent copies, so the
   shared code is proven equivalent before removal.

@@ -62,14 +62,19 @@ channel tools.
 - **Agent contracts** (`agent_contracts/`) - separate versioned prompts, strict
   application-tool schemas, runtime state, citation/result envelopes, and
   normalized agent events.
+- **MAF hosting foundation** (`maf_hosting/`) - shared Hosted Agent identity,
+  observability middleware, gateway transport, and runtime startup.
 - **Native Prompt release** (`setup/agents/`) - idempotently publishes an immutable
   Prompt Agent definition containing exactly one Foundry IQ MCP tool.
 - **Hosted MAF agent** (`agents/customer-support-maf/`) - uses
   `FoundryChatClient`, `Agent`, and `ResponsesHostServer` with Hosted Responses
-  protocol `2.0.0`.
+  protocol `2.0.0`; support-only compatibility pins keep stateless
+  `gpt-4o-mini` calls from requesting unsupported encrypted reasoning content.
 - **Directive Hosted MAF agent** (`agents/directive-rag-maf/`) - separately
   packaged GPT-5.6 agent with exactly eight RequestContext-backed gateway tools
-  and no support IQ, order, profile, memory, or direct data-plane access.
+  and no support IQ, order, profile, memory, or direct data-plane access; its
+  stateless multi-tool flow intentionally round-trips encrypted reasoning
+  between model calls.
 - **Frontend** (`frontend/`) - Vite + Lit SPA with a login-first Entra gate,
   immutable agent selection, Markdown/citation streaming, and a constrained A2UI
   subset for internal tool cards.
@@ -267,9 +272,10 @@ curl -H "Authorization: Bearer $TOKEN" \
 2. Provision Azure resources and RBAC with Terraform.
 3. Run `scripts/release_foundry_assets.sh all` to configure Search/Foundry IQ and
    publish the native Prompt Agent directly.
-4. Build backend, frontend, and Hosted MAF images with ACR Tasks; local Docker is
-   not required.
-5. Deploy the Hosted MAF image to the Foundry project.
+4. Build backend, frontend, and selected Hosted MAF images with ACR Tasks; local
+   Docker is not required.
+5. Deploy each selected Hosted MAF image to the Foundry project through its azd
+   project.
 6. Configure the generated Hosted Agent identity, including the application MCP
    and Agent 365 roles plus the MCP connection ID:
 
@@ -285,11 +291,36 @@ curl -H "Authorization: Bearer $TOKEN" \
 7. Deploy backend/frontend images and enable agents only after readiness and live
    acceptance pass.
 
-`scripts/deploy_images.sh` builds the application and Hosted MAF images through ACR
-and updates the Container Apps.
-`scripts/build_hosted_agent_image.sh --agent directive --tag <release>` builds
-the directive image independently; the deployment script's default support-agent
-behavior is unchanged.
+`scripts/build_hosted_agent_image.sh` is the single authoritative build path for
+both Hosted MAF images. It runs ACR Tasks from the repository-root context; the
+two `azure.yaml` files only deploy their referenced prebuilt images and do not
+build them. The current azd Foundry extension still requires
+`AZD_AGENT_SKIP_ACR=true` to select this path in non-interactive deployments.
+The build helper's `--configure-azd` flag persists that marker and the exact
+built image reference in both the azd environment and `azure.yaml`. The beta
+extension materializes resolved image substitutions into the manifest during
+deployment, so pinning both surfaces keeps repeated releases deterministic.
+Azd core also requires a Docker target before the Foundry extension selects
+the prebuilt image, so both manifests retain a server-side fallback with an
+explicit repository-root build context.
+`scripts/deploy_images.sh` builds the application and support Hosted MAF images
+through ACR and updates the Container Apps. Pass `--with-directive` to build the
+directive Hosted image in the same run; omitting the flag preserves the
+support-only default. Hosted release tags are always explicit:
+
+```bash
+./scripts/deploy_images.sh <app-release> \
+  --support-agent-tag <support-release> \
+  --with-directive \
+  --directive-agent-tag <directive-release>
+```
+
+Omit both directive arguments for a support-only run.
+`scripts/build_hosted_agent_image.sh --agent directive --tag <release>
+--configure-azd` remains available for an independent directive build. After
+each Hosted image build, run `azd deploy --no-prompt` from that agent's
+directory; the exact manifest pin creates a new Hosted Agent version and leaves
+prior versions available for rollback.
 `scripts/assign_hosted_agent_access.sh` idempotently assigns `AgentTools.Invoke`
 to both the shared project and published Agent Identities, assigns
 `Agent365.Observability.OtelWrite` only to the published identity, then configures
@@ -314,11 +345,16 @@ Hosted Agent source-code deployment without a container image is currently previ
 The implementation keeps the established container deployment and will reassess the
 source option after general availability.
 
-Hosted images are tagged with `agent_release_id`. Use a new value for every
-release; the deployment helper does not prevent overwriting an existing tag.
+Hosted images use independent immutable release tags. Use a new support and
+directive value for every release; the build helper rejects any tag already
+present in ACR.
 The active Hosted image repository is `customer-support-maf-hosted`;
 `customer-support-maf` is retained only as a rollback artifact. Obsolete
 `kb-setup` and `prompt-agent-release` repositories are not retained.
+
+Exact deployed versions, image digests, rollback targets, and production
+acceptance evidence are recorded in
+[`.azure/deployment-plan.md`](.azure/deployment-plan.md).
 
 ## Repository layout
 
@@ -328,6 +364,7 @@ agents/           Foundry Hosted Microsoft Agent Framework source
 backend/          Packaged FastAPI trust boundary, stores, gateway, and agent adapters
 frontend/         Componentized Vite + Lit SPA and constrained A2UI tool cards
 infra/            Terraform infrastructure, networking, identities, and RBAC
+maf_hosting/      Shared Hosted MAF identity, gateway, and runtime foundation
 setup/            Direct Foundry IQ and Prompt Agent release code
 scripts/          Entra, direct Foundry release, image deployment, and role assignment
 docs/             Current PRD and implementation delivery record
