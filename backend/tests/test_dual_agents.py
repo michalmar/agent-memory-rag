@@ -15,6 +15,7 @@ from agent_contracts import (
     AgentType,
     Citation,
     CitationsEvent,
+    InnerStateStatus,
     RuntimeCompletedEvent,
     RuntimeDescriptor,
     RuntimeState,
@@ -30,7 +31,13 @@ from agent_memory_backend.agent_mcp import (
     AgentMcpTokenVerifier,
     application_tools_mcp,
 )
-from agent_memory_backend.agent_tool_gateway import AgentToolRequest, dispatch_agent_tool
+from agent_memory_backend.agent_tool_gateway import (
+    AgentStateRequest,
+    AgentToolRequest,
+    complete_agent_state_turn,
+    dispatch_agent_tool,
+    resolve_agent_state,
+)
 from agent_memory_backend.agent_tools import ToolExecutor
 from agent_memory_backend.agui_adapter import to_agui_events
 from agent_memory_backend.auth import AgentCaller, AgentTokenValidator, User
@@ -97,6 +104,19 @@ def _document(state: RuntimeState, *, user_id: str = "tenant:user") -> dict:
             "runtime_state": {
                 "foundry_conversation_id": state.foundry_conversation_id,
                 "hosted_session_id": state.hosted_session_id,
+                "inner_model_conversation_id": state.inner_model_conversation_id,
+                "inner_state_status": (
+                    state.inner_state_status.value
+                    if state.inner_state_status
+                    else None
+                ),
+                "inner_pending_call_id": state.inner_pending_call_id,
+                "inner_pending_started_at": state.inner_pending_started_at,
+                "inner_last_completed_call_id": (
+                    state.inner_last_completed_call_id
+                ),
+                "inner_last_failed_call_id": state.inner_last_failed_call_id,
+                "inner_state_revision": state.inner_state_revision,
                 "last_response_id": state.last_response_id,
             },
         },
@@ -104,6 +124,108 @@ def _document(state: RuntimeState, *, user_id: str = "tenant:user") -> dict:
 
 
 class AgentGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_state_resolver_returns_only_bound_directive_state(self) -> None:
+        state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session-1",
+        )
+        state.inner_model_conversation_id = "conv_inner"
+        state.inner_state_status = InnerStateStatus.BOOTSTRAP_REQUIRED
+
+        class History:
+            bind_runtime_state = AsyncMock()
+
+            async def get_by_hosted_session(self, user_id: str, session_id: str):
+                document = _document(state, user_id=user_id)
+                document["_etag"] = "etag-1"
+                return document
+
+        with patch(
+            "agent_memory_backend.agent_tool_gateway.get_settings",
+            return_value=SimpleNamespace(
+                directive_hosted_agent_principal_ids=("directive-principal",)
+            ),
+        ):
+            result = await resolve_agent_state(
+                AgentStateRequest(
+                    user_id="tenant:user",
+                    session_id="hosted-session-1",
+                    call_id="call-1",
+                    outer_foundry_conversation_id="foundry-conversation",
+                ),
+                AgentCaller("directive-principal", "tenant"),
+                History(),
+            )
+
+        self.assertEqual(result["inner_model_conversation_id"], "conv_inner")
+        self.assertTrue(result["bootstrap_required"])
+        self.assertEqual(result["revision"], 1)
+        self.assertNotIn("hosted_session_id", result)
+        History.bind_runtime_state.assert_awaited_once()
+
+    async def test_state_resolver_rejects_cross_conversation_binding(self) -> None:
+        state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session-1",
+        )
+
+        class History:
+            async def get_by_hosted_session(self, user_id: str, session_id: str):
+                return _document(state, user_id=user_id)
+
+        with self.assertRaises(HTTPException) as raised:
+            await resolve_agent_state(
+                AgentStateRequest(
+                    user_id="tenant:user",
+                    session_id="hosted-session-1",
+                    call_id="call-1",
+                    outer_foundry_conversation_id="another-conversation",
+                ),
+                AgentCaller("directive-principal", "tenant"),
+                History(),
+            )
+        self.assertEqual(raised.exception.status_code, 403)
+
+    async def test_bootstrap_completion_is_conditionally_persisted(self) -> None:
+        state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session-1",
+        )
+        state.inner_model_conversation_id = "conv_inner"
+        state.inner_state_status = InnerStateStatus.BOOTSTRAP_REQUIRED
+        state.inner_pending_call_id = "call-1"
+        document = _document(state, user_id="tenant:user")
+        document["_etag"] = "etag-1"
+        history = SimpleNamespace(
+            get_by_hosted_session=AsyncMock(return_value=document),
+            bind_runtime_state=AsyncMock(),
+        )
+
+        with patch(
+            "agent_memory_backend.agent_tool_gateway.get_settings",
+            return_value=SimpleNamespace(
+                directive_hosted_agent_principal_ids=("directive-principal",)
+            ),
+        ):
+            result = await complete_agent_state_turn(
+                AgentStateRequest(
+                    user_id="tenant:user",
+                    session_id="hosted-session-1",
+                    call_id="call-1",
+                    outer_foundry_conversation_id="foundry-conversation",
+                ),
+                AgentCaller("directive-principal", "tenant"),
+                history,
+            )
+
+        self.assertEqual(result, {"status": "ready"})
+        persisted_state = history.bind_runtime_state.await_args.args[2]
+        self.assertIs(persisted_state.inner_state_status, InnerStateStatus.READY)
+        self.assertEqual(
+            history.bind_runtime_state.await_args.kwargs["expected_etag"],
+            "etag-1",
+        )
+
     async def test_gateway_uses_bound_user_and_hosted_session(self) -> None:
         state = _runtime_state(
             AgentType.AGENT_FRAMEWORK, hosted_id="hosted-session-1"
@@ -294,6 +416,107 @@ class AgentTokenPolicyTests(unittest.TestCase):
 
 
 class RemoteRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_directive_state_deletes_inner_before_outer_and_session(self) -> None:
+        order = []
+        conversations = SimpleNamespace(
+            delete=AsyncMock(
+                side_effect=lambda **kwargs: order.append(
+                    ("conversation", kwargs["conversation_id"])
+                )
+            )
+        )
+        agents = SimpleNamespace(
+            delete_session=AsyncMock(
+                side_effect=lambda **kwargs: order.append(
+                    ("session", kwargs["session_id"])
+                )
+            )
+        )
+        runtime = _hosted_runtime(
+            AgentType.DIRECTIVE_RAG,
+            agent_name="directive-agent",
+        )
+        runtime._openai = SimpleNamespace(conversations=conversations)
+        runtime._project = SimpleNamespace(agents=agents)
+        state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            foundry_id="outer-conversation",
+            hosted_id="hosted-session",
+        )
+        state.inner_model_conversation_id = "conv_inner"
+
+        await runtime.delete_state(state, "tenant:user")
+
+        self.assertEqual(
+            order,
+            [
+                ("conversation", "conv_inner"),
+                ("conversation", "outer-conversation"),
+                ("session", "hosted-session"),
+            ],
+        )
+
+    async def test_directive_state_deletion_tolerates_absent_resources(self) -> None:
+        class NotFoundError(Exception):
+            status_code = 404
+
+        conversations = SimpleNamespace(
+            delete=AsyncMock(side_effect=[NotFoundError(), None])
+        )
+        agents = SimpleNamespace(
+            delete_session=AsyncMock(side_effect=NotFoundError())
+        )
+        runtime = _hosted_runtime(
+            AgentType.DIRECTIVE_RAG,
+            agent_name="directive-agent",
+        )
+        runtime._openai = SimpleNamespace(conversations=conversations)
+        runtime._project = SimpleNamespace(agents=agents)
+        state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            foundry_id="outer-conversation",
+            hosted_id="hosted-session",
+        )
+        state.inner_model_conversation_id = "conv_inner"
+
+        await runtime.delete_state(state, "tenant:user")
+
+        self.assertEqual(conversations.delete.await_count, 2)
+        agents.delete_session.assert_awaited_once()
+
+    async def test_directive_creation_cleans_partial_remote_state(self) -> None:
+        conversations = SimpleNamespace(
+            create=AsyncMock(
+                side_effect=[
+                    SimpleNamespace(id="outer-conversation"),
+                    RuntimeError("inner creation failed"),
+                ]
+            ),
+            delete=AsyncMock(),
+        )
+        agents = SimpleNamespace(
+            create_session=AsyncMock(
+                return_value=SimpleNamespace(agent_session_id="hosted-session")
+            ),
+            delete_session=AsyncMock(),
+        )
+        runtime = _hosted_runtime(
+            AgentType.DIRECTIVE_RAG,
+            agent_name="directive-agent",
+        )
+        runtime._openai = SimpleNamespace(conversations=conversations)
+        runtime._project = SimpleNamespace(agents=agents)
+
+        with self.assertRaisesRegex(RuntimeError, "inner creation failed"):
+            await runtime.create_state("application-1", "tenant:user")
+
+        conversations.delete.assert_awaited_once()
+        self.assertEqual(
+            conversations.delete.await_args.kwargs["conversation_id"],
+            "outer-conversation",
+        )
+        agents.delete_session.assert_awaited_once()
+
     async def test_prompt_mock_does_not_expose_application_tools(self) -> None:
         runtime = MockAgentRuntime(
             AgentType.FOUNDRY_PROMPT, ToolExecutor(None, None)
@@ -504,6 +727,46 @@ class RoutingAndPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         server.conversation_registry.close()
+
+    async def test_legacy_directive_state_allocates_inner_conversation(self) -> None:
+        state = _runtime_state(
+            AgentType.DIRECTIVE_RAG,
+            hosted_id="hosted-session",
+        )
+        document = _document(state, user_id="tenant:user")
+        document["_etag"] = "etag-1"
+        document["messages"] = [{"role": "user", "content": "previous"}]
+
+        async def allocate(runtime_state, user_id, *, bootstrap_required):
+            self.assertEqual(user_id, "tenant:user")
+            self.assertTrue(bootstrap_required)
+            runtime_state.inner_model_conversation_id = "conv_inner"
+            runtime_state.inner_state_status = InnerStateStatus.BOOTSTRAP_REQUIRED
+            return "conv_inner"
+
+        runtime = SimpleNamespace(
+            allocate_inner_state=AsyncMock(side_effect=allocate),
+            delete_inner_state=AsyncMock(),
+        )
+        history = SimpleNamespace(bind_runtime_state=AsyncMock())
+        coordinator = ConversationCoordinator(
+            ConversationRegistry(),
+            history,
+            SimpleNamespace(),
+            {AgentType.DIRECTIVE_RAG: runtime},
+        )
+
+        restored, selected_runtime = await coordinator._restore_runtime(
+            document,
+            "conversation-1",
+            "tenant:user",
+            AgentType.DIRECTIVE_RAG,
+        )
+
+        self.assertIs(selected_runtime, runtime)
+        self.assertEqual(restored.inner_model_conversation_id, "conv_inner")
+        history.bind_runtime_state.assert_awaited_once()
+        runtime.delete_inner_state.assert_not_awaited()
 
     async def test_existing_conversation_agent_is_immutable(self) -> None:
         state = _runtime_state(AgentType.FOUNDRY_PROMPT)

@@ -29,6 +29,8 @@ services:
               value: ${DIRECTIVE_MODEL_DEPLOYMENT}
             - name: DIRECTIVE_MAX_ITERATIONS
               value: ${DIRECTIVE_MAX_ITERATIONS}
+            - name: DIRECTIVE_AGENT_RELEASE_ID
+              value: ${DIRECTIVE_AGENT_RELEASE_ID}
             - name: APP_TOOL_GATEWAY_URL
               value: ${APP_TOOL_GATEWAY_URL}
             - name: APP_TOOL_GATEWAY_SCOPE

@@ -549,7 +549,10 @@ class HostedRuntimeEndpointTests(unittest.IsolatedAsyncioTestCase):
         directive._openai = SimpleNamespace(
             conversations=SimpleNamespace(
                 create=AsyncMock(
-                    return_value=SimpleNamespace(id="directive-conversation")
+                    side_effect=[
+                        SimpleNamespace(id="directive-outer"),
+                        SimpleNamespace(id="conv_directive_inner"),
+                    ]
                 )
             )
         )
@@ -579,6 +582,10 @@ class HostedRuntimeEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(
             support_state.descriptor.prompt_version,
             directive_state.descriptor.prompt_version,
+        )
+        self.assertEqual(
+            directive_state.inner_model_conversation_id,
+            "conv_directive_inner",
         )
 
 
@@ -754,7 +761,7 @@ class DirectiveFeatureBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.initialize.await_count, 2)
         await services.close()
 
-    def test_existing_and_directive_runtime_state_restore_without_schema_change(
+    def test_existing_runtime_state_restores_with_compatible_schema(
         self,
     ) -> None:
         for agent_type in (

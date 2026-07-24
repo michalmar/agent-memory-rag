@@ -134,6 +134,9 @@ case "$AGENT_KIND" in
     ;;
   directive)
     AGENT_NAME="${DIRECTIVE_HOSTED_AGENT_NAME:-$(tf directive_foundry_agent_name)}"
+    DIRECTIVE_RELEASE_ID="$(
+      tf directive_agent_release_id
+    )"
     DOCKERFILE="$REPO_ROOT/agents/directive-rag-maf/src/directive-rag-maf/Dockerfile"
     AZD_PROJECT_DIR="$REPO_ROOT/agents/directive-rag-maf"
     IMAGE_ENV_VAR="DIRECTIVE_HOSTED_AGENT_IMAGE"
@@ -175,6 +178,9 @@ if [[ "$CONFIGURE_AZD" == true ]]; then
     cd "$AZD_PROJECT_DIR"
     azd env set AZD_AGENT_SKIP_ACR true
     azd env set "$IMAGE_ENV_VAR" "$IMAGE_REF"
+    if [[ "$AGENT_KIND" == "directive" ]]; then
+      azd env set DIRECTIVE_AGENT_RELEASE_ID "$DIRECTIVE_RELEASE_ID"
+    fi
   )
   echo "==> Configured azd and its manifest to deploy the prebuilt ${IMAGE_REF}"
 fi

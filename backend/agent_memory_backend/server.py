@@ -19,7 +19,14 @@ from agent_contracts import (
     render_instructions,
 )
 from .agent_mcp import application_tools_mcp_app
-from .agent_tool_gateway import AgentToolRequest, dispatch_agent_tool
+from .agent_tool_gateway import (
+    AgentStateRequest,
+    AgentToolRequest,
+    complete_agent_state_turn,
+    dispatch_agent_tool,
+    fail_agent_state_turn,
+    resolve_agent_state,
+)
 from .auth import AgentCaller, User, get_agent_caller, get_current_user
 from .backend_services import BackendServices, visible_agent_types
 from .chat_service import ChatTurnService
@@ -238,6 +245,30 @@ async def invoke_agent_tool(
         tool_executors,
     )
     return result.to_dict()
+
+
+@app.post("/internal/agent-state/resolve")
+async def resolve_hosted_agent_state(
+    request: AgentStateRequest,
+    caller: AgentCaller = Depends(get_agent_caller),
+):
+    return await resolve_agent_state(request, caller, history_store)
+
+
+@app.post("/internal/agent-state/turn-complete")
+async def complete_hosted_agent_state_turn(
+    request: AgentStateRequest,
+    caller: AgentCaller = Depends(get_agent_caller),
+):
+    return await complete_agent_state_turn(request, caller, history_store)
+
+
+@app.post("/internal/agent-state/turn-failed")
+async def fail_hosted_agent_state_turn(
+    request: AgentStateRequest,
+    caller: AgentCaller = Depends(get_agent_caller),
+):
+    return await fail_agent_state_turn(request, caller, history_store)
 
 
 @app.get("/profile")
