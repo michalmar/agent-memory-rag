@@ -13,6 +13,11 @@ class AgentType(str, Enum):
     DIRECTIVE_RAG = "directive-rag"
 
 
+class InnerStateStatus(str, Enum):
+    READY = "ready"
+    BOOTSTRAP_REQUIRED = "bootstrap_required"
+
+
 class MandatoryStatus(str, Enum):
     MANDATORY = "mandatory"
     NON_MANDATORY = "non_mandatory"
@@ -117,8 +122,10 @@ class RuntimeState:
     descriptor: RuntimeDescriptor
     foundry_conversation_id: str | None = None
     hosted_session_id: str | None = None
+    inner_model_conversation_id: str | None = None
+    inner_state_status: InnerStateStatus | None = None
     last_response_id: str | None = None
-    schema_version: int = 3
+    schema_version: int = 4
 
 @dataclass(frozen=True)
 class TurnContext:

@@ -41,12 +41,12 @@ def build_agent() -> Agent:
         name="directive-rag-maf-hosted",
         instructions=render_directive_rag_instructions(),
         tools=list(DIRECTIVE_TOOLS),
-        default_options={"store": False},
+        default_options={"store": True},
     )
 
 
 def main() -> None:
-    run_hosted_agent(build_agent)
+    run_hosted_agent(build_agent, stateful_continuation=True)
 
 
 if __name__ == "__main__":

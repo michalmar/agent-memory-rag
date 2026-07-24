@@ -15,6 +15,7 @@ from agent_contracts import (
     AgentType,
     Citation,
     CitationsEvent,
+    InnerStateStatus,
     MandatoryStatus,
     NormalizedAgentEvent,
     RuntimeDescriptor,
@@ -296,12 +297,31 @@ class FoundryHostedMafRuntime:
             body={},
             headers=self._headers(authenticated_user_id),
         )
+        outer_conversation = None
         try:
-            conversation = await self._require_openai().conversations.create(
+            outer_conversation = await self._require_openai().conversations.create(
                 items=seed_messages or [],
                 extra_headers=self._headers(authenticated_user_id),
             )
+            inner_conversation = None
+            if self._agent_type is AgentType.DIRECTIVE_RAG:
+                inner_conversation = (
+                    await self._require_openai().conversations.create(
+                        items=[],
+                        extra_headers=self._headers(authenticated_user_id),
+                    )
+                )
         except Exception:
+            if outer_conversation is not None:
+                try:
+                    await self._require_openai().conversations.delete(
+                        conversation_id=outer_conversation.id,
+                        extra_headers=self._headers(authenticated_user_id),
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to clean up an incomplete outer conversation"
+                    )
             try:
                 await self._project.agents.delete_session(
                     agent_name=self._physical_agent_name,
@@ -320,8 +340,52 @@ class FoundryHostedMafRuntime:
                 release_id=self._release_id,
                 prompt_version=self._prompt_version,
             ),
-            foundry_conversation_id=conversation.id,
+            foundry_conversation_id=outer_conversation.id,
             hosted_session_id=hosted_session.agent_session_id,
+            inner_model_conversation_id=(
+                inner_conversation.id if inner_conversation is not None else None
+            ),
+            inner_state_status=(
+                InnerStateStatus.BOOTSTRAP_REQUIRED
+                if inner_conversation is not None and seed_messages
+                else InnerStateStatus.READY
+                if inner_conversation is not None
+                else None
+            ),
+        )
+
+    async def allocate_inner_state(
+        self,
+        state: RuntimeState,
+        authenticated_user_id: str,
+        *,
+        bootstrap_required: bool,
+    ) -> str:
+        if self._agent_type is not AgentType.DIRECTIVE_RAG:
+            raise RuntimeError("Inner model state is directive-only")
+        if state.inner_model_conversation_id:
+            return state.inner_model_conversation_id
+        conversation = await self._require_openai().conversations.create(
+            items=[],
+            extra_headers=self._headers(authenticated_user_id),
+        )
+        state.inner_model_conversation_id = conversation.id
+        state.inner_state_status = (
+            InnerStateStatus.BOOTSTRAP_REQUIRED
+            if bootstrap_required
+            else InnerStateStatus.READY
+        )
+        state.schema_version = 4
+        return conversation.id
+
+    async def delete_inner_state(
+        self,
+        inner_conversation_id: str,
+        authenticated_user_id: str,
+    ) -> None:
+        await self._require_openai().conversations.delete(
+            conversation_id=inner_conversation_id,
+            extra_headers=self._headers(authenticated_user_id),
         )
 
     async def stream_turn(
@@ -484,6 +548,11 @@ class FoundryHostedMafRuntime:
         self, state: RuntimeState, authenticated_user_id: str
     ) -> None:
         headers = self._headers(authenticated_user_id)
+        if state.inner_model_conversation_id:
+            await self._require_openai().conversations.delete(
+                conversation_id=state.inner_model_conversation_id,
+                extra_headers=headers,
+            )
         if state.foundry_conversation_id:
             await self._require_openai().conversations.delete(
                 conversation_id=state.foundry_conversation_id,

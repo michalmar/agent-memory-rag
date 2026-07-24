@@ -10,11 +10,20 @@ from .identity import (
 )
 
 
-def run_hosted_agent(build_agent: Callable[[], object]) -> None:
+def run_hosted_agent(
+    build_agent: Callable[[], object],
+    *,
+    stateful_continuation: bool = False,
+) -> None:
     from agent_framework_foundry_hosting import ResponsesHostServer
 
     tenant_id, agent_id = configure_observability_identity()
-    server = ResponsesHostServer(build_agent())
+    server_type = ResponsesHostServer
+    if stateful_continuation:
+        from .stateful import StatefulResponsesHostServer
+
+        server_type = StatefulResponsesHostServer
+    server = server_type(build_agent())
     if agent_id:
         install_agent365_identity_middleware(
             server,

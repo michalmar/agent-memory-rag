@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -10,6 +11,13 @@ from azure.ai.agentserver.core import get_request_context
 from azure.identity.aio import DefaultAzureCredential
 
 _credential = DefaultAzureCredential()
+
+
+@dataclass(frozen=True)
+class ResolvedAgentState:
+    inner_model_conversation_id: str
+    bootstrap_required: bool
+    release_id: str
 
 
 def _resolve_timeout(
@@ -63,4 +71,74 @@ async def invoke_gateway_tool(
 
     if not isinstance(payload, dict):
         raise RuntimeError("Agent tool gateway returned an invalid response")
+    return payload
+
+
+async def resolve_agent_state(
+    outer_conversation_id: str,
+    *,
+    timeout: float = 30.0,
+) -> ResolvedAgentState:
+    payload = await _invoke_state_endpoint(
+        "resolve",
+        outer_conversation_id,
+        timeout=timeout,
+    )
+    inner_id = payload.get("inner_model_conversation_id")
+    bootstrap_required = payload.get("bootstrap_required")
+    release_id = payload.get("release_id")
+    if (
+        not isinstance(inner_id, str)
+        or not inner_id.startswith("conv_")
+        or not isinstance(bootstrap_required, bool)
+        or not isinstance(release_id, str)
+        or not release_id
+    ):
+        raise RuntimeError("Agent state gateway returned an invalid response")
+    return ResolvedAgentState(inner_id, bootstrap_required, release_id)
+
+
+async def complete_agent_state_bootstrap(
+    outer_conversation_id: str,
+    *,
+    timeout: float = 30.0,
+) -> None:
+    payload = await _invoke_state_endpoint(
+        "bootstrap-complete",
+        outer_conversation_id,
+        timeout=timeout,
+    )
+    if payload.get("status") != "ready":
+        raise RuntimeError("Agent state gateway rejected bootstrap completion")
+
+
+async def _invoke_state_endpoint(
+    action: str,
+    outer_conversation_id: str,
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    context = get_request_context()
+    if not context.user_id or not context.session_id or not context.call_id:
+        raise RuntimeError("Foundry request context is incomplete")
+    token = await _credential.get_token(os.environ["APP_TOOL_GATEWAY_SCOPE"])
+    url = (
+        f"{os.environ['APP_TOOL_GATEWAY_URL'].rstrip('/')}/internal/"
+        f"agent-state/{action}"
+    )
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(
+            url,
+            headers={"Authorization": f"******"},
+            json={
+                "user_id": context.user_id,
+                "session_id": context.session_id,
+                "call_id": context.call_id,
+                "outer_conversation_id": outer_conversation_id,
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("Agent state gateway returned an invalid response")
     return payload

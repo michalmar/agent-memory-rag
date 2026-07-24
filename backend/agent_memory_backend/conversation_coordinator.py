@@ -140,7 +140,19 @@ class ConversationCoordinator:
                 raise HTTPException(
                     status_code=409, detail="CONVERSATION_AGENT_IMMUTABLE"
                 )
-            return state, self.runtime(state.descriptor.agent_type)
+            runtime = self.runtime(state.descriptor.agent_type)
+            if (
+                state.descriptor.agent_type is AgentType.DIRECTIVE_RAG
+                and not state.inner_model_conversation_id
+            ):
+                state = await self._migrate_directive_state(
+                    document,
+                    conversation_id,
+                    user_id,
+                    state,
+                    runtime,
+                )
+            return state, runtime
 
         if requested_type is not AgentType.AGENT_FRAMEWORK:
             raise HTTPException(
@@ -170,6 +182,42 @@ class ConversationCoordinator:
             await self._cleanup_unpersisted_state(runtime, state, user_id)
             raise
         return state, runtime
+
+    async def _migrate_directive_state(
+        self,
+        document: dict,
+        conversation_id: str,
+        user_id: str,
+        state: RuntimeState,
+        runtime: AgentRuntime,
+    ) -> RuntimeState:
+        allocate = getattr(runtime, "allocate_inner_state", None)
+        delete_inner = getattr(runtime, "delete_inner_state", None)
+        if not callable(allocate) or not callable(delete_inner):
+            raise RuntimeError("Directive runtime does not support stateful continuation")
+
+        inner_id = await allocate(
+            state,
+            user_id,
+            bootstrap_required=bool(document.get("messages")),
+        )
+        try:
+            await self._history.bind_runtime_state(
+                conversation_id,
+                user_id,
+                state,
+                expected_etag=document.get("_etag"),
+            )
+        except Exception as exc:
+            await delete_inner(inner_id, user_id)
+            if getattr(exc, "status_code", None) != 412:
+                raise
+            winner = await self._history.get_conversation(conversation_id, user_id)
+            winner_state = runtime_state_from_document(winner or {})
+            if winner_state is None or not winner_state.inner_model_conversation_id:
+                raise RuntimeError("Concurrent directive state migration failed") from exc
+            return winner_state
+        return state
 
     @staticmethod
     async def _cleanup_unpersisted_state(

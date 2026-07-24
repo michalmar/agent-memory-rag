@@ -9,6 +9,7 @@ from typing import Any
 
 from agent_contracts import (
     AgentType,
+    InnerStateStatus,
     MandatoryStatus,
     RuntimeDescriptor,
     RuntimeState,
@@ -42,6 +43,10 @@ def _runtime_metadata(state: RuntimeState) -> dict[str, Any]:
         "runtime_state": {
             "foundry_conversation_id": state.foundry_conversation_id,
             "hosted_session_id": state.hosted_session_id,
+            "inner_model_conversation_id": state.inner_model_conversation_id,
+            "inner_state_status": (
+                state.inner_state_status.value if state.inner_state_status else None
+            ),
             "last_response_id": state.last_response_id,
         },
     }
@@ -53,6 +58,7 @@ def runtime_state_from_document(document: dict[str, Any]) -> RuntimeState | None
     if not agent_type:
         return None
     private = metadata.get("runtime_state") or {}
+    inner_status = private.get("inner_state_status")
     return RuntimeState(
         descriptor=RuntimeDescriptor(
             agent_type=AgentType(agent_type),
@@ -63,6 +69,8 @@ def runtime_state_from_document(document: dict[str, Any]) -> RuntimeState | None
         ),
         foundry_conversation_id=private.get("foundry_conversation_id"),
         hosted_session_id=private.get("hosted_session_id"),
+        inner_model_conversation_id=private.get("inner_model_conversation_id"),
+        inner_state_status=InnerStateStatus(inner_status) if inner_status else None,
         last_response_id=private.get("last_response_id"),
         schema_version=int(metadata.get("schema_version", 3)),
     )

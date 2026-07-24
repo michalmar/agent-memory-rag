@@ -12,6 +12,7 @@ from agent_contracts import (
     AgentType,
     COMMON_TOOL_DEFINITIONS,
     DIRECTIVE_TOOL_DEFINITIONS,
+    InnerStateStatus,
     ToolResultEnvelope,
 )
 from .agent_tools import ToolExecutionError, ToolExecutor
@@ -50,6 +51,80 @@ class AgentToolRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=256)
     call_id: str = Field(min_length=1, max_length=256)
     arguments: dict[str, Any]
+
+
+class AgentStateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str = Field(min_length=1, max_length=256)
+    session_id: str = Field(min_length=1, max_length=256)
+    call_id: str = Field(min_length=1, max_length=256)
+    outer_conversation_id: str = Field(min_length=1, max_length=256)
+
+
+async def resolve_agent_state(
+    request: AgentStateRequest,
+    caller: AgentCaller,
+    history_store: ConversationHistoryStore,
+) -> dict[str, Any]:
+    document, state = await _bound_directive_state(
+        request, caller, history_store
+    )
+    del document
+    if not state.inner_model_conversation_id or state.inner_state_status is None:
+        raise HTTPException(status_code=409, detail="Directive continuation state missing")
+    return {
+        "inner_model_conversation_id": state.inner_model_conversation_id,
+        "bootstrap_required": (
+            state.inner_state_status is InnerStateStatus.BOOTSTRAP_REQUIRED
+        ),
+        "release_id": state.descriptor.release_id,
+    }
+
+
+async def complete_agent_state_bootstrap(
+    request: AgentStateRequest,
+    caller: AgentCaller,
+    history_store: ConversationHistoryStore,
+) -> dict[str, str]:
+    document, state = await _bound_directive_state(
+        request, caller, history_store
+    )
+    if state.inner_state_status is InnerStateStatus.BOOTSTRAP_REQUIRED:
+        state.inner_state_status = InnerStateStatus.READY
+        await history_store.bind_runtime_state(
+            request.outer_conversation_id,
+            request.user_id,
+            state,
+            expected_etag=document.get("_etag"),
+        )
+    return {"status": "ready"}
+
+
+async def _bound_directive_state(
+    request: AgentStateRequest,
+    caller: AgentCaller,
+    history_store: ConversationHistoryStore,
+) -> tuple[dict[str, Any], Any]:
+    document = await history_store.get_by_hosted_session(
+        request.user_id, request.session_id
+    )
+    if document is None or document.get("id") != request.outer_conversation_id:
+        raise HTTPException(status_code=403, detail="Agent session binding not found")
+    state = runtime_state_from_document(document)
+    if (
+        state is None
+        or state.descriptor.agent_type is not AgentType.DIRECTIVE_RAG
+        or state.hosted_session_id != request.session_id
+    ):
+        raise HTTPException(status_code=403, detail="Invalid directive runtime binding")
+    settings = get_settings()
+    if caller.principal_id not in settings.directive_hosted_agent_principal_ids:
+        raise HTTPException(
+            status_code=403,
+            detail="Agent principal is not allowed for this runtime",
+        )
+    return document, state
 
 
 async def dispatch_agent_tool(
