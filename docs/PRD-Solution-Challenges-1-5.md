@@ -29,12 +29,14 @@ for a new conversation and immutable afterward.
 | Area | Current decision | Rationale |
 | --- | --- | --- |
 | Foundry topology | One Foundry Basic Setup account and project contains all three logical agents, model deployments, and the Foundry IQ connection | Keeps model, connection, identity, agent, and telemetry governance together |
-| Model hosting | The same active Foundry account serves agent models, backend chat/embedding calls, and Foundry IQ query planning | Eliminates the legacy duplicate AI account while retaining identity-scoped model access |
+| Model hosting | The same active Foundry account serves agent models, backend chat/embedding calls, support Foundry IQ planning, and Search query vectorization | Eliminates the legacy duplicate AI account while retaining identity-scoped model access |
 | Agent implementations | Native Prompt Agent plus separately versioned support and directive Foundry-hosted Microsoft Agent Framework agents | Compares native and code-based agents while isolating capabilities and release cadence |
 | Prompt Agent capability | Foundry IQ `knowledge_base_retrieve` only | Keeps the native agent knowledge-only and prevents application-tool access |
 | Hosted MAF capability | Support uses Foundry IQ, stateless order MCP, and session-bound profile/memory tools; directive uses eight strict backend directive tools | Uses Foundry-managed Agent Identity for app-only calls while keeping personal and directive data policy in FastAPI |
-| Retrieval | Support knowledge uses Foundry IQ; directive knowledge uses strict backend gateway tools over the directive data plane | Removes classic RAG, no-retrieval modes, and runtime retrieval switching while preserving purpose-built directive policy |
+| Retrieval | Support knowledge uses Foundry IQ; directive knowledge uses strict backend gateway tools with direct hybrid Search queries planned by GPT-5.6 | Removes duplicate directive query planning and runtime retrieval switching while preserving purpose-built directive policy |
+| Directive content authority | Cosmos version bundles own exact-version metadata, manifests, summaries, and private document locators; immutable Cosmos content items own section text | Gives manifest and summary tools one point-read authority and removes duplicate live JSON artifacts |
 | Directive source documents | A document citation opens the exact published version as sanitized canonical Markdown, with the original PDF fetched lazily through the authenticated backend | Makes primary evidence inspectable without exposing private Blob coordinates, enabling public storage, or losing cited-version fidelity |
+| Directive source corpus | Approved operators manage source PDFs in a private Blob container; the manual ingestion job reads the current corpus and source-manager actions never control the job | Removes source documents from container images while keeping ingestion deliberate and source management isolated from published runtime data |
 | Agent selection | Explicit for new chats and immutable per conversation | Prevents silent behavior changes and state corruption |
 | Failover | No automatic cross-agent failover | A conversation remains bound to its original runtime and state |
 | Trust boundary | FastAPI owns authentication, authorization, persistence, tool policy, and public DTOs | Models and Hosted runtime identities never become application-data authorities |
@@ -66,7 +68,7 @@ for a new conversation and immutable afterward.
 
 ### Out of scope
 
-- Classic application-side RAG or a no-retrieval production mode.
+- Model-rewritten directive queries or a no-retrieval production mode.
 - Changing agents inside an existing conversation.
 - Automatic failover between agents.
 - Direct application-data roles for Hosted Agent identities.
@@ -87,7 +89,7 @@ flowchart LR
     P -->|Project MI / MCP| IQ[Foundry IQ Knowledge Base]
     H -->|Project connection / MCP| IQ
     IQ -->|Search identity| S[Public Entra-only AI Search]
-    S -->|Search identity| M[Active Foundry model deployments]
+    S -->|Search identity / vectorization and support planning| M[Active Foundry model deployments]
     H -->|Agent Identity / Remote MCP| F
     F -->|Authenticated MCP proxy| MT[Stateless MCP Tools]
     H -->|Session-bound app token| F
@@ -96,7 +98,9 @@ flowchart LR
     MT --> B
     G -->|Application UAMI| C[(Cosmos History, Profile, and Semantic Memory)]
     B -->|Application UAMI| C
-    B -->|Application UAMI| R[(Directive Catalog, Artifacts, and Search)]
+    B -->|Application UAMI| R[(Cosmos Directive Catalog and Content)]
+    B -->|Application UAMI| A[(Blob Canonical Markdown and Source PDFs)]
+    B -->|Application UAMI / direct hybrid directive queries| S
     B -->|Application UAMI / public endpoint| M
     P --> O[Project Application Insights]
     H --> O
@@ -222,8 +226,13 @@ timeouts remain explicitly agent-specific.
   the project connection.
 - The directive Hosted agent uses only its strict application gateway tools and
   does not access the customer-support Foundry IQ connection. Those tools enforce
-  version resolution and evidence boundaries over the directive catalog,
-  artifacts, and Search indexes.
+  version resolution and evidence boundaries over Cosmos-authoritative version
+  bundles and section content, plus the derived Search index.
+- GPT-5.6 supplies one to eight final directive retrieval queries. The backend
+  executes one bounded lexical/vector/semantic Search request per query in
+  parallel, applies publication and version filters, and fuses results with
+  deterministic cross-query reciprocal-rank fusion. No second generative model
+  rewrites the queries.
 - The connection uses `ProjectManagedIdentity` and the Search audience.
 - Grounded claims include citations returned by Foundry IQ or the strict
   directive tools.
@@ -244,6 +253,9 @@ timeouts remain explicitly agent-specific.
   `access_as_user`.
 - The backend validates signature, issuer, tenant, audience, expiry, and required
   scope.
+- Directive source list, upload, and delete additionally require the
+  user-assignable `DirectiveSource.Manage` application role. The delegated scope
+  alone is insufficient.
 - `user_id` is derived as `tid:oid`, with `sub` only as a subject fallback.
 - Caller-supplied user or tenant identifiers are never accepted as authority.
 - Mock header authentication is local-only and rejected when
@@ -257,7 +269,7 @@ timeouts remain explicitly agent-specific.
 | Frontend UAMI | ACR pull |
 | Foundry project managed identity | Foundry user, Search index read, ACR pull, Log Analytics read, and Foundry IQ connection authentication |
 | Hosted Agent service principals | Backend `AgentTools.Invoke` plus `Agent365.Observability.OtelWrite`; no direct application-data role |
-| Search system identity | Active Foundry model access required by the knowledge base |
+| Search system identity | Active Foundry model access for support IQ planning and Search query vectorization |
 | Deployment principal | Foundry project management, active model invocation, and Search service/index contribution used by direct IQ and Prompt releases |
 
 The backend custom Foundry consumer role is scoped to the project. It includes
@@ -306,8 +318,9 @@ create/delete operations to those actions.
 | Foundry agent account/project and models | Public endpoint only | Entra/RBAC only; local auth disabled | Hosts all three agents and all application/knowledge-base model deployments |
 | Azure AI Search / Foundry IQ | Public endpoint only | Entra/RBAC only; local auth disabled | Serves support Foundry IQ and the directive index without private DNS that the non-injected Hosted runtime cannot resolve |
 | Azure Container Registry | Public endpoint plus private endpoint | Entra/RBAC only; admin and anonymous pull disabled | Hosted runtime pulls publicly; ACA resolves and pulls privately |
-| Cosmos DB | Private endpoint only | Application UAMI; local auth disabled | Protects history, profile, semantic-memory, directive catalog, and mandate data |
-| Directive artifact Storage | Private endpoint only | Application UAMI; shared keys and public Blob access disabled | Protects canonical Markdown, immutable source PDFs, and generated artifacts |
+| Cosmos DB | Private endpoint only | Application UAMI; local auth disabled | Protects history, profile, semantic-memory, directive version bundles, section content, and mandate data |
+| Directive source Storage | Private endpoint only | Ingestion UAMI has container-scoped read; application UAMI has container-scoped list/create/delete; shared keys and public Blob access disabled | Holds the operator-managed PDF corpus without granting access to browsers or Hosted Agent identities |
+| Directive artifact Storage | Private endpoint only | Application UAMI; shared keys and public Blob access disabled | Protects complete canonical Markdown, immutable source PDFs, and ingestion quarantine artifacts |
 | Application Insights / Log Analytics | Public platform path plus private AMPLS path for ACA | Backend uses UAMI; Foundry project uses its App Insights connection | Unifies Prompt, Hosted, backend, and platform telemetry |
 
 Foundry uses Basic Setup without outbound VNet injection. Standard Setup with BYO

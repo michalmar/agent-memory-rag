@@ -22,14 +22,22 @@ _SAFE_ATTRIBUTE_KEYS = frozenset(
         "agent.tool.name",
         "agent.type",
         "agent.version",
+        "audit.actor_id",
+        "audit.byte_size",
+        "audit.filename",
+        "audit.operation",
+        "audit.result",
         "component.name",
         "db.system",
         "dependency.name",
         "error.code",
         "error.type",
         "model.deployment",
-        "search.knowledge_base",
+        "search.intent_count",
+        "search.intent_index",
+        "search.retrieval_mode",
         "session.id",
+        "trace.correlation_id",
     }
 )
 

@@ -67,3 +67,58 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings.cosmos_configured)
         self.assertTrue(settings.search_configured)
         self.assertTrue(settings.entra_configured)
+
+    def test_directive_content_container_is_configurable(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"DIRECTIVE_CONTENT_CONTAINER": "directive-sections"},
+            clear=False,
+        ):
+            get_settings.cache_clear()
+            settings = get_settings()
+
+        self.assertEqual(
+            settings.directive_content_container,
+            "directive-sections",
+        )
+
+    def test_directive_source_configuration_is_bounded(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "DIRECTIVE_BLOB_ENDPOINT": (
+                    "https://example.blob.core.windows.net"
+                ),
+                "DIRECTIVE_SOURCE_CONTAINER": "source-pdfs",
+                "DIRECTIVE_SOURCE_PREFIX": "production",
+                "DIRECTIVE_SOURCE_MAX_UPLOAD_BYTES": "1048576",
+                "DIRECTIVE_SOURCE_MANAGE_ROLE": "Source.Manage",
+            },
+            clear=False,
+        ):
+            get_settings.cache_clear()
+            settings = get_settings()
+
+        self.assertTrue(settings.directive_source_configured)
+        self.assertEqual(settings.directive_source_container, "source-pdfs")
+        self.assertEqual(settings.directive_source_prefix, "production")
+        self.assertEqual(settings.directive_source_max_upload_bytes, 1048576)
+        self.assertEqual(
+            settings.directive_source_manage_role,
+            "Source.Manage",
+        )
+
+    def test_directive_data_configuration_uses_search_index(self) -> None:
+        environment = {
+            "COSMOS_ENDPOINT": "https://example.documents.azure.com",
+            "SEARCH_ENDPOINT": "https://example.search.windows.net",
+            "DIRECTIVE_SEARCH_INDEX": "directive-index",
+            "DIRECTIVE_BLOB_ENDPOINT": "https://example.blob.core.windows.net",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            get_settings.cache_clear()
+            settings = get_settings()
+
+        self.assertTrue(settings.directive_data_configured)
+        self.assertEqual(settings.directive_search_index, "directive-index")
+        self.assertEqual(settings.directive_search_api_version, "2026-04-01")

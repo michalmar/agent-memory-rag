@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from azure.core import MatchConditions
 from azure.cosmos import exceptions
 from azure.cosmos.aio import CosmosClient
 from directive_contracts import (
+    PUBLISHED_BUNDLE_MAX_BYTES,
     DirectiveManifest,
     DirectiveMetadata,
     DirectiveRelation,
-    DirectiveSummary,
+    PublishedDirectiveVersion,
     ReviewFinding,
+    canonical_json_hash,
+    serialized_json_size,
 )
 
 from .source import SourceDocument
@@ -20,6 +25,20 @@ from .source import SourceDocument
 
 def version_item_id(directive_version_id: str) -> str:
     return f"version:{directive_version_id}"
+
+
+@dataclass(frozen=True, order=True)
+class LegacyCatalogArtifact:
+    item_type: str
+    directive_id: str
+    item_id: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "id": self.item_id,
+            "directive_id": self.directive_id,
+            "type": self.item_type,
+        }
 
 
 class DirectiveCatalogRepository:
@@ -61,86 +80,71 @@ class DirectiveCatalogRepository:
         except exceptions.CosmosResourceNotFoundError:
             return None
 
+    async def get_published_version(
+        self, directive_id: str, directive_version_id: str
+    ) -> PublishedDirectiveVersion | None:
+        item = await self.get_version(directive_id, directive_version_id)
+        if item is None:
+            return None
+        return _validate_published_bundle(item)
+
     async def is_unchanged(
         self, source: SourceDocument, processing_hash: str
     ) -> bool:
         item = await self.get_version(
             source.directive_id_hint, source.directive_version_id_hint
         )
-        return bool(
+        if not (
             item
             and item.get("publication_state") == "published"
+            and item.get("artifact_schema_version") == "2.0"
             and item.get("source_hash") == source.source_hash
             and item.get("processing_hash") == processing_hash
-        )
+        ):
+            return False
+        try:
+            _validate_published_bundle(item)
+        except RuntimeError:
+            return False
+        return True
 
     async def stage_version(
         self,
-        metadata: DirectiveMetadata,
-        manifest: DirectiveManifest,
-        summary: DirectiveSummary,
+        bundle: PublishedDirectiveVersion,
         relations: tuple[DirectiveRelation, ...],
         findings: tuple[ReviewFinding, ...],
-        run_id: str,
     ) -> None:
         now = datetime.now(UTC).isoformat()
-        metadata_json = metadata.model_dump(mode="json")
         await self._container.upsert_item(
             {
                 "id": (
-                    f"staging:{metadata.directive_version_id}:"
-                    f"{metadata.source_hash}"
+                    f"staging:{bundle.directive_version_id}:"
+                    f"{bundle.artifact_generation_id}"
                 ),
                 "type": "staging",
-                "directive_id": metadata.directive_id,
-                **metadata_json,
-                "manifest_blob_name": manifest.manifest_blob_name,
-                "summary_blob_name": manifest.summary_blob_name,
+                "directive_id": bundle.directive_id,
+                "directive_version_id": bundle.directive_version_id,
+                "source_hash": bundle.source_hash,
+                "processing_hash": bundle.processing_hash,
+                "artifact_generation_id": bundle.artifact_generation_id,
+                "bundle_hash": canonical_json_hash(bundle),
                 "publication_state": "staged",
-                "run_id": run_id,
+                "run_id": bundle.run_id,
                 "updated_at": now,
             }
         )
         await self._container.upsert_item(
             {
                 "id": (
-                    f"manifest:{metadata.directive_version_id}:"
-                    f"{metadata.source_hash}"
-                ),
-                "type": "manifest",
-                "directive_id": metadata.directive_id,
-                "directive_version_id": metadata.directive_version_id,
-                "source_hash": metadata.source_hash,
-                "manifest": manifest.model_dump(mode="json"),
-                "run_id": run_id,
-                "updated_at": now,
-            }
-        )
-        await self._container.upsert_item(
-            {
-                "id": (
-                    f"summary:{metadata.directive_version_id}:"
-                    f"{metadata.source_hash}"
-                ),
-                "type": "summary",
-                "directive_id": metadata.directive_id,
-                "directive_version_id": metadata.directive_version_id,
-                "source_hash": metadata.source_hash,
-                "summary": summary.model_dump(mode="json"),
-                "run_id": run_id,
-                "updated_at": now,
-            }
-        )
-        await self._container.upsert_item(
-            {
-                "id": (
-                    f"review:{metadata.directive_version_id}:"
-                    f"{metadata.source_hash}"
+                    f"review:{bundle.directive_version_id}:"
+                    f"{bundle.artifact_generation_id}"
                 ),
                 "type": "review",
-                "directive_id": metadata.directive_id,
-                "directive_version_id": metadata.directive_version_id,
-                "source_hash": metadata.source_hash,
+                "directive_id": bundle.directive_id,
+                "directive_version_id": bundle.directive_version_id,
+                "source_hash": bundle.source_hash,
+                "processing_hash": bundle.processing_hash,
+                "artifact_generation_id": bundle.artifact_generation_id,
                 "findings": [
                     finding.model_dump(mode="json") for finding in findings
                 ],
@@ -148,7 +152,7 @@ class DirectiveCatalogRepository:
                     finding.severity in {"warning", "error"}
                     for finding in findings
                 ),
-                "run_id": run_id,
+                "run_id": bundle.run_id,
                 "updated_at": now,
             }
         )
@@ -157,69 +161,63 @@ class DirectiveCatalogRepository:
                 {
                     "id": (
                         f"relation:{relation.relation_id}:"
-                        f"{metadata.source_hash}:"
-                        f"{metadata.processing_hash}"
+                        f"{bundle.source_hash}:"
+                        f"{bundle.processing_hash}"
                     ),
                     "type": "relation",
-                    "directive_id": metadata.directive_id,
+                    "directive_id": bundle.directive_id,
                     **relation.model_dump(mode="json"),
-                    "source_hash": metadata.source_hash,
-                    "processing_hash": metadata.processing_hash,
+                    "source_hash": bundle.source_hash,
+                    "processing_hash": bundle.processing_hash,
+                    "artifact_generation_id": bundle.artifact_generation_id,
                     "publication_state": "staged",
-                    "run_id": run_id,
+                    "run_id": bundle.run_id,
                     "updated_at": now,
                 }
             )
 
     async def publish_version(
         self,
-        metadata: DirectiveMetadata,
-        manifest: DirectiveManifest,
+        bundle: PublishedDirectiveVersion,
         relations: tuple[DirectiveRelation, ...],
-        run_id: str,
     ) -> None:
-        await self._container.upsert_item(
-            {
-                "id": version_item_id(metadata.directive_version_id),
-                "type": "version",
-                "directive_id": metadata.directive_id,
-                **metadata.model_dump(mode="json"),
-                "manifest_blob_name": manifest.manifest_blob_name,
-                "summary_blob_name": manifest.summary_blob_name,
-                "publication_state": "published",
-                "run_id": run_id,
-                "published_at": datetime.now(UTC).isoformat(),
-            }
-        )
+        if serialized_json_size(bundle) > PUBLISHED_BUNDLE_MAX_BYTES:
+            raise RuntimeError(
+                "Published directive bundle exceeds "
+                f"{PUBLISHED_BUNDLE_MAX_BYTES} bytes: "
+                f"{bundle.directive_version_id}"
+            )
         now = datetime.now(UTC).isoformat()
         for relation in relations:
             await self._container.upsert_item(
                 {
                     "id": (
                         f"relation:{relation.relation_id}:"
-                        f"{metadata.source_hash}:"
-                        f"{metadata.processing_hash}"
+                        f"{bundle.source_hash}:"
+                        f"{bundle.processing_hash}"
                     ),
                     "type": "relation",
-                    "directive_id": metadata.directive_id,
+                    "directive_id": bundle.directive_id,
                     **relation.model_dump(mode="json"),
-                    "source_hash": metadata.source_hash,
-                    "processing_hash": metadata.processing_hash,
+                    "source_hash": bundle.source_hash,
+                    "processing_hash": bundle.processing_hash,
+                    "artifact_generation_id": bundle.artifact_generation_id,
                     "publication_state": "published",
-                    "run_id": run_id,
+                    "run_id": bundle.run_id,
                     "published_at": now,
                 }
             )
+        await self._replace_published_bundle(bundle)
 
     async def activate_current(
         self, metadata: DirectiveMetadata, run_id: str
     ) -> bool:
         if not metadata.is_current:
             return False
-        version = await self.get_version(
+        version = await self.get_published_version(
             metadata.directive_id, metadata.directive_version_id
         )
-        if not version or version.get("publication_state") != "published":
+        if version is None:
             raise RuntimeError(
                 "Cannot activate an unpublished directive version: "
                 f"{metadata.directive_version_id}"
@@ -228,23 +226,24 @@ class DirectiveCatalogRepository:
         if (
             existing
             and existing.get("directive_version_id")
-            == metadata.directive_version_id
-            and existing.get("source_hash") == metadata.source_hash
-            and existing.get("processing_hash") == metadata.processing_hash
+            == version.directive_version_id
+            and existing.get("source_hash") == version.source_hash
+            and existing.get("processing_hash") == version.processing_hash
+            and existing.get("artifact_generation_id")
+            == version.artifact_generation_id
         ):
             return False
         await self._container.upsert_item(
             {
                 "id": "current",
                 "type": "current",
-                "directive_id": metadata.directive_id,
-                "directive_version_id": metadata.directive_version_id,
-                "version_label": metadata.version_label,
-                "source_hash": metadata.source_hash,
-                "processing_hash": metadata.processing_hash,
-                "manifest_blob_name": version["manifest_blob_name"],
-                "summary_blob_name": version["summary_blob_name"],
-                "effective_from": metadata.effective_from.isoformat(),
+                "directive_id": version.directive_id,
+                "directive_version_id": version.directive_version_id,
+                "version_label": version.version_label,
+                "source_hash": version.source_hash,
+                "processing_hash": version.processing_hash,
+                "artifact_generation_id": version.artifact_generation_id,
+                "effective_from": version.effective_from.isoformat(),
                 "run_id": run_id,
                 "activated_at": datetime.now(UTC).isoformat(),
             }
@@ -253,32 +252,52 @@ class DirectiveCatalogRepository:
 
     async def validate_published(
         self,
-        metadata: DirectiveMetadata,
-        manifest: DirectiveManifest,
+        expected: PublishedDirectiveVersion,
     ) -> None:
-        version = await self.get_version(
-            metadata.directive_id, metadata.directive_version_id
+        stored = await self.get_published_version(
+            expected.directive_id, expected.directive_version_id
         )
-        if not version or version.get("publication_state") != "published":
+        if stored is None:
             raise RuntimeError(
                 f"Catalog version is not published: "
-                f"{metadata.directive_version_id}"
+                f"{expected.directive_version_id}"
             )
-        stored_manifest = await self._container.read_item(
-            item=(
-                f"manifest:{metadata.directive_version_id}:"
-                f"{metadata.source_hash}"
-            ),
-            partition_key=metadata.directive_id,
-        )
-        if (
-            stored_manifest.get("source_hash") != metadata.source_hash
-            or stored_manifest.get("manifest", {}).get("manifest_blob_name")
-            != manifest.manifest_blob_name
-        ):
+        if canonical_json_hash(stored) != canonical_json_hash(expected):
             raise RuntimeError(
-                f"Catalog manifest mismatch: {metadata.directive_version_id}"
+                f"Catalog bundle mismatch: {expected.directive_version_id}"
             )
+
+    async def _replace_published_bundle(
+        self, bundle: PublishedDirectiveVersion
+    ) -> None:
+        payload = bundle.model_dump(mode="json")
+        existing = await self.get_version(
+            bundle.directive_id, bundle.directive_version_id
+        )
+        try:
+            if existing is None:
+                await self._container.create_item(body=payload)
+                return
+            etag = existing.get("_etag")
+            if not isinstance(etag, str) or not etag:
+                raise RuntimeError(
+                    "Existing catalog version is missing an ETag: "
+                    f"{bundle.directive_version_id}"
+                )
+            await self._container.replace_item(
+                item=bundle.id,
+                body=payload,
+                etag=etag,
+                match_condition=MatchConditions.IfNotModified,
+            )
+        except (
+            exceptions.CosmosResourceExistsError,
+            exceptions.CosmosAccessConditionFailedError,
+        ) as exc:
+            raise RuntimeError(
+                "Concurrent catalog publication prevented replacing "
+                f"{bundle.directive_version_id}"
+            ) from exc
 
     async def list_published_directive_ids(self) -> set[str]:
         values: set[str] = set()
@@ -291,32 +310,72 @@ class DirectiveCatalogRepository:
                 values.add(value)
         return values
 
-    async def list_published_manifests(self) -> list[DirectiveManifest]:
-        manifests: list[DirectiveManifest] = []
+    async def list_published_versions(
+        self,
+    ) -> list[PublishedDirectiveVersion]:
+        versions: list[PublishedDirectiveVersion] = []
         query = (
-            "SELECT c.directive_id, c.directive_version_id, c.source_hash "
+            "SELECT * "
             "FROM c WHERE c.type = 'version' "
             "AND c.publication_state = 'published'"
         )
         async for version in self._container.query_items(query=query):
-            directive_id = version.get("directive_id")
-            version_id = version.get("directive_version_id")
-            source_hash = version.get("source_hash")
-            if not all(
-                isinstance(value, str)
-                for value in (directive_id, version_id, source_hash)
+            versions.append(_validate_published_bundle(version))
+        return versions
+
+    async def list_published_manifests(self) -> list[DirectiveManifest]:
+        return [
+            bundle.manifest
+            for bundle in await self.list_published_versions()
+        ]
+
+    async def list_legacy_artifacts(self) -> list[LegacyCatalogArtifact]:
+        artifacts: list[LegacyCatalogArtifact] = []
+        query = (
+            "SELECT c.id, c.directive_id, c.type FROM c "
+            "WHERE c.type = 'manifest' OR c.type = 'summary'"
+        )
+        async for value in self._container.query_items(query=query):
+            item_id = value.get("id")
+            directive_id = value.get("directive_id")
+            item_type = value.get("type")
+            if not (
+                isinstance(item_id, str)
+                and isinstance(directive_id, str)
+                and directive_id.isdigit()
+                and item_type in {"manifest", "summary"}
+                and item_id.startswith(f"{item_type}:")
             ):
                 raise RuntimeError(
-                    "Published catalog version has invalid manifest keys"
+                    "Legacy catalog artifact has an unsafe identity"
                 )
-            item = await self._container.read_item(
-                item=f"manifest:{version_id}:{source_hash}",
-                partition_key=directive_id,
+            artifacts.append(
+                LegacyCatalogArtifact(
+                    item_type=item_type,
+                    directive_id=directive_id,
+                    item_id=item_id,
+                )
             )
-            manifests.append(
-                DirectiveManifest.model_validate(item.get("manifest"))
+        return sorted(artifacts)
+
+    async def delete_legacy_artifacts(
+        self, artifacts: list[LegacyCatalogArtifact]
+    ) -> None:
+        for artifact in artifacts:
+            if (
+                artifact.item_type not in {"manifest", "summary"}
+                or not artifact.directive_id.isdigit()
+                or not artifact.item_id.startswith(
+                    f"{artifact.item_type}:"
+                )
+            ):
+                raise ValueError(
+                    "Refusing to delete a non-legacy catalog artifact"
+                )
+            await self._container.delete_item(
+                item=artifact.item_id,
+                partition_key=artifact.directive_id,
             )
-        return manifests
 
     async def list_published_version_labels(self) -> set[tuple[str, str]]:
         values: set[tuple[str, str]] = set()
@@ -335,11 +394,11 @@ class DirectiveCatalogRepository:
 
     async def list_current_pointers(
         self,
-    ) -> dict[str, tuple[str, str, str]]:
-        values: dict[str, tuple[str, str, str]] = {}
+    ) -> dict[str, tuple[str, str, str, str]]:
+        values: dict[str, tuple[str, str, str, str]] = {}
         query = (
             "SELECT c.directive_id, c.directive_version_id, c.source_hash, "
-            "c.processing_hash "
+            "c.processing_hash, c.artifact_generation_id "
             "FROM c WHERE c.type = 'current'"
         )
         async for value in self._container.query_items(query=query):
@@ -347,6 +406,7 @@ class DirectiveCatalogRepository:
             version_id = value.get("directive_version_id")
             source_hash = value.get("source_hash")
             processing_hash = value.get("processing_hash")
+            artifact_generation_id = value.get("artifact_generation_id")
             if all(
                 isinstance(item, str)
                 for item in (
@@ -354,12 +414,14 @@ class DirectiveCatalogRepository:
                     version_id,
                     source_hash,
                     processing_hash,
+                    artifact_generation_id,
                 )
             ):
                 values[directive_id] = (
                     version_id,
                     source_hash,
                     processing_hash,
+                    artifact_generation_id,
                 )
         return values
 
@@ -420,3 +482,25 @@ class DirectiveCatalogRepository:
                 "recorded_at": datetime.now(UTC).isoformat(),
             }
         )
+
+
+def _validate_published_bundle(
+    value: dict[str, Any],
+) -> PublishedDirectiveVersion:
+    application_fields = {
+        key: item for key, item in value.items() if not key.startswith("_")
+    }
+    try:
+        bundle = PublishedDirectiveVersion.model_validate(application_fields)
+    except ValueError as exc:
+        raise RuntimeError(
+            "Published directive version has an invalid artifact schema"
+        ) from exc
+    size = serialized_json_size(bundle)
+    if size > PUBLISHED_BUNDLE_MAX_BYTES:
+        raise RuntimeError(
+            f"Published directive bundle exceeds "
+            f"{PUBLISHED_BUNDLE_MAX_BYTES} bytes: "
+            f"{bundle.directive_version_id} ({size} bytes)"
+        )
+    return bundle

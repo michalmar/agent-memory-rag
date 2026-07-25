@@ -158,14 +158,6 @@ output "directive_search_index_name" {
   value = var.directive_search_index_name
 }
 
-output "directive_search_knowledge_source_name" {
-  value = var.directive_search_knowledge_source_name
-}
-
-output "directive_search_knowledge_base_name" {
-  value = var.directive_search_knowledge_base_name
-}
-
 output "foundry_application_tools_connection_name" {
   value = azapi_resource.foundry_application_tools_connection.name
 }
@@ -182,10 +174,6 @@ output "directive_model_deployment" {
   value = azurerm_cognitive_deployment.directive.name
 }
 
-output "directive_knowledge_model_deployment" {
-  value = azurerm_cognitive_deployment.directive_knowledge_planner.name
-}
-
 output "directive_artifacts_storage_account" {
   value = azurerm_storage_account.directive_artifacts.name
 }
@@ -196,6 +184,14 @@ output "directive_artifacts_blob_endpoint" {
 
 output "directive_artifacts_container" {
   value = azapi_resource.directive_artifacts_container.name
+}
+
+output "directive_source_container" {
+  value = azapi_resource.directive_source_container.name
+}
+
+output "directive_source_prefix" {
+  value = local.directive_source_prefix
 }
 
 output "directive_document_intelligence_name" {
@@ -212,6 +208,10 @@ output "directive_cosmos_database" {
 
 output "directive_catalog_container" {
   value = azurerm_cosmosdb_sql_container.directive_catalog.name
+}
+
+output "directive_content_container" {
+  value = azurerm_cosmosdb_sql_container.directive_content.name
 }
 
 output "directive_mandates_container" {

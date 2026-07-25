@@ -14,12 +14,15 @@ from agent_contracts import (
     ToolResultEnvelope,
     directive_tool_definition,
 )
-from directive_contracts import DirectiveManifest, DirectiveSummary
+from directive_contracts import (
+    DirectiveSection,
+    PublishedDirectiveVersion,
+)
 
 from .agent_tools import ToolExecutionError
 from .config import Settings, get_settings
-from .directive_artifacts import DirectiveArtifactRepository
 from .directive_catalog import DirectiveCatalogRepository
+from .directive_content import DirectiveContentRepository
 from .directive_errors import (
     DirectiveContentTooLarge,
     DirectiveDataUnavailable,
@@ -41,12 +44,12 @@ class DirectiveToolExecutor:
     def __init__(
         self,
         catalog: DirectiveCatalogRepository,
-        artifacts: DirectiveArtifactRepository,
+        content: DirectiveContentRepository,
         search: DirectiveSearchRepository,
         mandates: DirectiveMandateRepository,
     ) -> None:
         self._catalog = catalog
-        self._artifacts = artifacts
+        self._contents = content
         self._search = search
         self._mandates = mandates
 
@@ -55,7 +58,7 @@ class DirectiveToolExecutor:
         return all(
             (
                 self._catalog.enabled,
-                self._artifacts.enabled,
+                self._contents.enabled,
                 self._search.enabled,
                 self._mandates.enabled,
             )
@@ -245,8 +248,9 @@ class DirectiveToolExecutor:
         )
 
     async def _manifest(self, arguments: dict[str, Any]) -> _Outcome:
-        record, manifest = await self._record_and_manifest(arguments)
-        version = self._catalog.public_version(record)
+        bundle = await self._published_bundle(arguments)
+        manifest = bundle.manifest
+        version = self._catalog.public_version(bundle)
         return _Outcome(
             data={
                 "directive": version,
@@ -272,8 +276,9 @@ class DirectiveToolExecutor:
         arguments: dict[str, Any],
         settings: Settings,
     ) -> _Outcome:
-        record, manifest = await self._record_and_manifest(arguments)
-        version = self._catalog.public_version(record)
+        bundle = await self._published_bundle(arguments)
+        manifest = bundle.manifest
+        version = self._catalog.public_version(bundle)
         requested_tokens = arguments.get(
             "max_tokens",
             settings.directive_max_content_tokens,
@@ -312,16 +317,17 @@ class DirectiveToolExecutor:
                 "INVALID_CURSOR",
                 "Directive content cursor is outside the selected section set",
             )
-        selected: list[tuple[Any, str]] = []
+        selected_sections: list[DirectiveSection] = []
         token_count = 0
         index = cursor
         while (
             index < len(sections)
-            and len(selected) < settings.directive_max_sections_per_call
+            and len(selected_sections)
+            < settings.directive_max_sections_per_call
         ):
             section = sections[index]
             if token_count + section.token_count > requested_tokens:
-                if not selected:
+                if not selected_sections:
                     raise DirectiveContentTooLarge(
                         {
                             "section_id": section.section_id,
@@ -331,14 +337,14 @@ class DirectiveToolExecutor:
                         }
                     )
                 break
-            selected.append(
-                (
-                    section,
-                    await self._artifacts.read_text(section.blob_name),
-                )
-            )
+            selected_sections.append(section)
             token_count += section.token_count
             index += 1
+
+        contents = await self._contents.read_sections(
+            bundle, selected_sections
+        )
+        selected = list(zip(selected_sections, contents, strict=True))
 
         continuation = None
         if index < len(sections):
@@ -477,15 +483,10 @@ class DirectiveToolExecutor:
         )
 
     async def _summary(self, arguments: dict[str, Any]) -> _Outcome:
-        record, manifest = await self._record_and_manifest(arguments)
-        value = await self._artifacts.read_json(manifest.summary_blob_name)
-        try:
-            summary = DirectiveSummary.model_validate(value)
-        except ValueError as exc:
-            raise DirectiveDataUnavailable(
-                "Directive summary artifact is invalid"
-            ) from exc
-        version = self._catalog.public_version(record)
+        bundle = await self._published_bundle(arguments)
+        manifest = bundle.manifest
+        summary = bundle.summary
+        version = self._catalog.public_version(bundle)
         return _Outcome(
             data={
                 "directive": version,
@@ -539,28 +540,20 @@ class DirectiveToolExecutor:
             ),
         )
 
-    async def _record_and_manifest(
+    async def _published_bundle(
         self,
         arguments: dict[str, Any],
-    ) -> tuple[dict[str, Any], DirectiveManifest]:
-        record = await self._catalog.get_version_record(
+    ) -> PublishedDirectiveVersion:
+        bundle = await self._catalog.get_published_version(
             arguments["directive_id"],
             arguments["directive_version_id"],
         )
-        if record is None:
+        if bundle is None:
             raise ToolExecutionError(
                 "DIRECTIVE_NOT_FOUND",
                 "The requested directive version was not found",
             )
-        manifest = await self._catalog.get_manifest(
-            arguments["directive_id"],
-            arguments["directive_version_id"],
-        )
-        if manifest is None:
-            raise DirectiveDataUnavailable(
-                "Published directive manifest is missing"
-            )
-        return record, manifest
+        return bundle
 
 
 def _bounded_results(

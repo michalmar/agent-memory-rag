@@ -1,0 +1,244 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import unittest
+from datetime import UTC, datetime
+
+from azure.cosmos import exceptions
+from directive_contracts import (
+    DirectiveArtifactLocators,
+    DirectiveManifest,
+    DirectiveSection,
+    DirectiveSectionContent,
+    DirectiveSectionContentDescriptor,
+    DirectiveSummary,
+    PublishedDirectiveVersion,
+    build_section_content_items,
+)
+
+from agent_memory_backend.directive_catalog import DirectiveCatalogRepository
+from agent_memory_backend.directive_content import DirectiveContentRepository
+from agent_memory_backend.directive_errors import DirectiveDataUnavailable
+
+_DIRECTIVE_ID = "12345678"
+_VERSION_ID = "12345678:v1"
+_SOURCE_HASH = "a" * 64
+_PROCESSING_HASH = "b" * 64
+_GENERATION_ID = "c" * 64
+
+
+def _bundle_and_items(
+    contents: list[str],
+    *,
+    max_item_bytes: int = 1_500_000,
+) -> tuple[
+    PublishedDirectiveVersion,
+    tuple[DirectiveSectionContent, ...],
+]:
+    sections: list[DirectiveSection] = []
+    content_items: list[DirectiveSectionContent] = []
+    descriptors: dict[str, DirectiveSectionContentDescriptor] = {}
+    for ordinal, content in enumerate(contents):
+        section_id = f"s{ordinal:04d}"
+        sections.append(
+            DirectiveSection(
+                section_id=section_id,
+                ordinal=ordinal,
+                number=str(ordinal + 1),
+                title=f"Section {ordinal + 1}",
+                path=[f"Section {ordinal + 1}"],
+                page_from=ordinal + 1,
+                page_to=ordinal + 1,
+                token_count=1,
+                content_hash=hashlib.sha256(
+                    content.encode("utf-8")
+                ).hexdigest(),
+                chunk_ids=[f"chunk-{ordinal}"],
+            )
+        )
+        items = build_section_content_items(
+            directive_id=_DIRECTIVE_ID,
+            directive_version_id=_VERSION_ID,
+            artifact_generation_id=_GENERATION_ID,
+            section_id=section_id,
+            section_ordinal=ordinal,
+            content=content,
+            run_id="test-run",
+            created_at=datetime(2026, 7, 25, tzinfo=UTC),
+            max_item_bytes=max_item_bytes,
+        )
+        content_items.extend(items)
+        descriptors[section_id] = DirectiveSectionContentDescriptor(
+            part_count=len(items)
+        )
+    manifest = DirectiveManifest(
+        directive_id=_DIRECTIVE_ID,
+        directive_version_id=_VERSION_ID,
+        source_hash=_SOURCE_HASH,
+        artifact_generation_id=_GENERATION_ID,
+        total_pages=max(1, len(sections)),
+        total_tokens=len(sections),
+        sections=sections,
+    )
+    summary = DirectiveSummary(
+        directive_id=_DIRECTIVE_ID,
+        directive_version_id=_VERSION_ID,
+        source_hash=_SOURCE_HASH,
+        summary="Summary",
+        covered_section_ids=[section.section_id for section in sections],
+        total_section_count=len(sections),
+        input_token_count=len(sections),
+        strategy="full_document",
+        model_deployment="test",
+    )
+    bundle = PublishedDirectiveVersion(
+        id=f"version:{_VERSION_ID}",
+        directive_id=_DIRECTIVE_ID,
+        directive_version_id=_VERSION_ID,
+        version_label="1",
+        title="Test directive",
+        status="published",
+        is_current=True,
+        effective_from="2026-01-01",
+        source_filename="test.pdf",
+        source_hash=_SOURCE_HASH,
+        processing_hash=_PROCESSING_HASH,
+        artifact_generation_id=_GENERATION_ID,
+        manifest=manifest,
+        summary=summary,
+        artifacts=DirectiveArtifactLocators(
+            canonical_blob_name="directives/document.md",
+            source_blob_name="directives/source.pdf",
+        ),
+        section_content=descriptors,
+        run_id="test-run",
+        published_at="2026-07-25T12:00:00Z",
+    )
+    return bundle, tuple(content_items)
+
+
+class _CatalogContainer:
+    def __init__(self, value: dict) -> None:
+        self.value = value
+        self.reads: list[tuple[str, str]] = []
+
+    async def read_item(self, *, item: str, partition_key: str):
+        self.reads.append((item, partition_key))
+        return self.value
+
+
+class _ContentContainer:
+    def __init__(self, items: tuple[DirectiveSectionContent, ...]) -> None:
+        self.items = {
+            item.id: item.model_dump(mode="json") for item in items
+        }
+        self.reads: list[tuple[str, str]] = []
+        self.active = 0
+        self.max_active = 0
+
+    async def read_item(self, *, item: str, partition_key: str):
+        self.reads.append((item, partition_key))
+        value = self.items.get(item)
+        if value is None:
+            raise exceptions.CosmosResourceNotFoundError(message="missing")
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            await asyncio.sleep(
+                0.001 * (int(value["part_ordinal"]) % 3 + 1)
+            )
+            return value
+        finally:
+            self.active -= 1
+
+
+class DirectiveCatalogBundleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exact_version_is_one_validated_point_read(self) -> None:
+        bundle, _ = _bundle_and_items(["content"])
+        container = _CatalogContainer(
+            {**bundle.model_dump(mode="json"), "_etag": "etag"}
+        )
+        repository = DirectiveCatalogRepository()
+        repository._container = container
+
+        result = await repository.get_published_version(
+            _DIRECTIVE_ID, _VERSION_ID
+        )
+
+        self.assertEqual(result, bundle)
+        self.assertEqual(
+            container.reads,
+            [(f"version:{_VERSION_ID}", _DIRECTIVE_ID)],
+        )
+
+    async def test_legacy_version_is_rejected_without_fallback(self) -> None:
+        container = _CatalogContainer(
+            {
+                "id": f"version:{_VERSION_ID}",
+                "type": "version",
+                "directive_id": _DIRECTIVE_ID,
+                "directive_version_id": _VERSION_ID,
+                "publication_state": "published",
+            }
+        )
+        repository = DirectiveCatalogRepository()
+        repository._container = container
+
+        with self.assertRaises(DirectiveDataUnavailable):
+            await repository.get_published_version(
+                _DIRECTIVE_ID, _VERSION_ID
+            )
+
+        self.assertEqual(len(container.reads), 1)
+
+
+class DirectiveContentRepositoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_split_parts_reconstruct_in_manifest_order(self) -> None:
+        expected = "line 😀 with escaped \"text\"\n" * 40
+        bundle, items = _bundle_and_items(
+            [expected],
+            max_item_bytes=900,
+        )
+        self.assertGreater(len(items), 1)
+        container = _ContentContainer(items)
+        repository = DirectiveContentRepository()
+        repository._container = container
+
+        values = await repository.read_sections(
+            bundle, list(bundle.manifest.sections)
+        )
+
+        self.assertEqual(values, [expected])
+        self.assertEqual(len(container.reads), len(items))
+
+    async def test_reads_are_bounded_and_preserve_section_order(self) -> None:
+        expected = [f"content-{index}" for index in range(20)]
+        bundle, items = _bundle_and_items(expected)
+        container = _ContentContainer(items)
+        repository = DirectiveContentRepository()
+        repository._container = container
+
+        values = await repository.read_sections(
+            bundle, list(bundle.manifest.sections)
+        )
+
+        self.assertEqual(values, expected)
+        self.assertEqual(len(container.reads), 20)
+        self.assertGreater(container.max_active, 1)
+        self.assertLessEqual(container.max_active, 8)
+
+    async def test_missing_part_never_returns_partial_content(self) -> None:
+        bundle, items = _bundle_and_items(
+            ["large section\n" * 60],
+            max_item_bytes=900,
+        )
+        container = _ContentContainer(items)
+        container.items.pop(items[-1].id)
+        repository = DirectiveContentRepository()
+        repository._container = container
+
+        with self.assertRaises(DirectiveDataUnavailable):
+            await repository.read_sections(
+                bundle, list(bundle.manifest.sections)
+            )

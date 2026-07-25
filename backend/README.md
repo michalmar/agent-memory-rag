@@ -24,6 +24,9 @@ uv pip install --python .venv/bin/python -e ../agent_contracts -e .
 | GET | `/me` | Current authenticated user. |
 | GET | `/prompts/customer-support` | Shared stable agent prompt. |
 | GET | `/agents` | Available agent types and project-level Foundry IQ capability. |
+| GET | `/directive-sources` | Paginated source filename, size, and last-modified metadata. Requires `DirectiveSource.Manage`. |
+| POST | `/directive-sources/upload/{filename}` | Create-only raw PDF upload. Requires `DirectiveSource.Manage`. |
+| DELETE | `/directive-sources/{filename}` | Delete one exact source blob without changing published data. Requires `DirectiveSource.Manage`. |
 | GET/PUT/DELETE | `/conversations*` | Owner-scoped durable history. |
 | POST | `/internal/agent-tools/{name}` | App-only Hosted Agent tool gateway. |
 | GET | `/health/live` | Process liveness; does not call dependencies. |
@@ -50,6 +53,13 @@ curl -N -X POST http://localhost:8000/chat \
   -H 'X-Mock-User-ID: user-alice' -H 'Content-Type: application/json' \
   -d '{"message":"track ORD-001","conversation_id":null,"agent_type":"agent-framework"}'
 ```
+
+Mock users can manage directive sources for local development. In production,
+the delegated `access_as_user` scope authenticates the user, while all source
+manager routes additionally require the user-assignable
+`DirectiveSource.Manage` application role. The backend accesses the private
+source container through its managed identity; browsers never receive storage
+credentials or Blob coordinates.
 
 ## Agent mode
 

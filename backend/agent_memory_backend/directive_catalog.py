@@ -8,10 +8,11 @@ from typing import Any
 
 from azure.cosmos import exceptions
 from directive_contracts import (
-    DirectiveManifest,
+    PUBLISHED_BUNDLE_MAX_BYTES,
     DirectiveMetadata,
     DirectiveRelation,
-    DirectiveSummary,
+    PublishedDirectiveVersion,
+    serialized_json_size,
 )
 
 from .config import get_settings
@@ -50,11 +51,11 @@ class DirectiveCatalogRepository(CosmosContainerLifecycle):
                 "Directive catalog health check failed"
             ) from exc
 
-    async def get_version_record(
+    async def get_published_version(
         self,
         directive_id: str,
         directive_version_id: str,
-    ) -> dict[str, Any] | None:
+    ) -> PublishedDirectiveVersion | None:
         container = self._require_initialized_container(
             "Directive catalog is unavailable"
         )
@@ -76,7 +77,17 @@ class DirectiveCatalogRepository(CosmosContainerLifecycle):
             or item.get("directive_version_id") != directive_version_id
         ):
             return None
-        return item
+        return _validate_published_bundle(item)
+
+    async def get_version_record(
+        self,
+        directive_id: str,
+        directive_version_id: str,
+    ) -> dict[str, Any] | None:
+        bundle = await self.get_published_version(
+            directive_id, directive_version_id
+        )
+        return bundle.model_dump(mode="json") if bundle is not None else None
 
     async def get_current_record(
         self,
@@ -141,74 +152,6 @@ class DirectiveCatalogRepository(CosmosContainerLifecycle):
             candidates.sort(key=lambda pair: pair[0], reverse=True)
             return candidates[0][1]
         return await self.get_current_record(directive_id)
-
-    async def get_manifest(
-        self,
-        directive_id: str,
-        directive_version_id: str,
-    ) -> DirectiveManifest | None:
-        version = await self.get_version_record(
-            directive_id,
-            directive_version_id,
-        )
-        if version is None:
-            return None
-        source_hash = version.get("source_hash")
-        if not isinstance(source_hash, str):
-            return None
-        container = self._require_initialized_container(
-            "Directive catalog is unavailable"
-        )
-        try:
-            item = await container.read_item(
-                item=f"manifest:{directive_version_id}:{source_hash}",
-                partition_key=directive_id,
-            )
-            return DirectiveManifest.model_validate(item.get("manifest"))
-        except exceptions.CosmosResourceNotFoundError:
-            return None
-        except exceptions.CosmosHttpResponseError as exc:
-            raise DirectiveDataUnavailable(
-                "Directive manifest lookup failed"
-            ) from exc
-        except ValueError as exc:
-            raise DirectiveDataUnavailable(
-                "Directive manifest is invalid"
-            ) from exc
-
-    async def get_summary(
-        self,
-        directive_id: str,
-        directive_version_id: str,
-    ) -> DirectiveSummary | None:
-        version = await self.get_version_record(
-            directive_id,
-            directive_version_id,
-        )
-        if version is None:
-            return None
-        source_hash = version.get("source_hash")
-        if not isinstance(source_hash, str):
-            return None
-        container = self._require_initialized_container(
-            "Directive catalog is unavailable"
-        )
-        try:
-            item = await container.read_item(
-                item=f"summary:{directive_version_id}:{source_hash}",
-                partition_key=directive_id,
-            )
-            return DirectiveSummary.model_validate(item.get("summary"))
-        except exceptions.CosmosResourceNotFoundError:
-            return None
-        except exceptions.CosmosHttpResponseError as exc:
-            raise DirectiveDataUnavailable(
-                "Directive summary lookup failed"
-            ) from exc
-        except ValueError as exc:
-            raise DirectiveDataUnavailable(
-                "Directive summary is invalid"
-            ) from exc
 
     async def get_relations(
         self,
@@ -295,7 +238,9 @@ class DirectiveCatalogRepository(CosmosContainerLifecycle):
                 query=query,
                 partition_key=directive_id,
             ):
-                values.append(item)
+                values.append(
+                    _validate_published_bundle(item).model_dump(mode="json")
+                )
         except exceptions.CosmosHttpResponseError as exc:
             raise DirectiveDataUnavailable(
                 "Directive version listing failed"
@@ -303,11 +248,18 @@ class DirectiveCatalogRepository(CosmosContainerLifecycle):
         return values
 
     @staticmethod
-    def public_version(item: dict[str, Any]) -> dict[str, Any]:
+    def public_version(
+        item: dict[str, Any] | PublishedDirectiveVersion,
+    ) -> dict[str, Any]:
+        source = (
+            item.model_dump(mode="json")
+            if isinstance(item, PublishedDirectiveVersion)
+            else item
+        )
         fields = {
-            name: item[name]
+            name: source[name]
             for name in DirectiveMetadata.model_fields
-            if name in item
+            if name in source
         }
         try:
             return DirectiveMetadata.model_validate(fields).model_dump(
@@ -328,3 +280,22 @@ def _catalog_date(value: Any) -> date | None:
         return date.fromisoformat(str(value)[:10])
     except ValueError:
         return None
+
+
+def _validate_published_bundle(
+    item: dict[str, Any],
+) -> PublishedDirectiveVersion:
+    application_fields = {
+        key: value for key, value in item.items() if not key.startswith("_")
+    }
+    try:
+        bundle = PublishedDirectiveVersion.model_validate(application_fields)
+    except ValueError as exc:
+        raise DirectiveDataUnavailable(
+            "Published directive bundle is invalid"
+        ) from exc
+    if serialized_json_size(bundle) > PUBLISHED_BUNDLE_MAX_BYTES:
+        raise DirectiveDataUnavailable(
+            "Published directive bundle exceeds the supported size"
+        )
+    return bundle

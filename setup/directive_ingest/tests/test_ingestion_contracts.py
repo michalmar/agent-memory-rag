@@ -1,17 +1,35 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from directive_ingestion.canonical import ParsedSection, parse_canonical
 from directive_ingestion.chunking import chunk_sections
 from directive_ingestion.document_intelligence import ExtractedDocument
+from directive_ingestion.blob_repository import (
+    _is_legacy_directive_artifact,
+)
 from directive_ingestion.mandate_projection import parse_mandates
-from directive_ingestion.reconcile import _build_manifest
+from directive_ingestion.reconcile import (
+    _build_artifact_locators,
+    _build_manifest,
+    _build_published_bundle,
+    format_result,
+)
 from directive_ingestion.source import discover_pdfs
-from directive_contracts import DirectiveSummary
+from directive_contracts import (
+    PUBLISHED_BUNDLE_MAX_BYTES,
+    DirectiveArtifactLocators,
+    DirectiveSummary,
+    PublishedDirectiveVersion,
+    build_section_content_items,
+    section_content_item_id,
+    serialized_json_size,
+)
 
 ROOT = Path(__file__).parents[3]
 FIXTURES = ROOT / "setup" / "directives"
@@ -22,7 +40,7 @@ TENANT_ID = "a7b1484c-f66a-496a-b1cf-35631a50396c"
 def _fixture_directives():
     directives = []
     for source in discover_pdfs(FIXTURES / "pdf"):
-        markdown_path = FIXTURES / "md" / f"{source.path.stem}.md"
+        markdown_path = FIXTURES / "md" / f"{source.source_stem}.md"
         markdown = markdown_path.read_text(encoding="utf-8")
         extraction = ExtractedDocument(
             markdown=markdown,
@@ -34,6 +52,67 @@ def _fixture_directives():
             parse_canonical(source, extraction, PROCESSING_HASH)
         )
     return directives
+
+
+def test_format_result_serializes_cli_output() -> None:
+    assert format_result({"status": "ready"}) == '{"status": "ready"}'
+
+
+def test_blob_locators_reject_non_posix_relative_paths() -> None:
+    with pytest.raises(ValidationError):
+        DirectiveArtifactLocators(
+            canonical_blob_name=r"directives\..\document.md",
+            source_blob_name="directives/source.pdf",
+        )
+
+
+@pytest.mark.parametrize(
+    "blob_name",
+    [
+        (
+            "directives/72403881/72403881:v2/"
+            f"{'a' * 64}/generations/{'b' * 64}/manifest.json"
+        ),
+        (
+            "directives/72403881/72403881:v2/"
+            f"{'a' * 64}/generations/{'b' * 64}/summary.json"
+        ),
+        (
+            "directives/72403881/72403881:v2/"
+            f"{'a' * 64}/generations/{'b' * 64}/sections/"
+            "0001-s0001-purpose.md"
+        ),
+    ],
+)
+def test_legacy_blob_cleanup_matches_only_removed_artifacts(
+    blob_name: str,
+) -> None:
+    assert _is_legacy_directive_artifact(blob_name)
+
+
+@pytest.mark.parametrize(
+    "blob_name",
+    [
+        (
+            "directives/72403881/72403881:v2/"
+            f"{'a' * 64}/generations/{'b' * 64}/document.md"
+        ),
+        (
+            "directives/72403881/72403881:v2/"
+            f"{'a' * 64}/source.pdf"
+        ),
+        "quarantine/run/source.pdf",
+        "directives/72403881/manifest.json",
+        (
+            "directives/72403881/72403881:v2/"
+            f"{'a' * 64}/generations/{'b' * 64}/sections/nested/file.md"
+        ),
+    ],
+)
+def test_legacy_blob_cleanup_preserves_current_and_unknown_artifacts(
+    blob_name: str,
+) -> None:
+    assert not _is_legacy_directive_artifact(blob_name)
 
 
 def test_all_fixture_metadata_versions_and_relations_parse() -> None:
@@ -175,9 +254,96 @@ def test_nondeterministic_summary_gets_distinct_generation_path() -> None:
     first = _build_manifest(directive, chunks, summary("first"))
     second = _build_manifest(directive, chunks, summary("second"))
 
-    assert first.source_blob_name == second.source_blob_name
-    assert first.manifest_blob_name != second.manifest_blob_name
-    assert first.summary_blob_name != second.summary_blob_name
+    first_artifacts = _build_artifact_locators(
+        directive, first.artifact_generation_id
+    )
+    second_artifacts = _build_artifact_locators(
+        directive, second.artifact_generation_id
+    )
+    assert (
+        first_artifacts.source_blob_name
+        == second_artifacts.source_blob_name
+    )
+    assert first.artifact_generation_id != second.artifact_generation_id
+    assert (
+        first_artifacts.canonical_blob_name
+        != second_artifacts.canonical_blob_name
+    )
+
+
+def test_section_content_splitting_is_exact_and_deterministic() -> None:
+    content = ("## Héading\nline 😀 with \"quotes\" and \\\\ slashes\n" * 30)
+    values = {
+        "directive_id": "12345678",
+        "directive_version_id": "12345678:v1",
+        "artifact_generation_id": "a" * 64,
+        "section_id": "s0001-unicode",
+        "section_ordinal": 0,
+        "content": content,
+        "run_id": "test-run",
+        "created_at": datetime(2026, 7, 25, tzinfo=UTC),
+        "max_item_bytes": 900,
+    }
+
+    first = build_section_content_items(**values)
+    second = build_section_content_items(**values)
+
+    assert len(first) > 1
+    assert first == second
+    assert "".join(item.content for item in first) == content
+    assert all(serialized_json_size(item) <= 900 for item in first)
+    assert [
+        item.id for item in first
+    ] == [
+        section_content_item_id("a" * 64, "s0001-unicode", index)
+        for index in range(len(first))
+    ]
+
+
+def test_published_bundle_is_strict_and_below_ceiling() -> None:
+    directive = _fixture_directives()[0]
+    chunks, _ = chunk_sections(
+        directive.metadata.directive_version_id,
+        directive.metadata.source_hash,
+        directive.metadata.processing_hash,
+        directive.sections,
+        token_limit=800,
+        overlap_tokens=120,
+    )
+    summary = DirectiveSummary(
+        directive_id=directive.metadata.directive_id,
+        directive_version_id=directive.metadata.directive_version_id,
+        source_hash=directive.metadata.source_hash,
+        summary="summary",
+        covered_section_ids=[
+            section.section_id for section in directive.sections
+        ],
+        total_section_count=len(directive.sections),
+        input_token_count=directive.total_tokens,
+        strategy="full_document",
+        model_deployment="test",
+    )
+    manifest = _build_manifest(directive, chunks, summary)
+    bundle, items = _build_published_bundle(
+        directive, manifest, summary, "test-run"
+    )
+
+    assert serialized_json_size(bundle) < PUBLISHED_BUNDLE_MAX_BYTES
+    assert len(bundle.section_content) == len(directive.sections)
+    assert len(items) >= len(directive.sections)
+    assert "canonical_blob_name" not in bundle.manifest.model_dump()
+    assert all("blob_name" not in section.model_dump() for section in manifest.sections)
+
+    invalid = bundle.model_dump(mode="json")
+    invalid["summary"]["directive_version_id"] = "12345678:v9"
+    with pytest.raises(ValidationError, match="version IDs"):
+        PublishedDirectiveVersion.model_validate(invalid)
+
+    invalid_coverage = bundle.model_dump(mode="json")
+    invalid_coverage["summary"]["covered_section_ids"] = []
+    invalid_coverage["summary"]["total_section_count"] = 0
+    with pytest.raises(ValidationError, match="summary coverage"):
+        PublishedDirectiveVersion.model_validate(invalid_coverage)
 
 
 def test_mandate_csv_is_complete_sparse_snapshot() -> None:

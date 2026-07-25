@@ -38,13 +38,11 @@ class IngestionConfig:
     cosmos_endpoint: str
     cosmos_database: str
     catalog_container: str
+    content_container: str
     mandate_container: str
     search_endpoint: str
     search_index: str
-    search_knowledge_source: str
-    search_knowledge_base: str
     search_api_version: str
-    knowledge_api_version: str
     openai_endpoint: str
     openai_resource_uri: str
     openai_api_version: str
@@ -53,8 +51,10 @@ class IngestionConfig:
     embedding_dimensions: int
     summary_deployment: str
     summary_model: str
-    knowledge_model_deployment: str
-    knowledge_model_name: str
+    source_kind: str
+    source_container: str
+    source_prefix: str
+    source_max_corpus_bytes: int
     source_directory: Path
     mandate_csv: Path
     processing_version: str
@@ -85,6 +85,9 @@ class IngestionConfig:
             catalog_container=os.getenv(
                 "DIRECTIVE_CATALOG_CONTAINER", "catalog"
             ),
+            content_container=os.getenv(
+                "DIRECTIVE_CONTENT_CONTAINER", "directive_content"
+            ),
             mandate_container=os.getenv(
                 "DIRECTIVE_MANDATE_CONTAINER", "user_mandates"
             ),
@@ -92,18 +95,8 @@ class IngestionConfig:
             search_index=os.getenv(
                 "DIRECTIVE_SEARCH_INDEX", "directive-chunks-v1"
             ),
-            search_knowledge_source=os.getenv(
-                "DIRECTIVE_SEARCH_KNOWLEDGE_SOURCE",
-                "directive-chunks-ks-v1",
-            ),
-            search_knowledge_base=os.getenv(
-                "DIRECTIVE_SEARCH_KNOWLEDGE_BASE", "directive-kb-v1"
-            ),
             search_api_version=os.getenv(
-                "AZURE_SEARCH_API_VERSION", "2024-07-01"
-            ),
-            knowledge_api_version=os.getenv(
-                "AZURE_SEARCH_KNOWLEDGE_API_VERSION", "2026-04-01"
+                "AZURE_SEARCH_API_VERSION", "2026-04-01"
             ),
             openai_endpoint=_required("AZURE_OPENAI_ENDPOINT").rstrip("/"),
             openai_resource_uri=os.getenv(
@@ -128,12 +121,19 @@ class IngestionConfig:
             summary_model=os.getenv(
                 "DIRECTIVE_SUMMARY_MODEL", "gpt-5.6-sol"
             ),
-            knowledge_model_deployment=os.getenv(
-                "DIRECTIVE_KNOWLEDGE_MODEL_DEPLOYMENT",
-                "gpt-5-nano-directive-kb",
-            ),
-            knowledge_model_name=os.getenv(
-                "DIRECTIVE_KNOWLEDGE_MODEL_NAME", "gpt-5-nano"
+            source_kind=os.getenv(
+                "DIRECTIVE_SOURCE_KIND", "local"
+            ).strip().casefold(),
+            source_container=os.getenv(
+                "DIRECTIVE_SOURCE_CONTAINER", "directive-source"
+            ).strip(),
+            source_prefix=os.getenv(
+                "DIRECTIVE_SOURCE_PREFIX", ""
+            ).strip(),
+            source_max_corpus_bytes=_integer(
+                "DIRECTIVE_SOURCE_MAX_CORPUS_BYTES",
+                512 * 1024 * 1024,
+                1,
             ),
             source_directory=Path(
                 os.getenv("DIRECTIVE_SOURCE_DIR", "/app/fixtures/pdf")
@@ -165,6 +165,14 @@ class IngestionConfig:
                 "DIRECTIVE_CHUNK_OVERLAP_TOKENS must be lower than "
                 "DIRECTIVE_CHUNK_TOKEN_LIMIT"
             )
+        if config.source_kind not in {"local", "azure_blob"}:
+            raise ValueError(
+                "DIRECTIVE_SOURCE_KIND must be local or azure_blob"
+            )
+        if config.source_kind == "azure_blob" and not config.source_container:
+            raise ValueError(
+                "DIRECTIVE_SOURCE_CONTAINER is required in azure_blob mode"
+            )
         return config
 
     @property
@@ -185,8 +193,6 @@ class IngestionConfig:
             "embedding_dimensions": self.embedding_dimensions,
             "summary_deployment": self.summary_deployment,
             "summary_model": self.summary_model,
-            "knowledge_model_deployment": self.knowledge_model_deployment,
-            "knowledge_model_name": self.knowledge_model_name,
         }
         encoded = json.dumps(
             processing_inputs, sort_keys=True, separators=(",", ":")

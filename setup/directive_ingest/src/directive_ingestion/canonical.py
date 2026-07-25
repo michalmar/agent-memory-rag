@@ -123,12 +123,12 @@ def parse_canonical(
     )
     if directive_id != source.directive_id_hint:
         raise ValueError(
-            f"{source.path.name}: extracted Directive ID {directive_id} does "
+            f"{source.source_name}: extracted Directive ID {directive_id} does "
             f"not match filename ID {source.directive_id_hint}"
         )
     if not source.metadata_version_matches(version_label):
         raise ValueError(
-            f"{source.path.name}: extracted version {version_label} does not "
+            f"{source.source_name}: extracted version {version_label} does not "
             f"match filename version {source.version_hint}"
         )
     status_key = status.casefold()
@@ -138,7 +138,7 @@ def parse_canonical(
         is_current = False
     else:
         raise ValueError(
-            f"{source.path.name}: unsupported publication status {status!r}"
+            f"{source.source_name}: unsupported publication status {status!r}"
         )
     effective_to_raw = control.get("superseded on")
     effective_to = (
@@ -148,7 +148,7 @@ def parse_canonical(
     )
     if effective_to and effective_to <= effective_from:
         raise ValueError(
-            f"{source.path.name}: Superseded on must follow Effective date"
+            f"{source.source_name}: Superseded on must follow Effective date"
         )
     document_type = (
         "sub_directive"
@@ -167,7 +167,7 @@ def parse_canonical(
         effective_from=effective_from,
         effective_to=effective_to,
         document_type=document_type,
-        source_filename=source.path.name,
+        source_filename=source.source_name,
         source_hash=source.source_hash,
         processing_hash=processing_hash,
     )

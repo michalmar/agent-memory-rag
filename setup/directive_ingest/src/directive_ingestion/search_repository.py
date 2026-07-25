@@ -1,4 +1,4 @@
-"""Versioned Azure AI Search index and Foundry IQ publication."""
+"""Versioned Azure AI Search index publication."""
 
 from __future__ import annotations
 
@@ -49,38 +49,7 @@ class DirectiveSearchRepository:
         )
         fields = {field["name"]: field for field in index.get("fields", [])}
         dimensions = int(fields.get("content_vector", {}).get("dimensions", 0))
-        if dimensions != self._config.embedding_dimensions:
-            raise RuntimeError(
-                f"Search vector dimensions are {dimensions}, expected "
-                f"{self._config.embedding_dimensions}"
-            )
-
-        source = await self._request(
-            "GET",
-            f"/knowledgesources/{self._config.search_knowledge_source}",
-            api_version=self._config.knowledge_api_version,
-        )
-        knowledge_base = await self._request(
-            "GET",
-            f"/knowledgebases/{self._config.search_knowledge_base}",
-            api_version=self._config.knowledge_api_version,
-        )
-        models = knowledge_base.get("models") or []
-        parameters = (
-            models[0].get("azureOpenAIParameters", {}) if models else {}
-        )
-        if (
-            source.get("name") != self._config.search_knowledge_source
-            or knowledge_base.get("name") != self._config.search_knowledge_base
-            or parameters.get("deploymentId")
-            != self._config.knowledge_model_deployment
-            or parameters.get("modelName")
-            != self._config.knowledge_model_name
-        ):
-            raise RuntimeError(
-                "Search knowledge source or knowledge base configuration "
-                "does not match ingestion settings"
-            )
+        self._validate_existing_index(index)
 
         published = await self._count_and_facet(
             "publication_state eq 'published'"
@@ -88,6 +57,32 @@ class DirectiveSearchRepository:
         current = await self._count_and_facet(
             "publication_state eq 'published' and is_current eq true"
         )
+        direct_query = await self._request(
+            "POST",
+            f"/indexes/{self._config.search_index}/docs/search",
+            api_version=self._config.search_api_version,
+            payload={
+                "search": "directive verification",
+                "filter": "publication_state eq 'published'",
+                "vectorFilterMode": "preFilter",
+                "vectorQueries": [
+                    {
+                        "kind": "text",
+                        "text": "directive verification",
+                        "fields": "content_vector",
+                        "k": 50,
+                    }
+                ],
+                "queryType": "semantic",
+                "semanticConfiguration": "semantic_config",
+                "select": "id",
+                "top": 1,
+            },
+        )
+        if not isinstance(direct_query.get("value"), list):
+            raise RuntimeError(
+                "Search direct hybrid query returned an invalid response"
+            )
         return {
             "published_chunks": published["count"],
             "published_directives": published["directive_count"],
@@ -96,10 +91,11 @@ class DirectiveSearchRepository:
             "current_directives": current["directive_count"],
             "current_versions": current["version_count"],
             "vector_dimensions": dimensions,
-            "knowledge_source": source["name"],
-            "knowledge_base": knowledge_base["name"],
-            "planner_deployment": parameters["deploymentId"],
-            "planner_model": parameters["modelName"],
+            "search_index": index["name"],
+            "vector_profile": "directive-vector-profile",
+            "vectorizer": "directive-openai-vectorizer",
+            "semantic_configuration": "semantic_config",
+            "direct_hybrid_query": "ok",
         }
 
     async def _count_and_facet(
@@ -146,34 +142,6 @@ class DirectiveSearchRepository:
             )
         else:
             self._validate_existing_index(index)
-
-        source = await self._request(
-            "GET",
-            f"/knowledgesources/{self._config.search_knowledge_source}",
-            api_version=self._config.knowledge_api_version,
-            allow_not_found=True,
-        )
-        if not source:
-            await self._request(
-                "PUT",
-                f"/knowledgesources/{self._config.search_knowledge_source}",
-                api_version=self._config.knowledge_api_version,
-                payload=self._knowledge_source_definition(),
-            )
-
-        knowledge_base = await self._request(
-            "GET",
-            f"/knowledgebases/{self._config.search_knowledge_base}",
-            api_version=self._config.knowledge_api_version,
-            allow_not_found=True,
-        )
-        if not knowledge_base:
-            await self._request(
-                "PUT",
-                f"/knowledgebases/{self._config.search_knowledge_base}",
-                api_version=self._config.knowledge_api_version,
-                payload=self._knowledge_base_definition(),
-            )
 
     async def build_chunks(
         self,
@@ -252,6 +220,13 @@ class DirectiveSearchRepository:
                 for chunk in batch
             ]
             await self._upload_actions(actions)
+
+    async def retire_chunks(self, chunks: list[DirectiveChunk]) -> None:
+        await self._merge_chunk_state(
+            [chunk.id for chunk in chunks],
+            publication_state="retired",
+            is_current=False,
+        )
 
     async def validate_published(
         self, directive: CanonicalDirective, expected_count: int
@@ -519,10 +494,61 @@ class DirectiveSearchRepository:
             raise RuntimeError(
                 "Existing directive index has incompatible vector dimensions"
             )
+        if vector.get("vectorSearchProfile") != "directive-vector-profile":
+            raise RuntimeError(
+                "Existing directive index has an incompatible vector profile"
+            )
         if not fields["directive_id"].get("searchable"):
             raise RuntimeError(
                 "Existing directive index must make directive_id searchable "
                 "for semantic keyword prioritization"
+            )
+        vector_search = index.get("vectorSearch") or {}
+        algorithms = {
+            algorithm.get("name"): algorithm
+            for algorithm in vector_search.get("algorithms") or []
+        }
+        if algorithms.get("directive-hnsw", {}).get("kind") != "hnsw":
+            raise RuntimeError(
+                "Existing directive index is missing the HNSW algorithm"
+            )
+        profiles = {
+            profile.get("name"): profile
+            for profile in vector_search.get("profiles") or []
+        }
+        profile = profiles.get("directive-vector-profile") or {}
+        if (
+            profile.get("algorithm") != "directive-hnsw"
+            or profile.get("vectorizer") != "directive-openai-vectorizer"
+        ):
+            raise RuntimeError(
+                "Existing directive index is missing the direct-query "
+                "vector profile"
+            )
+        vectorizers = {
+            vectorizer.get("name"): vectorizer
+            for vectorizer in vector_search.get("vectorizers") or []
+        }
+        vectorizer = vectorizers.get("directive-openai-vectorizer") or {}
+        parameters = vectorizer.get("azureOpenAIParameters") or {}
+        if (
+            vectorizer.get("kind") != "azureOpenAI"
+            or parameters.get("deploymentId")
+            != self._config.embedding_deployment
+            or parameters.get("modelName") != self._config.embedding_model
+        ):
+            raise RuntimeError(
+                "Existing directive index is missing the configured query "
+                "vectorizer"
+            )
+        semantic = index.get("semantic") or {}
+        configurations = {
+            configuration.get("name"): configuration
+            for configuration in semantic.get("configurations") or []
+        }
+        if "semantic_config" not in configurations:
+            raise RuntimeError(
+                "Existing directive index is missing semantic_config"
             )
 
     def _index_definition(self) -> dict[str, Any]:
@@ -687,60 +713,6 @@ class DirectiveSearchRepository:
                 "vectorSearchProfile": "directive-vector-profile",
             },
         ]
-
-    def _knowledge_source_definition(self) -> dict[str, Any]:
-        return {
-            "name": self._config.search_knowledge_source,
-            "kind": "searchIndex",
-            "description": "Published company directive chunks.",
-            "searchIndexParameters": {
-                "searchIndexName": self._config.search_index,
-                "semanticConfigurationName": "semantic_config",
-                "sourceDataFields": [
-                    {"name": name}
-                    for name in (
-                        "directive_id",
-                        "directive_version_id",
-                        "version_label",
-                        "title",
-                        "is_current",
-                        "effective_from",
-                        "effective_to",
-                        "section_id",
-                        "section_number",
-                        "section_title",
-                        "page_from",
-                        "page_to",
-                        "source_hash",
-                    )
-                ],
-                "searchFields": [{"name": "content"}],
-            },
-        }
-
-    def _knowledge_base_definition(self) -> dict[str, Any]:
-        return {
-            "name": self._config.search_knowledge_base,
-            "description": (
-                "Versioned company directives for grounded agent retrieval."
-            ),
-            "knowledgeSources": [
-                {"name": self._config.search_knowledge_source}
-            ],
-            "models": [
-                {
-                    "kind": "azureOpenAI",
-                    "azureOpenAIParameters": {
-                        "resourceUri": self._config.openai_resource_uri,
-                        "deploymentId": (
-                            self._config.knowledge_model_deployment
-                        ),
-                        "modelName": self._config.knowledge_model_name,
-                    },
-                }
-            ],
-        }
-
 
 def _search_document(chunk: DirectiveChunk) -> dict[str, Any]:
     value = chunk.model_dump(mode="json")

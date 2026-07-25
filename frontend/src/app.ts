@@ -18,6 +18,8 @@ import {
   type AgentType,
   type ConversationSummary,
   type DirectiveDocument,
+  type DirectiveSourceItem,
+  DirectiveSourceRequestError,
   type MemoryRow,
   type ProfileDoc,
 } from './client.js';
@@ -46,9 +48,17 @@ import './components/conversation-sidebar.js';
 import './components/directive-document-viewer.js';
 import './components/memory-rail.js';
 import './components/profile-drawer.js';
+import './components/source-documents-rail.js';
+import type { SourceDocumentsRailActions } from './components/source-documents-rail.js';
+import {
+  directiveSourceUploadError,
+  type DirectiveSourceUploadStatus,
+  validateDirectiveSourceFilename,
+} from './source-documents.js';
 import { uiLogger } from './ui-logger.js';
 
 type AuthStatus = 'checking' | 'signed-out' | 'signing-in' | 'signed-in' | 'error';
+type RightRailMode = 'memory' | 'sources';
 
 const storedTheme = localStorage.getItem('theme');
 const INITIAL_THEME: 'light' | 'dark' = storedTheme === 'dark' ? 'dark' : 'light';
@@ -74,6 +84,7 @@ export class NativeApp extends LitElement {
   // Memory-layer UI state
   @state() private sidebarOpen = THREAD_RAIL_DESKTOP.matches;
   @state() private memoryPanelOpen = MEMORY_RAIL_DESKTOP.matches;
+  @state() private rightRailMode: RightRailMode = 'memory';
   @state() private conversations: ConversationSummary[] = [];
   @state() private memories: MemoryRow[] = [];
   @state() private conversationsStatus: ResourceStatus = 'loading';
@@ -81,6 +92,17 @@ export class NativeApp extends LitElement {
   @state() private memoryQuery = '';
   @state() private searchResults: MemoryRow[] | null = null;
   @state() private selectedMemory: MemoryRow | null = null;
+  @state() private directiveSources: DirectiveSourceItem[] = [];
+  @state() private directiveSourcesStatus: ResourceStatus = 'loading';
+  @state() private directiveSourcesNextCursor: string | null = null;
+  @state() private directiveSourceListLoading = false;
+  @state() private directiveSourceUploadStatus:
+    DirectiveSourceUploadStatus = 'idle';
+  @state() private directiveSourceUploadProgress = 0;
+  @state() private directiveSourceUploadError = '';
+  @state() private directiveSourceDeletingFilename: string | null = null;
+  @state() private directiveSourceDeleting = false;
+  @state() private directiveSourceDeleteError = '';
   @state() private memorisedIds = new Set<string>();
   @state() private profileOpen = false;
   @state() private profile: ProfileDoc | null = null;
@@ -111,6 +133,7 @@ export class NativeApp extends LitElement {
   private profileLoadGeneration = 0;
   private authGeneration = 0;
   private identityGeneration = 0;
+  private directiveSourceListGeneration = 0;
   private chatGeneration = 0;
   private turnSequence = 0;
   private chatAbort?: AbortController;
@@ -140,6 +163,22 @@ export class NativeApp extends LitElement {
     openConversation: (conversationId: string) =>
       this.openConversationFromMemory(conversationId),
     deleteMemory: (memory: MemoryRow) => void this.deleteMemory(memory),
+  };
+  private sourceDocumentsActions: SourceDocumentsRailActions = {
+    close: () => (this.memoryPanelOpen = false),
+    upload: (file: File) => void this.uploadDirectiveSource(file),
+    loadMore: () => void this.loadMoreDirectiveSources(),
+    retry: () => void this.refreshDirectiveSources(),
+    requestDelete: (filename: string) => {
+      this.directiveSourceDeletingFilename = filename;
+      this.directiveSourceDeleteError = '';
+    },
+    cancelDelete: () => {
+      this.directiveSourceDeletingFilename = null;
+      this.directiveSourceDeleteError = '';
+    },
+    confirmDelete: (filename: string) =>
+      void this.deleteDirectiveSource(filename),
   };
   private composerActions = {
     updateInput: (value: string) => (this.input = value),
@@ -305,7 +344,17 @@ export class NativeApp extends LitElement {
   private async refreshMe(generation = this.identityGeneration): Promise<void> {
     try {
       const me = await this.client.me();
-      if (generation === this.identityGeneration) this.me = me;
+      if (generation !== this.identityGeneration) return;
+      const gainedSourceAccess = (
+        this.me?.can_manage_directive_sources !== true
+        && me.can_manage_directive_sources === true
+      );
+      this.me = me;
+      if (gainedSourceAccess) {
+        await this.refreshDirectiveSources(generation);
+      } else if (me.can_manage_directive_sources !== true) {
+        this.clearDirectiveSourceState();
+      }
     } catch (e) {
       uiLogger.error('me() failed', e);
       if (generation === this.identityGeneration) this.me = null;
@@ -365,6 +414,126 @@ export class NativeApp extends LitElement {
     }
   }
 
+  private async refreshDirectiveSources(
+    generation = this.identityGeneration,
+    cursor: string | null = null,
+    append = false,
+  ): Promise<void> {
+    if (!this.canManageDirectiveSources) return;
+    const requestGeneration = ++this.directiveSourceListGeneration;
+    this.directiveSourceListLoading = true;
+    if (!append && generation === this.identityGeneration) {
+      this.directiveSourcesStatus = 'loading';
+    }
+    try {
+      const page = await this.client.listDirectiveSources(cursor);
+      if (
+        generation !== this.identityGeneration
+        || requestGeneration !== this.directiveSourceListGeneration
+      ) return;
+      this.directiveSources = append
+        ? [
+            ...this.directiveSources,
+            ...page.items.filter(
+              (item) => !this.directiveSources.some(
+                (current) => current.filename === item.filename,
+              ),
+            ),
+          ]
+        : page.items;
+      this.directiveSourcesNextCursor = page.next_cursor ?? null;
+      this.directiveSourcesStatus = 'ready';
+    } catch (error) {
+      uiLogger.error('listDirectiveSources failed', error);
+      if (
+        generation !== this.identityGeneration
+        || requestGeneration !== this.directiveSourceListGeneration
+      ) return;
+      if (!append) this.directiveSources = [];
+      this.directiveSourcesStatus = 'error';
+    } finally {
+      if (
+        generation === this.identityGeneration
+        && requestGeneration === this.directiveSourceListGeneration
+      ) {
+        this.directiveSourceListLoading = false;
+      }
+    }
+  }
+
+  private async loadMoreDirectiveSources(): Promise<void> {
+    if (
+      !this.directiveSourcesNextCursor
+      || this.directiveSourceListLoading
+    ) return;
+    await this.refreshDirectiveSources(
+      this.identityGeneration,
+      this.directiveSourcesNextCursor,
+      true,
+    );
+  }
+
+  private async uploadDirectiveSource(file: File): Promise<void> {
+    if (!this.canManageDirectiveSources) return;
+    if (!validateDirectiveSourceFilename(file.name)) {
+      this.directiveSourceUploadStatus = 'invalid';
+      this.directiveSourceUploadError = (
+        'Use the filename format 12345678-policy-name-v1.pdf.'
+      );
+      return;
+    }
+    const generation = this.identityGeneration;
+    this.directiveSourceUploadStatus = 'uploading';
+    this.directiveSourceUploadProgress = 0;
+    this.directiveSourceUploadError = '';
+    try {
+      await this.client.uploadDirectiveSource(file, (progress) => {
+        if (generation === this.identityGeneration) {
+          this.directiveSourceUploadProgress = progress;
+        }
+      });
+      if (generation !== this.identityGeneration) return;
+      this.directiveSourceUploadStatus = 'idle';
+      this.directiveSourceUploadProgress = 0;
+      await this.refreshDirectiveSources(generation);
+      this.showToast('Directive source uploaded');
+    } catch (error) {
+      uiLogger.error('uploadDirectiveSource failed', error);
+      if (generation !== this.identityGeneration) return;
+      const status = error instanceof DirectiveSourceRequestError
+        ? error.status
+        : 0;
+      const uploadError = directiveSourceUploadError(status, file.name);
+      this.directiveSourceUploadStatus = uploadError.status;
+      this.directiveSourceUploadError = uploadError.message;
+    }
+  }
+
+  private async deleteDirectiveSource(filename: string): Promise<void> {
+    if (!this.canManageDirectiveSources || this.directiveSourceDeleting) return;
+    const generation = this.identityGeneration;
+    this.directiveSourceDeleting = true;
+    this.directiveSourceDeleteError = '';
+    try {
+      await this.client.deleteDirectiveSource(filename);
+      if (generation !== this.identityGeneration) return;
+      this.directiveSourceDeletingFilename = null;
+      await this.refreshDirectiveSources(generation);
+      this.showToast('Directive source deleted');
+    } catch (error) {
+      uiLogger.error('deleteDirectiveSource failed', error);
+      if (generation === this.identityGeneration) {
+        this.directiveSourceDeleteError = (
+          'The source PDF could not be deleted. Try again.'
+        );
+      }
+    } finally {
+      if (generation === this.identityGeneration) {
+        this.directiveSourceDeleting = false;
+      }
+    }
+  }
+
   private nextTurnId(): string {
     this.turnSequence += 1;
     return `turn-${this.turnSequence}`;
@@ -417,6 +586,7 @@ export class NativeApp extends LitElement {
     this.conversations = [];
     this.agentOptions = [];
     this.memories = [];
+    this.clearDirectiveSourceState();
     this.conversationsStatus = 'loading';
     this.memoriesStatus = 'loading';
     this.memoryQuery = '';
@@ -428,6 +598,24 @@ export class NativeApp extends LitElement {
     this.profileDraft = '';
     this.me = null;
     this.busy = false;
+  }
+
+  private clearDirectiveSourceState(): void {
+    ++this.directiveSourceListGeneration;
+    this.directiveSources = [];
+    this.directiveSourcesStatus = 'loading';
+    this.directiveSourcesNextCursor = null;
+    this.directiveSourceListLoading = false;
+    this.directiveSourceUploadStatus = 'idle';
+    this.directiveSourceUploadProgress = 0;
+    this.directiveSourceUploadError = '';
+    this.directiveSourceDeletingFilename = null;
+    this.directiveSourceDeleting = false;
+    this.directiveSourceDeleteError = '';
+    if (this.rightRailMode === 'sources') {
+      this.rightRailMode = 'memory';
+      this.memoryPanelOpen = false;
+    }
   }
 
   private toggleTheme(): void {
@@ -484,13 +672,22 @@ export class NativeApp extends LitElement {
   }
 
   private toggleMemoryPanel(): void {
-    const open = !this.memoryPanelOpen;
-    this.memoryPanelOpen = open;
-    if (open && !THREAD_RAIL_DESKTOP.matches) this.sidebarOpen = false;
+    const closing = this.memoryPanelOpen && this.rightRailMode === 'memory';
+    this.rightRailMode = 'memory';
+    this.memoryPanelOpen = !closing;
+    if (!closing && !THREAD_RAIL_DESKTOP.matches) this.sidebarOpen = false;
+  }
+
+  private toggleSourceDocumentsPanel(): void {
+    const closing = this.memoryPanelOpen && this.rightRailMode === 'sources';
+    this.rightRailMode = 'sources';
+    this.memoryPanelOpen = !closing;
+    if (!closing && !THREAD_RAIL_DESKTOP.matches) this.sidebarOpen = false;
   }
 
   private selectMemory(memory: MemoryRow): void {
     this.selectedMemory = memory;
+    this.rightRailMode = 'memory';
     if (!MEMORY_RAIL_DESKTOP.matches) this.memoryPanelOpen = true;
     if (!THREAD_RAIL_DESKTOP.matches) this.sidebarOpen = false;
   }
@@ -1018,6 +1215,12 @@ export class NativeApp extends LitElement {
       : 'support thread';
     const title = activeConversation?.title
       ?? (this.conversationId ? `Active ${threadKind}` : `New ${threadKind}`);
+    const memoryRailOpen = (
+      this.memoryPanelOpen && this.rightRailMode === 'memory'
+    );
+    const sourceRailOpen = (
+      this.memoryPanelOpen && this.rightRailMode === 'sources'
+    );
 
     return html`
       <div class="app-shell" @keydown=${this.onAppKeydown}>
@@ -1094,14 +1297,29 @@ export class NativeApp extends LitElement {
             <button
               class="header-button"
               type="button"
-              aria-label=${this.memoryPanelOpen ? 'Hide saved memory' : 'Show saved memory'}
+              aria-label=${memoryRailOpen ? 'Hide saved memory' : 'Show saved memory'}
               aria-controls="memory-panel"
-              aria-expanded=${this.memoryPanelOpen}
+              aria-expanded=${memoryRailOpen}
               title="Saved memory"
               @click=${this.toggleMemoryPanel}
             >
               <span class="material-symbols-outlined">database</span>
             </button>
+            ${this.canManageDirectiveSources
+              ? html`<button
+                  class="header-button"
+                  type="button"
+                  aria-label=${sourceRailOpen
+                    ? 'Hide source documents'
+                    : 'Show source documents'}
+                  aria-controls="source-documents-panel"
+                  aria-expanded=${sourceRailOpen}
+                  title="Source documents"
+                  @click=${this.toggleSourceDocumentsPanel}
+                >
+                  <span class="material-symbols-outlined">upload_file</span>
+                </button>`
+              : nothing}
           </div>
         </header>
 
@@ -1150,7 +1368,7 @@ export class NativeApp extends LitElement {
           </section>
 
           <memory-rail
-            .open=${this.memoryPanelOpen}
+            .open=${memoryRailOpen}
             .memories=${this.memories}
             .searchResults=${this.searchResults}
             .selectedMemory=${this.selectedMemory}
@@ -1158,6 +1376,23 @@ export class NativeApp extends LitElement {
             .query=${this.memoryQuery}
             .actions=${this.memoryActions}
           ></memory-rail>
+          ${this.canManageDirectiveSources
+            ? html`<source-documents-rail
+                .open=${sourceRailOpen}
+                .canManage=${this.canManageDirectiveSources}
+                .documents=${this.directiveSources}
+                .status=${this.directiveSourcesStatus}
+                .uploadStatus=${this.directiveSourceUploadStatus}
+                .uploadProgress=${this.directiveSourceUploadProgress}
+                .uploadError=${this.directiveSourceUploadError}
+                .deletingFilename=${this.directiveSourceDeletingFilename}
+                .deleting=${this.directiveSourceDeleting}
+                .deleteError=${this.directiveSourceDeleteError}
+                .nextCursor=${this.directiveSourcesNextCursor}
+                .loadingMore=${this.directiveSourceListLoading}
+                .actions=${this.sourceDocumentsActions}
+              ></source-documents-rail>`
+            : nothing}
         </div>
 
         ${this.sidebarOpen
@@ -1172,7 +1407,9 @@ export class NativeApp extends LitElement {
           ? html`<button
             class="panel-scrim memory-scrim"
             type="button"
-            aria-label="Close saved memory"
+            aria-label=${this.rightRailMode === 'sources'
+              ? 'Close source documents'
+              : 'Close saved memory'}
             @click=${() => (this.memoryPanelOpen = false)}
           ></button>`
           : nothing}
@@ -1280,6 +1517,10 @@ export class NativeApp extends LitElement {
     const apiEmail = this.me?.email;
     if (typeof apiEmail === 'string' && apiEmail.trim()) return apiEmail;
     return this.authSession?.username || null;
+  }
+
+  private get canManageDirectiveSources(): boolean {
+    return this.me?.can_manage_directive_sources === true;
   }
 
 }

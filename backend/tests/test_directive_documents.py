@@ -5,7 +5,12 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from unittest.mock import patch
 
-from directive_contracts import DirectiveManifest
+from directive_contracts import (
+    DirectiveArtifactLocators,
+    DirectiveManifest,
+    DirectiveSummary,
+    PublishedDirectiveVersion,
+)
 from fastapi import HTTPException
 
 from agent_memory_backend import server
@@ -28,49 +33,73 @@ def _manifest(**overrides) -> DirectiveManifest:
         "directive_id": _DIRECTIVE_ID,
         "directive_version_id": _VERSION_ID,
         "source_hash": _HASH,
+        "artifact_generation_id": _HASH,
         "total_pages": 4,
         "total_tokens": 100,
-        "canonical_blob_name": (
-            f"directives/{_DIRECTIVE_ID}/{_VERSION_ID}/{_HASH}/document.md"
-        ),
-        "source_blob_name": (
-            f"directives/{_DIRECTIVE_ID}/{_VERSION_ID}/{_HASH}/source.pdf"
-        ),
-        "summary_blob_name": (
-            f"directives/{_DIRECTIVE_ID}/{_VERSION_ID}/{_HASH}/summary.json"
-        ),
-        "manifest_blob_name": (
-            f"directives/{_DIRECTIVE_ID}/{_VERSION_ID}/{_HASH}/manifest.json"
-        ),
         "sections": [],
     }
     values.update(overrides)
     return DirectiveManifest(**values)
 
 
+def _bundle() -> PublishedDirectiveVersion:
+    return PublishedDirectiveVersion(
+        id=f"version:{_VERSION_ID}",
+        directive_id=_DIRECTIVE_ID,
+        directive_version_id=_VERSION_ID,
+        version_label="1.0",
+        title="Company Car Driver Safety Requirements",
+        status="published",
+        is_current=True,
+        effective_from="2025-01-01",
+        source_filename=(
+            "30336958-company-car-driver-safety-requirements-v1.pdf"
+        ),
+        source_hash=_HASH,
+        processing_hash="b" * 64,
+        artifact_generation_id=_HASH,
+        manifest=_manifest(),
+        summary=DirectiveSummary(
+            directive_id=_DIRECTIVE_ID,
+            directive_version_id=_VERSION_ID,
+            source_hash=_HASH,
+            summary="Summary",
+            covered_section_ids=[],
+            total_section_count=0,
+            input_token_count=0,
+            strategy="full_document",
+            model_deployment="test",
+        ),
+        artifacts=DirectiveArtifactLocators(
+            canonical_blob_name=(
+                f"directives/{_DIRECTIVE_ID}/{_VERSION_ID}/"
+                f"{_HASH}/document.md"
+            ),
+            source_blob_name=(
+                f"directives/{_DIRECTIVE_ID}/{_VERSION_ID}/"
+                f"{_HASH}/source.pdf"
+            ),
+        ),
+        section_content={},
+        run_id="test-run",
+        published_at="2026-07-25T12:00:00Z",
+    )
+
+
 class _Catalog:
     def __init__(
         self,
         *,
-        version: dict | None = None,
-        manifest: DirectiveManifest | None = None,
+        bundle: PublishedDirectiveVersion | None = None,
     ) -> None:
-        self.version = version if version is not None else {
-            "directive_id": _DIRECTIVE_ID,
-            "directive_version_id": _VERSION_ID,
-            "source_hash": _HASH,
-        }
-        self.manifest = manifest if manifest is not None else _manifest()
-        self.version_requests: list[tuple[str, str]] = []
-        self.manifest_requests: list[tuple[str, str]] = []
+        self.bundle = bundle if bundle is not None else _bundle()
+        self.bundle_requests: list[tuple[str, str]] = []
 
-    async def get_version_record(self, directive_id: str, version_id: str):
-        self.version_requests.append((directive_id, version_id))
-        return self.version
-
-    async def get_manifest(self, directive_id: str, version_id: str):
-        self.manifest_requests.append((directive_id, version_id))
-        return self.manifest
+    async def get_published_version(
+        self, directive_id: str, version_id: str
+    ):
+        self.bundle_requests.append((directive_id, version_id))
+        return self.bundle
 
     @staticmethod
     def public_version(_version: dict) -> dict:
@@ -120,10 +149,10 @@ class DirectiveDocumentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(document.total_pages, 4)
         self.assertEqual(
             artifacts.text_names,
-            [catalog.manifest.canonical_blob_name],
+            [catalog.bundle.artifacts.canonical_blob_name],
         )
         self.assertEqual(
-            catalog.version_requests,
+            catalog.bundle_requests,
             [(_DIRECTIVE_ID, _VERSION_ID)],
         )
 
@@ -140,25 +169,37 @@ class DirectiveDocumentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body, b"%PDF-content")
         self.assertEqual(
             artifacts.stream_names,
-            [catalog.manifest.source_blob_name],
+            [catalog.bundle.artifacts.source_blob_name],
+        )
+        self.assertEqual(
+            catalog.bundle_requests,
+            [(_DIRECTIVE_ID, _VERSION_ID)],
         )
 
     async def test_missing_version_does_not_read_artifacts(self) -> None:
         catalog = _Catalog()
-        catalog.version = None
+        catalog.bundle = None
         artifacts = _Artifacts()
         service = DirectiveDocumentService(catalog, artifacts)
 
         document = await service.get_document(_DIRECTIVE_ID, _VERSION_ID)
 
         self.assertIsNone(document)
-        self.assertEqual(catalog.manifest_requests, [])
+        self.assertEqual(
+            catalog.bundle_requests,
+            [(_DIRECTIVE_ID, _VERSION_ID)],
+        )
         self.assertEqual(artifacts.text_names, [])
 
     async def test_rejects_mismatched_manifest_identity(self) -> None:
-        catalog = _Catalog(
-            manifest=_manifest(directive_version_id="30336958:v2")
+        invalid_bundle = _bundle().model_copy(
+            update={
+                "manifest": _manifest(
+                    directive_version_id="30336958:v2"
+                )
+            }
         )
+        catalog = _Catalog(bundle=invalid_bundle)
         service = DirectiveDocumentService(catalog, _Artifacts())
 
         with self.assertRaises(DirectiveDataUnavailable):

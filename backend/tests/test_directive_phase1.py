@@ -758,7 +758,7 @@ class DirectiveFeatureBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(AgentType.DIRECTIVE_RAG, components)
         get_settings.cache_clear()
 
-    async def test_directive_failure_is_degraded_not_app_wide_unready(
+    async def test_directive_data_failure_blocks_enabled_agent_readiness(
         self,
     ) -> None:
         services = BackendServices.build()
@@ -771,7 +771,7 @@ class DirectiveFeatureBoundaryTests(unittest.IsolatedAsyncioTestCase):
             settings = get_settings()
         readiness = await services.readiness(settings)
 
-        self.assertEqual(readiness["status"], "ready")
+        self.assertEqual(readiness["status"], "not_ready")
         self.assertEqual(
             readiness["degraded_dependencies"],
             [
@@ -782,6 +782,12 @@ class DirectiveFeatureBoundaryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(
             readiness["dependencies"]["directive_hosted_maf"]["required"]
+        )
+        self.assertTrue(
+            readiness["dependencies"]["directive_catalog"]["required"]
+        )
+        self.assertTrue(
+            readiness["dependencies"]["directive_content"]["required"]
         )
         get_settings.cache_clear()
 

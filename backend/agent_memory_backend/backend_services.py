@@ -23,9 +23,11 @@ from .conversation_memory import ConversationMemoryStore
 from .conversation_registry import ConversationRegistry
 from .directive_artifacts import DirectiveArtifactRepository
 from .directive_catalog import DirectiveCatalogRepository
+from .directive_content import DirectiveContentRepository
 from .directive_documents import DirectiveDocumentService
 from .directive_mandates import DirectiveMandateRepository
 from .directive_search import DirectiveSearchRepository
+from .directive_sources import DirectiveSourceRepository
 from .directive_tools import DirectiveToolExecutor
 from .foundry_hosted_maf_runtime import FoundryHostedMafRuntime
 from .foundry_iq_health import FoundryIqHealthProbe
@@ -69,10 +71,12 @@ class BackendServices:
     profile_agent: ProfileAgent
     tool_executor: ToolExecutor
     directive_catalog: DirectiveCatalogRepository
+    directive_content: DirectiveContentRepository
     directive_artifacts: DirectiveArtifactRepository
     directive_documents: DirectiveDocumentService
     directive_search: DirectiveSearchRepository
     directive_mandates: DirectiveMandateRepository
+    directive_sources: DirectiveSourceRepository
     directive_tool_executor: DirectiveToolExecutor
     tool_executors: dict[AgentType, Any]
     runtime_registry: dict[AgentType, AgentRuntime]
@@ -94,13 +98,15 @@ class BackendServices:
         profile_store = UserProfileMemoryStore()
         memory_store = ConversationMemoryStore()
         directive_catalog = DirectiveCatalogRepository()
+        directive_content = DirectiveContentRepository()
         directive_artifacts = DirectiveArtifactRepository()
         directive_search = DirectiveSearchRepository()
         directive_mandates = DirectiveMandateRepository()
+        directive_sources = DirectiveSourceRepository()
         tool_executor = ToolExecutor(memory_store, profile_store)
         directive_tool_executor = DirectiveToolExecutor(
             directive_catalog,
-            directive_artifacts,
+            directive_content,
             directive_search,
             directive_mandates,
         )
@@ -115,6 +121,7 @@ class BackendServices:
             profile_agent=ProfileAgent(),
             tool_executor=tool_executor,
             directive_catalog=directive_catalog,
+            directive_content=directive_content,
             directive_artifacts=directive_artifacts,
             directive_documents=DirectiveDocumentService(
                 directive_catalog,
@@ -122,6 +129,7 @@ class BackendServices:
             ),
             directive_search=directive_search,
             directive_mandates=directive_mandates,
+            directive_sources=directive_sources,
             directive_tool_executor=directive_tool_executor,
             tool_executors={
                 AgentType.AGENT_FRAMEWORK: tool_executor,
@@ -146,9 +154,11 @@ class BackendServices:
             ("cosmos_memory", self.memory_store),
             ("foundry_iq", self.foundry_iq_health),
             ("directive_catalog", self.directive_catalog),
+            ("directive_content", self.directive_content),
             ("directive_artifacts", self.directive_artifacts),
             ("directive_search", self.directive_search),
             ("directive_mandates", self.directive_mandates),
+            ("directive_sources", self.directive_sources),
         )
 
     async def start(self, settings: Settings) -> None:
@@ -300,10 +310,16 @@ class BackendServices:
     async def readiness(self, settings: Settings) -> dict[str, Any]:
         checks = self._readiness_checks(settings)
         optional_checks = {"cosmos_memory"} if settings.cosmos_configured else set()
-        if getattr(settings, "directive_data_configured", False):
+        if getattr(settings, "directive_source_configured", False):
+            optional_checks.add("directive_sources")
+        if (
+            getattr(settings, "directive_data_configured", False)
+            and not settings.directive_agent_enabled
+        ):
             optional_checks.update(
                 {
                     "directive_catalog",
+                    "directive_content",
                     "directive_artifacts",
                     "directive_search",
                     "directive_mandates",
@@ -359,6 +375,7 @@ class BackendServices:
         if agent_type is AgentType.DIRECTIVE_RAG:
             return bool(
                 self.directive_tool_executor.enabled
+                and self.directive_artifacts.enabled
                 and getattr(
                     settings,
                     "directive_hosted_agent_principal_ids",
@@ -472,11 +489,17 @@ class BackendServices:
             checks["cosmos_memory"] = self.memory_store.health_check
         if settings.search_configured:
             checks["foundry_iq"] = self.foundry_iq_health.health_check
-        if getattr(settings, "directive_data_configured", False):
+        if (
+            settings.directive_agent_enabled
+            or getattr(settings, "directive_data_configured", False)
+        ):
             checks["directive_catalog"] = self.directive_catalog.health_check
+            checks["directive_content"] = self.directive_content.health_check
             checks["directive_artifacts"] = self.directive_artifacts.health_check
             checks["directive_search"] = self.directive_search.health_check
             checks["directive_mandates"] = self.directive_mandates.health_check
+        if getattr(settings, "directive_source_configured", False):
+            checks["directive_sources"] = self.directive_sources.health_check
         if settings.foundry_prompt_enabled:
             runtime = self.runtime_registry.get(AgentType.FOUNDRY_PROMPT)
             checks["foundry_prompt"] = (

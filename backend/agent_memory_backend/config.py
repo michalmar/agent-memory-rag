@@ -94,14 +94,18 @@ class Settings:
     directive_agent_visible: bool
     directive_agent_release_id: str
     directive_model_deployment: str
-    directive_search_kb: str
-    directive_search_knowledge_source: str
+    directive_search_index: str
     directive_search_api_version: str
     directive_cosmos_database: str
     directive_catalog_container: str
+    directive_content_container: str
     directive_mandates_container: str
     directive_blob_endpoint: str
     directive_blob_container: str
+    directive_source_container: str
+    directive_source_prefix: str
+    directive_source_max_upload_bytes: int
+    directive_source_manage_role: str
     directive_max_content_tokens: int
     directive_max_sections_per_call: int
     directive_max_search_results: int
@@ -196,11 +200,8 @@ class Settings:
             directive_model_deployment=_get(
                 "DIRECTIVE_MODEL_DEPLOYMENT", "gpt-5.6-sol"
             ),
-            directive_search_kb=_get(
-                "DIRECTIVE_SEARCH_KB", "directive-kb-v1"
-            ),
-            directive_search_knowledge_source=_get(
-                "DIRECTIVE_SEARCH_KNOWLEDGE_SOURCE", "directive-chunks-ks-v1"
+            directive_search_index=_get(
+                "DIRECTIVE_SEARCH_INDEX", "directive-chunks-v1"
             ),
             directive_search_api_version=_get(
                 "DIRECTIVE_SEARCH_API_VERSION", "2026-04-01"
@@ -211,12 +212,28 @@ class Settings:
             directive_catalog_container=_get(
                 "DIRECTIVE_CATALOG_CONTAINER", "catalog"
             ),
+            directive_content_container=_get(
+                "DIRECTIVE_CONTENT_CONTAINER", "directive_content"
+            ),
             directive_mandates_container=_get(
                 "DIRECTIVE_MANDATES_CONTAINER", "user_mandates"
             ),
             directive_blob_endpoint=_get("DIRECTIVE_BLOB_ENDPOINT"),
             directive_blob_container=_get(
                 "DIRECTIVE_BLOB_CONTAINER", "directive-artifacts"
+            ),
+            directive_source_container=_get(
+                "DIRECTIVE_SOURCE_CONTAINER", "directive-source"
+            ),
+            directive_source_prefix=_get("DIRECTIVE_SOURCE_PREFIX"),
+            directive_source_max_upload_bytes=_get_int(
+                "DIRECTIVE_SOURCE_MAX_UPLOAD_BYTES",
+                50 * 1024 * 1024,
+                maximum=500 * 1024 * 1024,
+            ),
+            directive_source_manage_role=_get(
+                "DIRECTIVE_SOURCE_MANAGE_ROLE",
+                "DirectiveSource.Manage",
             ),
             directive_max_content_tokens=_get_int(
                 "DIRECTIVE_MAX_CONTENT_TOKENS",
@@ -340,12 +357,19 @@ class Settings:
             self.cosmos_endpoint
             and self.directive_cosmos_database
             and self.directive_catalog_container
+            and self.directive_content_container
             and self.directive_mandates_container
             and self.search_endpoint
-            and self.directive_search_kb
-            and self.directive_search_knowledge_source
+            and self.directive_search_index
             and self.directive_blob_endpoint
             and self.directive_blob_container
+        )
+
+    @property
+    def directive_source_configured(self) -> bool:
+        return bool(
+            self.directive_blob_endpoint
+            and self.directive_source_container
         )
 
     def resolve_llm_mode(self) -> str:

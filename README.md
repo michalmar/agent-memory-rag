@@ -32,12 +32,21 @@ flowchart LR
     B -->|Application UAMI| D[Directive Hosted MAF Agent]
     P --> IQ[Foundry IQ]
     H --> IQ
+    IQ --> S[Public Entra-only Azure AI Search]
     H -->|AgenticIdentityToken / Remote MCP| F
     D -->|Agent Identity / directive gateway| F
     F -->|Authenticated MCP and restricted API proxy| B
     B --> C[(Private Cosmos DB: history, profile, semantic memory)]
-    B --> R[(Private directive catalog and artifacts)]
+    B --> R[(Private Cosmos DB: directive catalog and content)]
+    B --> A[(Private Blob: immutable directive artifacts)]
+    B -->|Source-manager UAMI| X[(Private Blob: directive source PDFs)]
+    J[Manual directive ingestion job] -->|Reader UAMI| X
+    J --> A
+    J --> R
+    J --> S
+    B -->|Direct hybrid directive queries| S
     B --> M[Active Foundry Models]
+    S -->|Vectorization and support IQ planning| M
     P --> O[Project Application Insights]
     H --> O
     B -->|UAMI / AMPLS| O
@@ -59,8 +68,10 @@ channel tools.
 - **Backend** (`backend/`) - FastAPI application with AG-UI SSE chat, owner-scoped
   conversation/profile/memory APIs, remote Foundry adapters, an app-role-protected
   stateless MCP endpoint, a session-bound Hosted tool gateway, privacy-safe
-  telemetry, protected exact-version directive document/PDF endpoints, and
-  bounded liveness/readiness endpoints.
+  telemetry, Cosmos-authoritative directive tools, deterministic direct hybrid
+  directive Search with cross-intent RRF, protected exact-version directive
+  document/PDF endpoints, a role-protected directive source manager, and bounded
+  liveness/readiness endpoints.
 - **Agent contracts** (`agent_contracts/`) - separate versioned prompts, strict
   application-tool schemas, runtime state, citation/result envelopes, and
   normalized agent events.
@@ -82,14 +93,15 @@ channel tools.
 - **Frontend** (`frontend/`) - Vite + Lit SPA with a login-first Entra gate,
   immutable agent selection, Markdown/citation streaming, an accessible
   Markdown-first directive document viewer with authenticated original-PDF
-  loading, and a constrained A2UI subset for internal tool cards.
+  loading, a metadata-only directive source rail for approved operators, and a
+  constrained A2UI subset for internal tool cards.
 - **Infrastructure** (`infra/`) - Terraform for Foundry Basic Setup, Container Apps,
-  Search, Cosmos DB, ACR, private endpoints, monitoring, managed
+  Search, Cosmos DB catalog/content containers, ACR, private endpoints, monitoring, managed
   identities, and least-privilege RBAC.
 - **Direct Foundry release** (`scripts/release_foundry_assets.sh`) - configures
   Search/Foundry IQ and publishes the Prompt Agent without setup containers.
 
-### Directive source documents
+### Published directive documents
 
 Directive entries in an answer's **Documents** section open the exact published
 version in a responsive side drawer. The default **Document** tab renders the
@@ -116,6 +128,32 @@ disabled, and the browser receives neither a SAS token nor direct Blob
 coordinates. Document entries restored from conversation history retain the same
 viewer behavior.
 
+Published directive data has one runtime authority per artifact:
+
+| Data | Runtime authority | Derived or supporting store |
+| --- | --- | --- |
+| Operator-managed ingestion corpus | Private Blob `directive-source` container | Input only; never read by agents |
+| Version metadata, manifest, summary, and private document locators | Cosmos `catalog` version bundle | None |
+| Ordered section text | Immutable Cosmos `directive_content` items | Azure AI Search is a derived retrieval projection |
+| Complete canonical Markdown and published PDF copy | Private Blob `directive-artifacts` container | Located through the published version bundle |
+
+Legacy catalog records are not read or migrated. After this schema change,
+existing directive versions must be republished by ingestion.
+Failed ingestion inputs retain the existing private quarantine artifacts; they
+are not runtime content authorities.
+
+Approved operators with the `DirectiveSource.Manage` Entra application role can
+open the **Sources** rail to list filename, size, and last-modified metadata,
+upload a uniquely named PDF, or confirm deletion. Uploads are create-only and use
+the `<eight-digit-id>-<name>-v<number>.pdf` contract. The rail does not preview,
+download, rename, overwrite, or expose Blob coordinates. Upload and deletion do
+not trigger ingestion, and deleting a source leaves previously published data
+untouched.
+
+Production ingestion reads the current `directive-source` blobs only when the
+manual job runs. Local development keeps folder-based ingestion through
+`DIRECTIVE_SOURCE_KIND=local`.
+
 ## Five memory layers
 
 1. **Session memory** - Foundry conversations plus bounded in-memory runtime
@@ -125,8 +163,8 @@ viewer behavior.
 3. **Semantic conversation memory** - owner-partitioned Cosmos DB documents with
    3,072-dimensional cosine vector search.
 4. **User profile memory** - owner-partitioned Cosmos DB profile documents.
-5. **Enterprise knowledge** - Foundry IQ backed by Azure AI Search knowledge
-   sources and returned citations.
+5. **Enterprise knowledge** - Foundry IQ for support knowledge plus backend-owned
+   direct hybrid Azure AI Search retrieval for directive evidence and citations.
 
 The backend is intentionally pinned to one replica because Redis-based distributed
 session coordination is not part of this implementation.
@@ -140,8 +178,9 @@ session coordination is not part of this implementation.
 | Foundry agent account/project and models | Public only | Entra/RBAC only; local auth disabled |
 | Azure AI Search / Foundry IQ | Public only | Entra/RBAC only; local auth disabled |
 | Azure Container Registry | Public plus private endpoint | Entra/RBAC only; admin and anonymous pull disabled |
-| Cosmos DB | Private endpoint only | Application UAMI; local auth disabled |
-| Directive artifact Storage | Private endpoint only | Backend UAMI reads published Markdown/PDF artifacts; shared keys and public Blob access disabled |
+| Cosmos DB | Private endpoint only | Application UAMI reads directive bundles/content and user data; local auth disabled |
+| Directive source Storage | Private endpoint only | Ingestion UAMI reads; backend UAMI lists, creates, and deletes; browser and Hosted identities have no data-plane role |
+| Directive artifact Storage | Private endpoint only | Backend UAMI reads complete canonical Markdown and published PDFs; ingestion writes immutable and quarantine artifacts; shared keys and public Blob access disabled |
 | Application Insights / Log Analytics | Public Foundry platform path plus private AMPLS path for ACA | Foundry project connection; backend UAMI |
 
 The public Foundry, Search, and ACR endpoints are required by non-VNet-injected
@@ -279,13 +318,22 @@ The script:
 
 - exposes the delegated `access_as_user` scope;
 - defines the `AgentTools.Invoke` application role;
+- defines the user-assignable `DirectiveSource.Manage` application role;
 - configures v2 access tokens and SPA redirect URIs;
 - preauthorizes Azure CLI for test-token acquisition;
 - prints the tenant and client values required by Terraform.
 
+The first run creates the app. Later updates must pass the printed client ID
+explicitly with `--app-id`; the script never reuses an application based only on
+its non-unique display name.
+
 For v2 access tokens, configure the backend user-token audience as the client-ID
 GUID. Hosted identity token acquisition still uses
 `api://<client-id>/.default`.
+
+Assign `DirectiveSource.Manage` to approved users or groups on the app's
+Enterprise Application. The delegated scope alone does not authorize source
+management.
 
 Example authenticated request:
 
@@ -303,13 +351,17 @@ curl -H "Authorization: Bearer $TOKEN" \
 1. Configure `infra/terraform.tfvars` from
    `infra/terraform.tfvars.example`.
 2. Provision Azure resources and RBAC with Terraform.
-3. Run `scripts/release_foundry_assets.sh all` to configure Search/Foundry IQ and
+3. Create or update the Entra app roles, assign `DirectiveSource.Manage` to
+   approved operators, and deploy the backend/frontend application images.
+4. Upload the initial PDFs through the **Sources** rail.
+5. Run `scripts/deploy_directive_ingestion.sh <release>` to build the ingestion
+   image, verify exact source-reader/artifact-contributor roles, run preflight,
+   publish the current source corpus, and verify the resulting state.
+6. Run `scripts/release_foundry_assets.sh all` to configure Search/Foundry IQ and
    publish the native Prompt Agent directly.
-4. Build backend, frontend, and selected Hosted MAF images with ACR Tasks; local
-   Docker is not required.
-5. Deploy each selected Hosted MAF image to the Foundry project through its azd
-   project.
-6. Configure the generated Hosted Agent identity, including the application MCP
+7. Build and deploy each selected Hosted MAF image to the Foundry project through
+   its azd project; local Docker is not required.
+8. Configure the generated Hosted Agent identity, including the application MCP
    and Agent 365 roles plus the MCP connection ID:
 
    ```bash
@@ -321,7 +373,7 @@ curl -H "Authorization: Bearer $TOKEN" \
    ```
 
    This step requires Application Administrator or Global Administrator.
-7. Deploy backend/frontend images and enable agents only after readiness and live
+9. Deploy backend/frontend images and enable agents only after readiness and live
    acceptance pass.
 
 `scripts/build_hosted_agent_image.sh` is the single authoritative build path for

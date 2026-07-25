@@ -26,11 +26,22 @@ def _parser() -> argparse.ArgumentParser:
     daily = subparsers.add_parser("run-daily")
     daily.add_argument("--source", type=Path)
     daily.add_argument("--mandates", type=Path)
+    cleanup = subparsers.add_parser("cleanup-legacy-artifacts")
+    cleanup.add_argument(
+        "--execute",
+        dest="confirmation_token",
+        metavar="CONFIRMATION_TOKEN",
+    )
     return parser
 
 
 async def _run(args: argparse.Namespace) -> None:
     config = IngestionConfig.from_environment()
+    source_override = getattr(args, "source", None)
+    if source_override is not None and config.source_kind != "local":
+        raise ValueError(
+            "--source cannot be used when DIRECTIVE_SOURCE_KIND=azure_blob"
+        )
     runner = DirectiveIngestionRunner(config)
     try:
         if args.command == "preflight":
@@ -65,6 +76,14 @@ async def _run(args: argparse.Namespace) -> None:
             print(
                 format_result(
                     await runner.run_daily(args.source, args.mandates)
+                )
+            )
+        elif args.command == "cleanup-legacy-artifacts":
+            print(
+                format_result(
+                    await runner.cleanup_legacy_artifacts(
+                        args.confirmation_token
+                    )
                 )
             )
         else:

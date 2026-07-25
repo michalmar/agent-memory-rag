@@ -1,25 +1,61 @@
 """Shared directive data contracts."""
 
+from .artifacts import (
+    PUBLISHED_BUNDLE_MAX_BYTES,
+    SECTION_CONTENT_MAX_BYTES,
+    build_section_content_items,
+    calculate_artifact_generation_id,
+    canonical_json_bytes,
+    canonical_json_hash,
+    section_content_item_id,
+    serialized_json_size,
+)
 from .models import (
+    DirectiveArtifactLocators,
     DirectiveChunk,
     DirectiveManifest,
     DirectiveMetadata,
     DirectiveRelation,
     DirectiveSection,
+    DirectiveSectionContent,
+    DirectiveSectionContentDescriptor,
     DirectiveSummary,
     MandateAssignment,
     MandateSnapshot,
+    PublishedDirectiveVersion,
     ReviewFinding,
+)
+from .source_files import (
+    DIRECTIVE_SOURCE_FILENAME_PATTERN,
+    DirectiveSourceIdentity,
+    normalize_directive_source_prefix,
+    parse_directive_source_filename,
 )
 
 __all__ = [
+    "PUBLISHED_BUNDLE_MAX_BYTES",
+    "SECTION_CONTENT_MAX_BYTES",
+    "DirectiveArtifactLocators",
     "DirectiveChunk",
     "DirectiveManifest",
     "DirectiveMetadata",
     "DirectiveRelation",
     "DirectiveSection",
+    "DirectiveSectionContent",
+    "DirectiveSectionContentDescriptor",
     "DirectiveSummary",
+    "DirectiveSourceIdentity",
+    "DIRECTIVE_SOURCE_FILENAME_PATTERN",
     "MandateAssignment",
     "MandateSnapshot",
+    "PublishedDirectiveVersion",
     "ReviewFinding",
+    "build_section_content_items",
+    "calculate_artifact_generation_id",
+    "canonical_json_bytes",
+    "canonical_json_hash",
+    "normalize_directive_source_prefix",
+    "parse_directive_source_filename",
+    "section_content_item_id",
+    "serialized_json_size",
 ]

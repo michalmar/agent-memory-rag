@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import tempfile
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, BinaryIO
 from urllib.parse import quote
+from uuid import uuid4
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Path, Request
@@ -20,6 +23,10 @@ from agent_contracts import (
     AgentType,
     render_instructions,
 )
+from directive_contracts import (
+    DIRECTIVE_SOURCE_FILENAME_PATTERN,
+    parse_directive_source_filename,
+)
 from .agent_mcp import application_tools_mcp_app
 from .agent_tool_gateway import (
     AgentStateRequest,
@@ -30,7 +37,14 @@ from .agent_tool_gateway import (
     fail_agent_state_turn,
     resolve_agent_state,
 )
-from .auth import AgentCaller, User, get_agent_caller, get_current_user
+from .auth import (
+    AgentCaller,
+    User,
+    can_manage_directive_sources,
+    get_agent_caller,
+    get_current_user,
+    require_directive_source_manager,
+)
 from .backend_services import BackendServices, visible_agent_types
 from .chat_service import ChatTurnService
 from .config import get_settings
@@ -43,7 +57,15 @@ from .conversation_memory import (
 )
 from .directive_documents import DirectiveDocumentResponse
 from .directive_errors import DirectiveDataUnavailable
-from .telemetry import configure_telemetry
+from .directive_sources import (
+    DirectiveSourceConflict,
+    DirectiveSourceInvalid,
+    DirectiveSourceItem,
+    DirectiveSourceNotFound,
+    DirectiveSourcePage,
+    DirectiveSourceTooLarge,
+)
+from .telemetry import configure_telemetry, span
 from .user_profile_memory import public_profile
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -129,7 +151,260 @@ class ChatRequest(BaseModel):
 
 @app.get("/me")
 async def me(user: User = Depends(get_current_user)):
-    return user.to_dict()
+    result = user.to_dict()
+    result["can_manage_directive_sources"] = can_manage_directive_sources(user)
+    return result
+
+
+DirectiveSourceFilename = Annotated[
+    str,
+    Path(
+        pattern=DIRECTIVE_SOURCE_FILENAME_PATTERN,
+        max_length=255,
+    ),
+]
+_CORRELATION_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+@app.get(
+    "/directive-sources",
+    response_model=DirectiveSourcePage,
+)
+async def list_directive_sources(
+    request: Request,
+    cursor: str | None = None,
+    limit: int = 50,
+    user: User = Depends(require_directive_source_manager),
+):
+    if limit < 1 or limit > 100:
+        raise HTTPException(
+            status_code=400,
+            detail="Source page limit must be 1..100",
+        )
+    try:
+        result = await services.directive_sources.list_sources(
+            cursor=cursor,
+            limit=limit,
+        )
+    except DirectiveSourceInvalid as exc:
+        _record_source_audit(request, user, "list", result="invalid")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except DirectiveDataUnavailable as exc:
+        _record_source_audit(request, user, "list", result="unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail="Directive sources are temporarily unavailable",
+        ) from exc
+    _record_source_audit(request, user, "list", result="success")
+    return result
+
+
+@app.post(
+    "/directive-sources/upload/{filename}",
+    response_model=DirectiveSourceItem,
+    status_code=201,
+)
+async def upload_directive_source(
+    filename: DirectiveSourceFilename,
+    request: Request,
+    user: User = Depends(require_directive_source_manager),
+):
+    settings = get_settings()
+    with tempfile.SpooledTemporaryFile(
+        max_size=min(
+            settings.directive_source_max_upload_bytes,
+            4 * 1024 * 1024,
+        ),
+        mode="w+b",
+    ) as upload:
+        try:
+            size_bytes = await _spool_source_upload(
+                request,
+                upload,
+                settings.directive_source_max_upload_bytes,
+            )
+            result = await services.directive_sources.upload_source(
+                filename,
+                upload,
+                size_bytes,
+            )
+        except DirectiveSourceTooLarge as exc:
+            _record_source_audit(
+                request,
+                user,
+                "upload",
+                filename=filename,
+                result="too_large",
+            )
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        except DirectiveSourceInvalid as exc:
+            _record_source_audit(
+                request,
+                user,
+                "upload",
+                filename=filename,
+                result="invalid",
+            )
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except DirectiveSourceConflict as exc:
+            _record_source_audit(
+                request,
+                user,
+                "upload",
+                filename=filename,
+                size_bytes=size_bytes,
+                result="conflict",
+            )
+            raise HTTPException(
+                status_code=409,
+                detail="Directive source already exists",
+            ) from exc
+        except DirectiveDataUnavailable as exc:
+            _record_source_audit(
+                request,
+                user,
+                "upload",
+                filename=filename,
+                result="unavailable",
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Directive source upload is temporarily unavailable",
+            ) from exc
+    _record_source_audit(
+        request,
+        user,
+        "upload",
+        filename=filename,
+        size_bytes=result.size_bytes,
+        result="success",
+    )
+    return result
+
+
+@app.delete("/directive-sources/{filename}")
+async def delete_directive_source(
+    filename: DirectiveSourceFilename,
+    request: Request,
+    user: User = Depends(require_directive_source_manager),
+):
+    try:
+        await services.directive_sources.delete_source(filename)
+    except DirectiveSourceInvalid as exc:
+        _record_source_audit(
+            request,
+            user,
+            "delete",
+            filename=filename,
+            result="invalid",
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except DirectiveSourceNotFound as exc:
+        _record_source_audit(
+            request,
+            user,
+            "delete",
+            filename=filename,
+            result="not_found",
+        )
+        raise HTTPException(
+            status_code=404,
+            detail="Directive source not found",
+        ) from exc
+    except DirectiveDataUnavailable as exc:
+        _record_source_audit(
+            request,
+            user,
+            "delete",
+            filename=filename,
+            result="unavailable",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Directive source deletion is temporarily unavailable",
+        ) from exc
+    _record_source_audit(
+        request,
+        user,
+        "delete",
+        filename=filename,
+        result="success",
+    )
+    return {"deleted": filename}
+
+
+async def _spool_source_upload(
+    request: Request,
+    destination: BinaryIO,
+    max_bytes: int,
+) -> int:
+    raw_content_length = request.headers.get("content-length")
+    if raw_content_length:
+        try:
+            content_length = int(raw_content_length)
+        except ValueError as exc:
+            raise DirectiveSourceInvalid(
+                "Upload Content-Length is invalid"
+            ) from exc
+        if content_length < 0:
+            raise DirectiveSourceInvalid(
+                "Upload Content-Length is invalid"
+            )
+        if content_length > max_bytes:
+            raise DirectiveSourceTooLarge(
+                f"Directive source exceeds {max_bytes} bytes"
+            )
+
+    total = 0
+    signature = b""
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > max_bytes:
+            raise DirectiveSourceTooLarge(
+                f"Directive source exceeds {max_bytes} bytes"
+            )
+        if len(signature) < 4:
+            signature = (signature + chunk)[:4]
+        destination.write(chunk)
+    if not signature.startswith(b"%PDF"):
+        raise DirectiveSourceInvalid(
+            "Directive source content is not a PDF"
+        )
+    destination.seek(0)
+    return total
+
+
+def _record_source_audit(
+    request: Request,
+    user: User,
+    operation: str,
+    *,
+    filename: str | None = None,
+    size_bytes: int | None = None,
+    result: str,
+) -> None:
+    correlation_id = request.headers.get("X-Correlation-ID", "")
+    if _CORRELATION_ID.fullmatch(correlation_id) is None:
+        correlation_id = uuid4().hex
+    attributes: dict[str, str | int] = {
+        "audit.actor_id": user.user_id,
+        "audit.operation": operation,
+        "audit.result": result,
+        "trace.correlation_id": correlation_id,
+    }
+    if filename is not None:
+        try:
+            attributes["audit.filename"] = (
+                parse_directive_source_filename(filename).filename
+            )
+        except ValueError:
+            attributes["audit.filename"] = "invalid"
+    if size_bytes is not None:
+        attributes["audit.byte_size"] = size_bytes
+    with span("directive_source.audit", attributes):
+        pass
 
 
 DirectiveId = Annotated[str, Path(pattern=r"^\d{8}$")]

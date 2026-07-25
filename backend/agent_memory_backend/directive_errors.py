@@ -1,10 +1,10 @@
-"""Explicit failures for read-only directive data access."""
+"""Explicit failures for directive data-plane access."""
 
 from __future__ import annotations
 
 
 class DirectiveDataUnavailable(RuntimeError):
-    """A required directive data plane could not complete a read."""
+    """A required directive data plane could not complete an operation."""
 
 
 class DirectiveContentTooLarge(RuntimeError):

@@ -13,7 +13,7 @@ RUN pip install --upgrade pip \
     && rm -rf /build
 
 WORKDIR /app
-COPY setup/directives /app/fixtures
+COPY setup/directives/mandatory /app/fixtures/mandatory
 
 RUN groupadd --gid 10001 ingestion \
     && useradd --uid 10001 --gid ingestion --no-create-home ingestion

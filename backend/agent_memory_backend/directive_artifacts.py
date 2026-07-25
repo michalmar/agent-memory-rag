@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -69,19 +68,6 @@ class DirectiveArtifactRepository:
             raise DirectiveDataUnavailable(
                 "Directive text artifact could not be read"
             ) from exc
-
-    async def read_json(self, catalog_blob_name: str) -> dict[str, Any]:
-        try:
-            value = json.loads(await self.read_text(catalog_blob_name))
-        except json.JSONDecodeError as exc:
-            raise DirectiveDataUnavailable(
-                "Directive JSON artifact is invalid"
-            ) from exc
-        if not isinstance(value, dict):
-            raise DirectiveDataUnavailable(
-                "Directive JSON artifact must be an object"
-            )
-        return value
 
     async def stream_bytes(
         self,

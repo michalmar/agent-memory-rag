@@ -14,6 +14,11 @@ locals {
   cosmos_data_contributor_role_definition_id = (
     "${azurerm_cosmosdb_account.main.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002"
   )
+  directive_source_prefix = (
+    trim(var.directive_source_prefix, " /") == ""
+    ? ""
+    : "${trim(var.directive_source_prefix, " /")}/"
+  )
 }
 
 # This deployment already exists and was validated in Phase 0. The import block
@@ -43,28 +48,6 @@ resource "azurerm_cognitive_deployment" "directive" {
 import {
   to = azurerm_cognitive_deployment.directive
   id = "/subscriptions/${var.subscription_id}/resourceGroups/${var.resource_group_name}/providers/Microsoft.CognitiveServices/accounts/${local.names.foundry_agents}/deployments/${var.directive_model_name}"
-}
-
-resource "azurerm_cognitive_deployment" "directive_knowledge_planner" {
-  name                 = var.directive_knowledge_model_deployment
-  cognitive_account_id = azapi_resource.foundry_agents.id
-
-  model {
-    format  = "OpenAI"
-    name    = var.directive_knowledge_model_name
-    version = var.directive_knowledge_model_version
-  }
-
-  sku {
-    name     = "GlobalStandard"
-    capacity = var.directive_knowledge_model_capacity
-  }
-
-  version_upgrade_option = "NoAutoUpgrade"
-
-  lifecycle {
-    prevent_destroy = true
-  }
 }
 
 resource "azurerm_storage_account" "directive_artifacts" {
@@ -110,6 +93,18 @@ resource "azurerm_storage_account" "directive_artifacts" {
 resource "azapi_resource" "directive_artifacts_container" {
   type      = "Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01"
   name      = var.directive_artifacts_container_name
+  parent_id = "${azurerm_storage_account.directive_artifacts.id}/blobServices/default"
+
+  body = {
+    properties = {
+      publicAccess = "None"
+    }
+  }
+}
+
+resource "azapi_resource" "directive_source_container" {
+  type      = "Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01"
+  name      = var.directive_source_container_name
   parent_id = "${azurerm_storage_account.directive_artifacts.id}/blobServices/default"
 
   body = {
@@ -193,6 +188,27 @@ resource "azurerm_cosmosdb_sql_container" "directive_catalog" {
   partition_key_version = 2
 }
 
+resource "azurerm_cosmosdb_sql_container" "directive_content" {
+  name                  = var.directive_content_container_name
+  resource_group_name   = azurerm_resource_group.main.name
+  account_name          = azurerm_cosmosdb_account.main.name
+  database_name         = azurerm_cosmosdb_sql_database.directives.name
+  partition_key_paths   = ["/directive_version_id"]
+  partition_key_version = 2
+
+  indexing_policy {
+    indexing_mode = "consistent"
+
+    included_path {
+      path = "/*"
+    }
+
+    excluded_path {
+      path = "/content/?"
+    }
+  }
+}
+
 resource "azurerm_cosmosdb_sql_container" "directive_mandates" {
   name                  = var.directive_mandates_container_name
   resource_group_name   = azurerm_resource_group.main.name
@@ -223,6 +239,14 @@ resource "azurerm_cosmosdb_sql_role_assignment" "app_directive_reader" {
 resource "azurerm_role_assignment" "app_directive_blob_reader" {
   scope                            = azapi_resource.directive_artifacts_container.id
   role_definition_name             = "Storage Blob Data Reader"
+  principal_id                     = azurerm_user_assigned_identity.app.principal_id
+  principal_type                   = "ServicePrincipal"
+  skip_service_principal_aad_check = true
+}
+
+resource "azurerm_role_assignment" "app_directive_source_contributor" {
+  scope                            = azapi_resource.directive_source_container.id
+  role_definition_name             = "Storage Blob Data Contributor"
   principal_id                     = azurerm_user_assigned_identity.app.principal_id
   principal_type                   = "ServicePrincipal"
   skip_service_principal_aad_check = true

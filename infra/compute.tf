@@ -98,14 +98,18 @@ locals {
     DIRECTIVE_AGENT_VISIBLE                    = tostring(var.directive_agent_visible)
     DIRECTIVE_AGENT_RELEASE_ID                 = var.directive_agent_release_id
     DIRECTIVE_MODEL_DEPLOYMENT                 = azurerm_cognitive_deployment.directive.name
-    DIRECTIVE_SEARCH_KB                        = var.directive_search_knowledge_base_name
-    DIRECTIVE_SEARCH_KNOWLEDGE_SOURCE          = var.directive_search_knowledge_source_name
+    DIRECTIVE_SEARCH_INDEX                     = var.directive_search_index_name
     DIRECTIVE_SEARCH_API_VERSION               = "2026-04-01"
     DIRECTIVE_COSMOS_DATABASE                  = azurerm_cosmosdb_sql_database.directives.name
     DIRECTIVE_CATALOG_CONTAINER                = azurerm_cosmosdb_sql_container.directive_catalog.name
+    DIRECTIVE_CONTENT_CONTAINER                = azurerm_cosmosdb_sql_container.directive_content.name
     DIRECTIVE_MANDATES_CONTAINER               = azurerm_cosmosdb_sql_container.directive_mandates.name
     DIRECTIVE_BLOB_ENDPOINT                    = azurerm_storage_account.directive_artifacts.primary_blob_endpoint
     DIRECTIVE_BLOB_CONTAINER                   = azapi_resource.directive_artifacts_container.name
+    DIRECTIVE_SOURCE_CONTAINER                 = azapi_resource.directive_source_container.name
+    DIRECTIVE_SOURCE_PREFIX                    = local.directive_source_prefix
+    DIRECTIVE_SOURCE_MAX_UPLOAD_BYTES          = "52428800"
+    DIRECTIVE_SOURCE_MANAGE_ROLE               = "DirectiveSource.Manage"
     AGENT_GATEWAY_AUDIENCE                     = var.entra_client_id
     AGENT_GATEWAY_REQUIRED_ROLE                = "AgentTools.Invoke"
     HOSTED_AGENT_PRINCIPAL_IDS                 = join(" ", sort(tolist(var.hosted_agent_principal_ids)))
@@ -216,6 +220,10 @@ resource "azurerm_container_app" "backend" {
   lifecycle {
     ignore_changes = [template[0].container[0].image]
   }
+
+  depends_on = [
+    azurerm_role_assignment.app_directive_source_contributor,
+  ]
 }
 
 # ----------------------------------------------------------------- frontend app

@@ -181,13 +181,21 @@ class TelemetryPrivacyTests(unittest.TestCase):
         attributes = _safe_attributes(
             {
                 "agent.type": "foundry-prompt",
+                "search.retrieval_mode": "direct_hybrid",
+                "search.raw_query": "private query",
                 "prompt.content": "private prompt",
                 "user.profile": "private profile",
                 "tool.arguments": "private payload",
             }
         )
 
-        self.assertEqual(attributes, {"agent.type": "foundry-prompt"})
+        self.assertEqual(
+            attributes,
+            {
+                "agent.type": "foundry-prompt",
+                "search.retrieval_mode": "direct_hybrid",
+            },
+        )
 
     def test_span_context_closes_on_success_error_and_cancellation(self) -> None:
         from agent_memory_backend.telemetry import span

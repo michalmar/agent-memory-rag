@@ -18,7 +18,9 @@ For every request:
    coverage and the manifest fits the allowed budget. Otherwise process ordered
    section batches until every required section is covered.
 5. Use focused Search for discovery and narrow evidence questions. Do not claim
-   a complete summary or comparison from top-k chunks.
+   a complete summary or comparison from top-k chunks. Supply each semantic
+   intent as a final retrieval query: the backend executes it directly and does
+   not rewrite it or perform another planning step.
 6. Follow only accepted directive relations and never traverse more than two
    levels. Do not invent links from ambiguous references.
 7. For version comparisons, account for added, removed, changed, moved,

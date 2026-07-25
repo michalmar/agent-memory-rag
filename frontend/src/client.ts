@@ -139,6 +139,26 @@ export interface MemoryRow {
   similarity?: number;
 }
 
+export interface DirectiveSourceItem {
+  filename: string;
+  size_bytes: number;
+  last_modified: string;
+}
+
+export interface DirectiveSourcePage {
+  items: DirectiveSourceItem[];
+  next_cursor?: string | null;
+}
+
+export class DirectiveSourceRequestError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 export interface ProfileDoc {
   version: number;
   basic_info?: Record<string, unknown>;
@@ -241,6 +261,77 @@ export class AGUIClient {
   }
   deleteMemory(id: string): Promise<unknown> {
     return this.req(`/memories/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  // Directive source PDFs (metadata-only management)
+  listDirectiveSources(
+    cursor?: string | null,
+    limit = 50,
+  ): Promise<DirectiveSourcePage> {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor) query.set('cursor', cursor);
+    return this.req(`/directive-sources?${query.toString()}`);
+  }
+
+  async uploadDirectiveSource(
+    file: File,
+    onProgress: (percent: number) => void,
+  ): Promise<DirectiveSourceItem> {
+    const headers = await getAuthHeaders();
+    return new Promise((resolve, reject) => {
+      const request = new XMLHttpRequest();
+      request.open(
+        'POST',
+        `${this.base}/directive-sources/upload/${encodeURIComponent(file.name)}`,
+      );
+      Object.entries(headers).forEach(([name, value]) => {
+        request.setRequestHeader(name, value);
+      });
+      request.setRequestHeader('Content-Type', 'application/pdf');
+      request.setRequestHeader('Accept', 'application/json');
+      request.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable) {
+          onProgress(Math.round((event.loaded / event.total) * 100));
+        }
+      });
+      request.addEventListener('load', () => {
+        if (request.status === 201) {
+          try {
+            resolve(JSON.parse(request.responseText) as DirectiveSourceItem);
+          } catch {
+            reject(
+              new DirectiveSourceRequestError(
+                request.status,
+                'Upload returned an invalid response',
+              ),
+            );
+          }
+          return;
+        }
+        reject(
+          new DirectiveSourceRequestError(
+            request.status,
+            `Directive source upload failed with ${request.status}`,
+          ),
+        );
+      });
+      request.addEventListener('error', () => {
+        reject(
+          new DirectiveSourceRequestError(
+            0,
+            'Directive source upload failed',
+          ),
+        );
+      });
+      request.send(file);
+    });
+  }
+
+  deleteDirectiveSource(filename: string): Promise<unknown> {
+    return this.req(
+      `/directive-sources/${encodeURIComponent(filename)}`,
+      { method: 'DELETE' },
+    );
   }
 
   // User profile (Cosmos)

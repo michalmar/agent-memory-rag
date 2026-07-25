@@ -5,9 +5,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import date
-from typing import Any
 
-from directive_contracts import DirectiveManifest
+from directive_contracts import PublishedDirectiveVersion
 from pydantic import BaseModel, ConfigDict, Field
 
 from .directive_artifacts import DirectiveArtifactRepository
@@ -55,9 +54,9 @@ class DirectiveDocumentService:
         )
         if resolved is None:
             return None
-        public_version, manifest = resolved
+        public_version = self._catalog.public_version(resolved)
         markdown = await self._artifacts.read_text(
-            manifest.canonical_blob_name
+            resolved.artifacts.canonical_blob_name
         )
         return DirectiveDocumentResponse(
             directive_id=directive_id,
@@ -69,7 +68,7 @@ class DirectiveDocumentService:
                 public_version["source_filename"],
                 directive_id,
             ),
-            total_pages=manifest.total_pages,
+            total_pages=resolved.manifest.total_pages,
             markdown=markdown,
         )
 
@@ -84,14 +83,16 @@ class DirectiveDocumentService:
         )
         if resolved is None:
             return None
-        public_version, manifest = resolved
-        chunks = await self._artifacts.stream_bytes(manifest.source_blob_name)
+        public_version = self._catalog.public_version(resolved)
+        chunks = await self._artifacts.stream_bytes(
+            resolved.artifacts.source_blob_name
+        )
         return DirectiveSourceStream(
             source_filename=_safe_source_filename(
                 public_version["source_filename"],
                 directive_id,
             ),
-            source_hash=manifest.source_hash,
+            source_hash=resolved.source_hash,
             chunks=chunks,
         )
 
@@ -99,31 +100,23 @@ class DirectiveDocumentService:
         self,
         directive_id: str,
         directive_version_id: str,
-    ) -> tuple[dict[str, Any], DirectiveManifest] | None:
-        version = await self._catalog.get_version_record(
+    ) -> PublishedDirectiveVersion | None:
+        bundle = await self._catalog.get_published_version(
             directive_id,
             directive_version_id,
         )
-        if version is None:
+        if bundle is None:
             return None
-
-        manifest = await self._catalog.get_manifest(
-            directive_id,
-            directive_version_id,
-        )
-        if manifest is None:
-            raise DirectiveDataUnavailable(
-                "Directive manifest unavailable"
-            )
         if (
-            manifest.directive_id != directive_id
-            or manifest.directive_version_id != directive_version_id
-            or manifest.source_hash != version.get("source_hash")
+            bundle.manifest.directive_id != directive_id
+            or bundle.manifest.directive_version_id
+            != directive_version_id
+            or bundle.manifest.source_hash != bundle.source_hash
         ):
             raise DirectiveDataUnavailable(
                 "Directive manifest identity mismatch"
             )
-        return self._catalog.public_version(version), manifest
+        return bundle
 
 
 def _safe_source_filename(source_filename: str, directive_id: str) -> str:

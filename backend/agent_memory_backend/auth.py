@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import jwt
-from fastapi import Header, HTTPException
+from fastapi import Depends, Header, HTTPException
 from jwt import PyJWKClient
 
 from .config import get_settings
@@ -34,6 +34,11 @@ class User:
     email: str
     initials: str
     avatar_url: str | None = None
+    roles: frozenset[str] = field(
+        default_factory=frozenset,
+        repr=False,
+        compare=False,
+    )
 
     def to_dict(self) -> dict:
         return {
@@ -207,6 +212,11 @@ class EntraValidator:
             display_name=str(name),
             email=str(email),
             initials=self._initials(str(name), str(email)),
+            roles=frozenset(
+                str(role)
+                for role in claims.get("roles") or []
+                if isinstance(role, str)
+            ),
         )
 
 
@@ -317,6 +327,24 @@ async def get_current_user(
     if auth_mode == "entra":
         return await asyncio.to_thread(_resolve_entra_user, authorization)
     raise HTTPException(status_code=500, detail=f"Invalid AUTH_MODE: {auth_mode}")
+
+
+def can_manage_directive_sources(user: User) -> bool:
+    settings = get_settings()
+    if settings.auth_mode.lower() == "mock":
+        return True
+    return settings.directive_source_manage_role in user.roles
+
+
+async def require_directive_source_manager(
+    user: User = Depends(get_current_user),
+) -> User:
+    if not can_manage_directive_sources(user):
+        raise HTTPException(
+            status_code=403,
+            detail="Missing required directive source management role",
+        )
+    return user
 
 
 async def get_agent_caller(

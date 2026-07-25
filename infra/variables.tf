@@ -198,35 +198,6 @@ variable "directive_model_capacity" {
   }
 }
 
-variable "directive_knowledge_model_deployment" {
-  type        = string
-  default     = "gpt-5-nano-directive-kb"
-  description = "Dedicated Azure AI Search knowledge-base planner deployment."
-}
-
-variable "directive_knowledge_model_name" {
-  type        = string
-  default     = "gpt-5-nano"
-  description = "GA-supported Azure AI Search knowledge-base planner model."
-}
-
-variable "directive_knowledge_model_version" {
-  type        = string
-  default     = "2025-08-07"
-  description = "Exact planner model version used by the stable Search API."
-}
-
-variable "directive_knowledge_model_capacity" {
-  type        = number
-  default     = 10
-  description = "Global Standard planner capacity, in thousands of tokens per minute."
-
-  validation {
-    condition     = var.directive_knowledge_model_capacity > 0
-    error_message = "directive_knowledge_model_capacity must be greater than zero."
-  }
-}
-
 variable "directive_agent_enabled" {
   type        = bool
   default     = false
@@ -249,16 +220,6 @@ variable "directive_agent_release_id" {
   default = "directive-stateful-20260724-r1"
 }
 
-variable "directive_search_knowledge_base_name" {
-  type    = string
-  default = "directive-kb-v1"
-}
-
-variable "directive_search_knowledge_source_name" {
-  type    = string
-  default = "directive-chunks-ks-v1"
-}
-
 variable "directive_search_index_name" {
   type    = string
   default = "directive-chunks-v1"
@@ -274,6 +235,11 @@ variable "directive_catalog_container_name" {
   default = "catalog"
 }
 
+variable "directive_content_container_name" {
+  type    = string
+  default = "directive_content"
+}
+
 variable "directive_mandates_container_name" {
   type    = string
   default = "user_mandates"
@@ -282,6 +248,47 @@ variable "directive_mandates_container_name" {
 variable "directive_artifacts_container_name" {
   type    = string
   default = "directive-artifacts"
+}
+
+variable "directive_source_container_name" {
+  type        = string
+  default     = "directive-source"
+  description = "Private Blob container holding operator-managed source PDFs."
+
+  validation {
+    condition = (
+      length(var.directive_source_container_name) >= 3 &&
+      length(var.directive_source_container_name) <= 63 &&
+      can(regex(
+        "^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+        var.directive_source_container_name,
+      )) &&
+      !strcontains(var.directive_source_container_name, "--")
+    )
+    error_message = "directive_source_container_name must be a valid Azure Blob container name."
+  }
+}
+
+variable "directive_source_prefix" {
+  type        = string
+  default     = ""
+  description = "Optional Blob path prefix within the directive source container."
+
+  validation {
+    condition = (
+      trim(var.directive_source_prefix, " /") == "" ||
+      (
+        !strcontains(var.directive_source_prefix, "\\") &&
+        alltrue([
+          for part in split(
+            "/",
+            trim(var.directive_source_prefix, " /"),
+          ) : !contains(["", ".", ".."], part)
+        ])
+      )
+    )
+    error_message = "directive_source_prefix must be an optional Blob path prefix without empty, dot, or parent segments."
+  }
 }
 
 variable "directive_storage_replication_type" {

@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 class ContractModel(BaseModel):
@@ -46,22 +52,131 @@ class DirectiveSection(ContractModel):
     page_to: int = Field(ge=1)
     token_count: int = Field(ge=0)
     content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    blob_name: str
     chunk_ids: list[str]
 
 
 class DirectiveManifest(ContractModel):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     directive_id: str
     directive_version_id: str
-    source_hash: str
+    source_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    artifact_generation_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     total_pages: int = Field(ge=1)
     total_tokens: int = Field(ge=0)
+    sections: list[DirectiveSection]
+
+    @model_validator(mode="after")
+    def validate_sections(self) -> DirectiveManifest:
+        section_ids = [section.section_id for section in self.sections]
+        if len(section_ids) != len(set(section_ids)):
+            raise ValueError("Manifest section IDs must be unique")
+        ordinals = [section.ordinal for section in self.sections]
+        if ordinals != sorted(ordinals) or len(ordinals) != len(set(ordinals)):
+            raise ValueError(
+                "Manifest sections must have unique ascending ordinals"
+            )
+        return self
+
+
+class DirectiveArtifactLocators(ContractModel):
     canonical_blob_name: str
     source_blob_name: str
-    summary_blob_name: str
-    manifest_blob_name: str
-    sections: list[DirectiveSection]
+
+    @field_validator("canonical_blob_name", "source_blob_name")
+    @classmethod
+    def validate_relative_blob_name(cls, value: str) -> str:
+        if (
+            not value
+            or value.startswith(("/", "\\"))
+            or "\\" in value
+            or "://" in value
+            or "?" in value
+            or "#" in value
+            or any(part in {"", ".", ".."} for part in value.split("/"))
+        ):
+            raise ValueError("Blob locators must be relative catalog-owned names")
+        return value
+
+
+class DirectiveSectionContentDescriptor(ContractModel):
+    part_count: int = Field(ge=1)
+
+
+class PublishedDirectiveVersion(DirectiveMetadata):
+    id: str
+    type: Literal["version"] = "version"
+    artifact_schema_version: Literal["2.0"] = "2.0"
+    artifact_generation_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    publication_state: Literal["published"] = "published"
+    manifest: DirectiveManifest
+    summary: DirectiveSummary
+    artifacts: DirectiveArtifactLocators
+    section_content: dict[str, DirectiveSectionContentDescriptor]
+    run_id: str
+    published_at: datetime
+
+    @model_validator(mode="after")
+    def validate_bundle(self) -> PublishedDirectiveVersion:
+        if self.id != f"version:{self.directive_version_id}":
+            raise ValueError("Published version item ID does not match version")
+        if (
+            self.manifest.directive_id != self.directive_id
+            or self.summary.directive_id != self.directive_id
+        ):
+            raise ValueError("Bundle directive IDs do not agree")
+        if (
+            self.manifest.directive_version_id != self.directive_version_id
+            or self.summary.directive_version_id != self.directive_version_id
+        ):
+            raise ValueError("Bundle directive version IDs do not agree")
+        if (
+            self.manifest.source_hash != self.source_hash
+            or self.summary.source_hash != self.source_hash
+        ):
+            raise ValueError("Bundle source hashes do not agree")
+        if (
+            self.manifest.artifact_generation_id
+            != self.artifact_generation_id
+        ):
+            raise ValueError("Bundle artifact generation IDs do not agree")
+        manifest_section_ids = [
+            section.section_id for section in self.manifest.sections
+        ]
+        if (
+            self.summary.total_section_count != len(manifest_section_ids)
+            or self.summary.covered_section_ids != manifest_section_ids
+        ):
+            raise ValueError(
+                "Bundle summary coverage must match manifest sections"
+            )
+        if set(self.section_content) != set(manifest_section_ids):
+            raise ValueError(
+                "Bundle section descriptors must match manifest sections"
+            )
+        return self
+
+
+class DirectiveSectionContent(ContractModel):
+    id: str
+    type: Literal["section_content"] = "section_content"
+    directive_id: str = Field(pattern=r"^\d{8}$")
+    directive_version_id: str
+    artifact_generation_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    section_id: str
+    section_ordinal: int = Field(ge=0)
+    part_ordinal: int = Field(ge=0)
+    part_count: int = Field(ge=1)
+    part_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    section_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content: str
+    run_id: str
+    created_at: datetime
+
+    @model_validator(mode="after")
+    def validate_part_ordinal(self) -> DirectiveSectionContent:
+        if self.part_ordinal >= self.part_count:
+            raise ValueError("Section part ordinal must be below part count")
+        return self
 
 
 class DirectiveChunk(ContractModel):
@@ -129,3 +244,6 @@ class MandateSnapshot(ContractModel):
     user_count: int = Field(ge=0)
     complete: bool
     previous_snapshot_id: str | None = None
+
+
+PublishedDirectiveVersion.model_rebuild()

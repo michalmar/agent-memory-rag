@@ -15,6 +15,7 @@ export const baseStyles = css`
 
   conversation-sidebar,
   memory-rail,
+  source-documents-rail,
   chat-transcript,
   chat-composer,
   profile-drawer,

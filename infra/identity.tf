@@ -40,7 +40,7 @@ resource "azurerm_role_assignment" "deployer_foundry_project_manager" {
   principal_id       = data.azurerm_client_config.current.object_id
 }
 
-# Search uses its system identity to run Foundry IQ query planning.
+# Search uses its system identity for support IQ planning and index vectorizers.
 resource "azurerm_role_assignment" "search_active_foundry_user" {
   scope                = azapi_resource.foundry_agents.id
   role_definition_name = "Cognitive Services User"

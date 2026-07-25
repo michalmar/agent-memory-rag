@@ -21,7 +21,8 @@ COSMOS_ACCOUNT="${COSMOS_ENDPOINT#https://}"
 COSMOS_ACCOUNT="${COSMOS_ACCOUNT%%.*}"
 COSMOS_DATABASE="$(tf directive_cosmos_database)"
 STORAGE_ACCOUNT="$(tf directive_artifacts_storage_account)"
-BLOB_CONTAINER="$(tf directive_artifacts_container)"
+ARTIFACT_BLOB_CONTAINER="$(tf directive_artifacts_container)"
+SOURCE_BLOB_CONTAINER="$(tf directive_source_container)"
 DOCUMENT_INTELLIGENCE_NAME="$(tf directive_document_intelligence_name)"
 SEARCH_NAME="$(tf search_service_name)"
 FOUNDRY_SCOPE="$(tf foundry_agents_account_id)"
@@ -33,13 +34,15 @@ JOB_CONTAINER="directive-ingestion"
 ACR_SCOPE="$(
   az acr show --name "$ACR_NAME" --resource-group "$RG" --query id --output tsv
 )"
-STORAGE_SCOPE="$(
+STORAGE_ACCOUNT_SCOPE="$(
   az storage account show \
     --name "$STORAGE_ACCOUNT" \
     --resource-group "$RG" \
     --query id \
     --output tsv
-)/blobServices/default/containers/$BLOB_CONTAINER"
+)"
+ARTIFACT_STORAGE_SCOPE="$STORAGE_ACCOUNT_SCOPE/blobServices/default/containers/$ARTIFACT_BLOB_CONTAINER"
+SOURCE_STORAGE_SCOPE="$STORAGE_ACCOUNT_SCOPE/blobServices/default/containers/$SOURCE_BLOB_CONTAINER"
 DOCUMENT_INTELLIGENCE_SCOPE="$(
   az cognitiveservices account show \
     --name "$DOCUMENT_INTELLIGENCE_NAME" \
@@ -66,11 +69,30 @@ COSMOS_ROLE_DEFINITION="$COSMOS_ACCOUNT_SCOPE/sqlRoleDefinitions/00000000-0000-0
 
 ARM_ROLE_SNAPSHOT="$(mktemp)"
 COSMOS_ROLE_SNAPSHOT="$(mktemp)"
-trap 'rm -f "$ARM_ROLE_SNAPSHOT" "$COSMOS_ROLE_SNAPSHOT"' EXIT
+RESTORE_PUBLICATION_MODE=false
+
+cleanup() {
+  local status=$?
+  trap - EXIT
+  rm -f "$ARM_ROLE_SNAPSHOT" "$COSMOS_ROLE_SNAPSHOT"
+  if [[ "$RESTORE_PUBLICATION_MODE" == true ]]; then
+    echo "==> Restoring the directive ingestion job publication mode"
+    az containerapp job update \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --container-name "$JOB_CONTAINER" \
+      --command directive-ingest \
+      --args run-daily \
+      --output none || echo "ERROR: failed to restore publication mode" >&2
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
 
 EXPECTED_ARM_ROLES=(
   "AcrPull|$ACR_SCOPE"
-  "Storage Blob Data Contributor|$STORAGE_SCOPE"
+  "Storage Blob Data Contributor|$ARTIFACT_STORAGE_SCOPE"
+  "Storage Blob Data Reader|$SOURCE_STORAGE_SCOPE"
   "Cognitive Services User|$DOCUMENT_INTELLIGENCE_SCOPE"
   "Search Service Contributor|$SEARCH_SCOPE"
   "Search Index Data Contributor|$SEARCH_SCOPE"
@@ -299,6 +321,7 @@ assert_execution_mode "$EXECUTION_NAME" "run-daily"
 wait_for_execution "$EXECUTION_NAME" "Directive ingestion" 240 30
 
 echo "==> Verifying published directive state"
+RESTORE_PUBLICATION_MODE=true
 az containerapp job update \
   --name "$JOB_NAME" \
   --resource-group "$RG" \
@@ -329,5 +352,6 @@ az containerapp job update \
   --command directive-ingest \
   --args run-daily \
   --output none
+RESTORE_PUBLICATION_MODE=false
 
 echo "==> Directive ingestion succeeded: $EXECUTION_NAME"

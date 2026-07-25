@@ -4,8 +4,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from pydantic import ValidationError
+from azure.core.exceptions import ClientAuthenticationError
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from agent_contracts import (
     AgentType,
@@ -16,10 +17,13 @@ from agent_contracts import (
     directive_tool_definition,
 )
 from directive_contracts import (
+    DirectiveArtifactLocators,
     DirectiveManifest,
     DirectiveRelation,
     DirectiveSection,
+    DirectiveSectionContentDescriptor,
     DirectiveSummary,
+    PublishedDirectiveVersion,
 )
 
 from agent_memory_backend.agent_tools import ToolExecutionError
@@ -32,10 +36,14 @@ from agent_memory_backend.directive_artifacts import (
     _validated_catalog_blob_name,
 )
 from agent_memory_backend.directive_catalog import DirectiveCatalogRepository
+from agent_memory_backend.directive_content import DirectiveContentRepository
+from agent_memory_backend.directive_errors import DirectiveDataUnavailable
 from agent_memory_backend.directive_mandates import DirectiveMandateRepository
 from agent_memory_backend.directive_search import (
     DirectiveSearchRepository,
     _build_filter,
+    _fuse_references,
+    _normalize_search_response,
 )
 from agent_memory_backend.directive_tools import DirectiveToolExecutor
 
@@ -83,7 +91,6 @@ def _manifest(section_count: int = 3) -> DirectiveManifest:
             page_to=index + 1,
             token_count=5,
             content_hash=_HASH,
-            blob_name=f"directives/sections/{index}.md",
             chunk_ids=[f"chunk-{index}"],
         )
         for index in range(section_count)
@@ -92,13 +99,46 @@ def _manifest(section_count: int = 3) -> DirectiveManifest:
         directive_id="10000001",
         directive_version_id="10000001-v2",
         source_hash=_HASH,
+        artifact_generation_id=_HASH,
         total_pages=section_count,
         total_tokens=section_count * 5,
-        canonical_blob_name="directives/document.md",
-        source_blob_name="directives/source.pdf",
-        summary_blob_name="directives/summary.json",
-        manifest_blob_name="directives/manifest.json",
         sections=sections,
+    )
+
+
+def _summary() -> DirectiveSummary:
+    return DirectiveSummary(
+        directive_id="10000001",
+        directive_version_id="10000001-v2",
+        source_hash=_HASH,
+        summary="Summary",
+        covered_section_ids=["s0", "s1", "s2"],
+        total_section_count=3,
+        input_token_count=15,
+        strategy="full_document",
+        model_deployment="gpt-5.6-sol",
+    )
+
+
+def _bundle() -> PublishedDirectiveVersion:
+    manifest = _manifest()
+    return PublishedDirectiveVersion(
+        **_version(),
+        artifact_generation_id=_HASH,
+        manifest=manifest,
+        summary=_summary(),
+        artifacts=DirectiveArtifactLocators(
+            canonical_blob_name="directives/document.md",
+            source_blob_name="directives/source.pdf",
+        ),
+        section_content={
+            section.section_id: DirectiveSectionContentDescriptor(
+                part_count=1
+            )
+            for section in manifest.sections
+        },
+        run_id="test-run",
+        published_at="2026-07-25T12:00:00Z",
     )
 
 
@@ -114,7 +154,8 @@ class _Catalog:
                 title="Vacation Policy",
             ),
         }
-        self.manifest = _manifest()
+        self.bundle = _bundle()
+        self.bundle_requests: list[tuple[str, str]] = []
 
     async def resolve_version(
         self,
@@ -139,10 +180,13 @@ class _Catalog:
     async def get_version_record(self, directive_id: str, version_id: str):
         return self.records.get((directive_id, version_id))
 
-    async def get_manifest(self, directive_id: str, version_id: str):
+    async def get_published_version(
+        self, directive_id: str, version_id: str
+    ):
+        self.bundle_requests.append((directive_id, version_id))
         if (directive_id, version_id) not in self.records:
             return None
-        return self.manifest
+        return self.bundle
 
     async def get_relations(
         self,
@@ -178,29 +222,20 @@ class _Catalog:
     public_version = staticmethod(DirectiveCatalogRepository.public_version)
 
 
-class _Artifacts:
+class _Contents:
     enabled = True
 
     def __init__(self) -> None:
-        self.read_names: list[str] = []
+        self.requests: list[tuple[str, list[str]]] = []
 
-    async def read_text(self, name: str) -> str:
-        self.read_names.append(name)
-        return f"content:{name}"
-
-    async def read_json(self, name: str) -> dict:
-        self.read_names.append(name)
-        return DirectiveSummary(
-            directive_id="10000001",
-            directive_version_id="10000001-v2",
-            source_hash=_HASH,
-            summary="Summary",
-            covered_section_ids=["s0", "s1", "s2"],
-            total_section_count=3,
-            input_token_count=15,
-            strategy="full_document",
-            model_deployment="gpt-5.6-sol",
-        ).model_dump(mode="json")
+    async def read_sections(self, bundle, sections) -> list[str]:
+        self.requests.append(
+            (
+                bundle.directive_version_id,
+                [section.section_id for section in sections],
+            )
+        )
+        return [f"content:{section.section_id}" for section in sections]
 
 
 class _Search:
@@ -298,6 +333,32 @@ class DirectiveToolContractTests(unittest.TestCase):
         self.assertIn("directive_version_id eq '10000001-v2'", value)
         self.assertIn("section_id eq 'section''one'", value)
 
+    def test_filter_builder_handles_historical_and_multiple_directives(self):
+        historical = _build_filter(
+            current_only=False,
+            directive_ids=["10000001"],
+            directive_version_id="version'2",
+            section_ids=[],
+        )
+        discovery = _build_filter(
+            current_only=True,
+            directive_ids=["10000001", "10000002"],
+            directive_version_id=None,
+            section_ids=[],
+        )
+
+        self.assertNotIn("is_current", historical)
+        self.assertEqual(
+            historical,
+            "publication_state eq 'published' and "
+            "(directive_id eq '10000001') and "
+            "directive_version_id eq 'version''2'",
+        )
+        self.assertIn(
+            "(directive_id eq '10000001' or directive_id eq '10000002')",
+            discovery,
+        )
+
     def test_historical_search_requires_and_normalizes_exact_version(self):
         definition = directive_tool_definition("search_directives")
         with self.assertRaises(ValidationError):
@@ -332,59 +393,177 @@ class DirectiveToolContractTests(unittest.TestCase):
 
 
 class DirectiveSearchRepositoryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_retrieve_uses_stable_knowledge_source_parameters(self) -> None:
+    async def test_initialize_uses_index_and_tool_timeout(self) -> None:
         repository = DirectiveSearchRepository()
-        repository._knowledge_source = "directive-source"
+        client = SimpleNamespace(aclose=AsyncMock())
+        settings = SimpleNamespace(
+            search_endpoint="https://search.example/",
+            directive_search_index="directive-chunks-v1",
+            directive_search_api_version="2026-04-01",
+            directive_max_search_results=25,
+            directive_tool_timeout_seconds=42,
+        )
+
+        with patch(
+            "agent_memory_backend.directive_search.get_settings",
+            return_value=settings,
+        ), patch(
+            "agent_memory_backend.directive_search.httpx.AsyncClient",
+            return_value=client,
+        ) as client_factory:
+            await repository.initialize()
+
+        timeout = client_factory.call_args.kwargs["timeout"]
+        self.assertEqual(timeout.read, 42)
+        self.assertEqual(repository._endpoint, "https://search.example")
+        self.assertEqual(repository._index_name, "directive-chunks-v1")
+        self.assertTrue(repository.enabled)
+
+        await repository.close()
+        client.aclose.assert_awaited_once()
+        self.assertFalse(repository.enabled)
+
+    async def test_health_check_uses_bounded_current_query(self) -> None:
+        repository = DirectiveSearchRepository()
+        repository.retrieve = AsyncMock(return_value={})
+
+        await repository.health_check()
+
+        repository.retrieve.assert_awaited_once_with(
+            intents=["healthcheck"],
+            current_only=True,
+            max_results=1,
+            include_references=False,
+        )
+
+    async def test_retrieve_uses_direct_hybrid_queries_and_stable_fusion(
+        self,
+    ) -> None:
+        repository = DirectiveSearchRepository()
         repository._max_results = 25
         repository._request = AsyncMock(
-            return_value={
-                "response": [{"content": [{"type": "text", "text": "unbounded"}]}],
-                "references": [
-                    {"id": f"ref-{index}", "content": f"evidence-{index}"}
-                    for index in range(5)
-                ],
-            }
+            side_effect=[
+                SimpleNamespace(
+                    response={
+                        "value": [
+                            {
+                                "id": "chunk-a",
+                                "content": "evidence-a",
+                                "directive_id": "10000001",
+                                "directive_version_id": "10000001-v2",
+                                "title": "Travel",
+                            },
+                            {
+                                "id": "chunk-shared",
+                                "content": "shared",
+                                "directive_id": "10000001",
+                                "directive_version_id": "10000001-v2",
+                                "section_id": "s2",
+                            },
+                        ]
+                    },
+                    retries=0,
+                    latency_ms=10,
+                ),
+                SimpleNamespace(
+                    response={
+                        "value": [
+                            {
+                                "id": "chunk-shared",
+                                "content": "shared",
+                                "directive_id": "10000001",
+                                "directive_version_id": "10000001-v2",
+                                "section_id": "s2",
+                            },
+                            {
+                                "id": "chunk-b",
+                                "content": "evidence-b",
+                                "directive_id": "10000002",
+                                "directive_version_id": "10000002-v1",
+                            },
+                        ]
+                    },
+                    retries=1,
+                    latency_ms=20,
+                ),
+            ]
         )
 
         result = await repository.retrieve(
-            intents=["company car eligibility"],
+            intents=[" company car eligibility ", "mileage exceptions"],
             current_only=True,
             max_results=3,
         )
 
-        payload = repository._request.await_args.args[0]
-        source = payload["knowledgeSourceParams"][0]
+        self.assertEqual(repository._request.await_count, 2)
+        first_call, second_call = repository._request.await_args_list
+        first_payload = first_call.args[0]
+        second_payload = second_call.args[0]
         self.assertEqual(
-            source,
+            first_payload,
             {
-                "knowledgeSourceName": "directive-source",
-                "kind": "searchIndex",
-                "includeReferences": True,
-                "includeReferenceSourceData": True,
-                "filterAddOn": (
+                "search": "company car eligibility",
+                "filter": (
                     "publication_state eq 'published' and is_current eq true"
                 ),
+                "vectorFilterMode": "preFilter",
+                "vectorQueries": [
+                    {
+                        "kind": "text",
+                        "text": "company car eligibility",
+                        "fields": "content_vector",
+                        "k": 50,
+                    }
+                ],
+                "queryType": "semantic",
+                "semanticConfiguration": "semantic_config",
+                "select": (
+                    "id,content,directive_id,directive_version_id,"
+                    "version_label,title,is_current,effective_from,"
+                    "effective_to,section_id,section_number,section_title,"
+                    "page_from,page_to,source_hash"
+                ),
+                "top": 50,
             },
         )
-        self.assertNotIn("failOnError", source)
-        self.assertNotIn("maxOutputDocuments", source)
+        self.assertEqual(first_call.kwargs["intent_index"], 0)
+        self.assertEqual(second_call.kwargs["intent_index"], 1)
+        self.assertEqual(second_payload["search"], "mileage exceptions")
         self.assertEqual(len(result["references"]), 3)
         self.assertEqual(
-            result["retrieval_output"],
-            [
-                {"ref_id": "ref-0", "content": "evidence-0"},
-                {"ref_id": "ref-1", "content": "evidence-1"},
-                {"ref_id": "ref-2", "content": "evidence-2"},
-            ],
+            result["intents"],
+            ["company car eligibility", "mileage exceptions"],
+        )
+        self.assertEqual(
+            result["references"][0]["matched_intent_indexes"],
+            [0, 1],
+        )
+        self.assertEqual(
+            [item["ref_id"] for item in result["retrieval_output"]],
+            ["chunk-shared", "chunk-a", "chunk-b"],
+        )
+        self.assertEqual(
+            result["references"][1]["source_data"],
+            {
+                "directive_id": "10000001",
+                "directive_version_id": "10000001-v2",
+                "title": "Travel",
+            },
         )
 
-    async def test_request_uses_search_scope_access_token(self) -> None:
-        response = SimpleNamespace(
+    async def test_request_uses_direct_search_url_scope_and_retry_after(
+        self,
+    ) -> None:
+        retry = SimpleNamespace(
+            status_code=429,
+            headers={"retry-after": "3"},
+        )
+        success = SimpleNamespace(
             status_code=200,
             headers={},
-            json=lambda: {"response": "evidence"},
+            json=lambda: {"value": []},
         )
-        client = SimpleNamespace(post=AsyncMock(return_value=response))
+        client = SimpleNamespace(post=AsyncMock(side_effect=[retry, success]))
         credential = SimpleNamespace(
             get_token=AsyncMock(
                 return_value=SimpleNamespace(token="search-access-token")
@@ -393,33 +572,182 @@ class DirectiveSearchRepositoryTests(unittest.IsolatedAsyncioTestCase):
         repository = DirectiveSearchRepository()
         repository._client = client
         repository._endpoint = "https://search.example"
-        repository._knowledge_base = "directives"
+        repository._index_name = "directive-chunks-v1"
         repository._api_version = "2026-04-01"
 
         with patch(
             "agent_memory_backend.azure_clients.get_credential",
             return_value=credential,
-        ):
-            await repository._request({"intents": []})
+        ), patch(
+            "agent_memory_backend.directive_search.asyncio.sleep",
+            new=AsyncMock(),
+        ) as sleep:
+            result = await repository._request(
+                {"search": "vehicle"},
+                intent_index=0,
+            )
 
         credential.get_token.assert_awaited_once_with(
             "https://search.azure.com/.default"
         )
+        self.assertEqual(result.retries, 1)
+        self.assertEqual(client.post.await_count, 2)
+        sleep.assert_awaited_once_with(3.0)
+        request = client.post.await_args
         self.assertEqual(
-            client.post.await_args.kwargs["headers"]["Authorization"],
+            request.args[0],
+            "https://search.example/indexes/directive-chunks-v1/docs/search",
+        )
+        self.assertEqual(
+            request.kwargs["params"],
+            {"api-version": "2026-04-01"},
+        )
+        self.assertEqual(
+            request.kwargs["headers"]["Authorization"],
             "Bearer search-access-token",
         )
+
+    async def test_request_rejects_non_retryable_failure(self) -> None:
+        response = SimpleNamespace(status_code=400, headers={})
+        repository = DirectiveSearchRepository()
+        repository._client = SimpleNamespace(
+            post=AsyncMock(return_value=response)
+        )
+        repository._endpoint = "https://search.example"
+        repository._index_name = "directive-chunks-v1"
+        repository._api_version = "2026-04-01"
+        credential = SimpleNamespace(
+            get_token=AsyncMock(
+                return_value=SimpleNamespace(token="search-access-token")
+            )
+        )
+
+        with patch(
+            "agent_memory_backend.azure_clients.get_credential",
+            return_value=credential,
+        ):
+            with self.assertRaises(DirectiveDataUnavailable):
+                await repository._request({}, intent_index=0)
+
+        repository._client.post.assert_awaited_once()
+
+    async def test_request_maps_identity_failure_to_typed_error(self) -> None:
+        repository = DirectiveSearchRepository()
+        repository._client = SimpleNamespace(post=AsyncMock())
+        credential = SimpleNamespace(
+            get_token=AsyncMock(
+                side_effect=ClientAuthenticationError(
+                    message="sensitive credential detail"
+                )
+            )
+        )
+
+        with patch(
+            "agent_memory_backend.azure_clients.get_credential",
+            return_value=credential,
+        ):
+            with self.assertRaisesRegex(
+                DirectiveDataUnavailable,
+                "^Directive Search authentication failed$",
+            ):
+                await repository._request({}, intent_index=0)
+
+        repository._client.post.assert_not_awaited()
+
+    def test_fusion_deduplicates_limits_and_uses_stable_tie_breakers(self):
+        result = _fuse_references(
+            [
+                [
+                    {"ref_id": "b", "content": "b"},
+                    {"ref_id": "shared", "content": "shared"},
+                ],
+                [
+                    {"ref_id": "a", "content": "a"},
+                    {"ref_id": "shared", "content": "shared"},
+                ],
+                [],
+            ],
+            limit=2,
+        )
+
+        self.assertEqual(result.unique_count, 3)
+        self.assertEqual(
+            [reference["ref_id"] for reference in result.references],
+            ["shared", "a"],
+        )
+        self.assertEqual(
+            result.references[0]["matched_intent_indexes"],
+            [0, 1],
+        )
+
+    def test_normalization_preserves_citation_metadata_and_validates_shape(self):
+        response = {
+            "value": [
+                {
+                    "id": "chunk-1",
+                    "content": "Evidence",
+                    "directive_id": "10000001",
+                    "directive_version_id": "10000001-v2",
+                    "version_label": "2",
+                    "title": "Travel",
+                    "is_current": True,
+                    "effective_from": "2026-01-01T00:00:00Z",
+                    "effective_to": None,
+                    "section_id": "s1",
+                    "section_number": "1",
+                    "section_title": "Eligibility",
+                    "page_from": 3,
+                    "page_to": 4,
+                    "source_hash": _HASH,
+                    "@search.score": 1.5,
+                    "@search.rerankerScore": 3.2,
+                }
+            ]
+        }
+
+        references = _normalize_search_response(response, intent_index=2)
+
+        self.assertEqual(references[0]["ref_id"], "chunk-1")
+        self.assertEqual(references[0]["matched_intent_indexes"], [2])
+        self.assertEqual(
+            set(references[0]["source_data"]),
+            {
+                "directive_id",
+                "directive_version_id",
+                "version_label",
+                "title",
+                "is_current",
+                "effective_from",
+                "effective_to",
+                "section_id",
+                "section_number",
+                "section_title",
+                "page_from",
+                "page_to",
+                "source_hash",
+            },
+        )
+        self.assertNotIn("@search.score", references[0])
+        for invalid in (
+            {},
+            {"value": {}},
+            {"value": ["not-a-document"]},
+            {"value": [{"content": "missing ID"}]},
+            {"value": [{"id": "chunk", "content": 123}]},
+        ):
+            with self.assertRaises(DirectiveDataUnavailable):
+                _normalize_search_response(invalid, intent_index=0)
 
 
 class DirectiveToolExecutorTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.catalog = _Catalog()
-        self.artifacts = _Artifacts()
+        self.contents = _Contents()
         self.search = _Search()
         self.mandates = _Mandates()
         self.executor = DirectiveToolExecutor(
             self.catalog,
-            self.artifacts,
+            self.contents,
             self.search,
             self.mandates,
         )
@@ -477,12 +805,36 @@ class DirectiveToolExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.data["continuation"]["next_cursor"], 2)
         self.assertEqual(len(result.data["sections"]), 2)
         self.assertEqual(
-            self.artifacts.read_names,
-            [
-                "directives/sections/0.md",
-                "directives/sections/1.md",
-            ],
+            self.contents.requests,
+            [("10000001-v2", ["s0", "s1"])],
         )
+
+    async def test_manifest_and_summary_each_use_one_bundle_read(self):
+        with patch(
+            "agent_memory_backend.directive_tools.get_settings",
+            return_value=_settings(),
+        ):
+            manifest = await self.executor.execute_envelope(
+                "get_directive_manifest",
+                {
+                    "directive_id": "10000001",
+                    "directive_version_id": "10000001-v2",
+                },
+                user_id="tenant:user",
+            )
+            summary = await self.executor.execute_envelope(
+                "get_precomputed_summary",
+                {
+                    "directive_id": "10000001",
+                    "directive_version_id": "10000001-v2",
+                },
+                user_id="tenant:user",
+            )
+
+        self.assertEqual(len(self.catalog.bundle_requests), 2)
+        self.assertEqual(manifest.data["manifest"]["schema_version"], "2.0")
+        self.assertEqual(summary.data["summary"]["summary"], "Summary")
+        self.assertEqual(self.contents.requests, [])
 
     async def test_content_over_configured_budget_is_typed_error(self):
         with patch(
@@ -567,7 +919,7 @@ class DirectiveToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             (
                 DirectiveToolExecutor(
                     DirectiveCatalogRepository(),
-                    self.artifacts,
+                    self.contents,
                     self.search,
                     self.mandates,
                 ),
@@ -580,12 +932,25 @@ class DirectiveToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             (
                 DirectiveToolExecutor(
                     self.catalog,
-                    self.artifacts,
+                    self.contents,
                     self.search,
                     DirectiveMandateRepository(),
                 ),
                 "get_user_directive_mandates",
                 {"directive_ids": ["10000001"]},
+            ),
+            (
+                DirectiveToolExecutor(
+                    self.catalog,
+                    DirectiveContentRepository(),
+                    self.search,
+                    self.mandates,
+                ),
+                "get_directive_content",
+                {
+                    "directive_id": "10000001",
+                    "directive_version_id": "10000001-v2",
+                },
             ),
         )
 

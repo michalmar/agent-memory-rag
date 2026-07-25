@@ -2,19 +2,25 @@
 
 Use this file to collect workshop and project ideas. Active ideas stay here; implemented ideas are moved to the Archive section. New ideas are added first.
 
-## Use Azure Blob Storage as the directive source
+## Navigate directive citations to exact sections
 
-Store uploaded directive PDFs in a dedicated `directive-source` container in the existing directive storage account. Add a managed-identity Blob source adapter while keeping generated immutable PDFs, canonical Markdown, sections, manifests, and summaries in the existing `directive-artifacts` container.
+Make each directive inline citation and detailed Sources row open the exact
+published document in the existing sidebar, scroll and focus the cited Markdown
+section heading, show its page range, and keep the PDF tab anchored to the cited
+start page. Section/page precision is sufficient; sentence, paragraph, table-row,
+and PDF-region highlighting are not required.
 
-**Implementation plan:** [`TEMP-plan-directives-from-blob.md`](docs/TEMP-plan-directives-from-blob.md)
+**Implementation plan:** [Source citation section/page navigation plan](workspace:plan.md)
 
-<sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** No</sub>
+<sub>**Date:** 2026-07-25 · **Author:** @michalmar · **Implemented:** No</sub>
 
-## Explain directive agents and document ingestion in plain English
+## Implement GitHub Actions CI/CD
 
-Document in detail, using plain English, how directive agents work with documents: how documents are added, ingested, chunked or indexed, retrieved, and used to produce answers.
+Implement the reviewed GitHub Actions CI/CD design, including unprivileged pull-request checks, remote Terraform state, protected OIDC deployments, independent release workflows, drift detection, and tested rollback paths.
 
-<sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** No</sub>
+**Implementation plan:** [GitHub Actions CI/CD design proposal](.azure/deployment-plan.md#github-actions-cicd-design-proposal---2026-07-24)
+
+<sub>**Date:** 2026-07-24 · **Author:** @michalmar · **Implemented:** No</sub>
 
 ## Simplify the directive RAG pattern
 
@@ -22,11 +28,6 @@ Review the directive RAG pattern for unnecessary complexity and simplify its des
 
 <sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** No</sub>
 
-## Compare legacy and directive agents
-
-Compare the old agents with the new directive agent and identify inconsistencies in behavior, configuration, tools, prompts, data access, and implementation. Resolve the inconsistencies where appropriate.
-
-<sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** No</sub>
 
 ## Add slash commands to directive agents
 
@@ -35,6 +36,55 @@ Add leading slash commands to directive agents, such as `/search`, `/compare`, a
 <sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** No</sub>
 
 # Archive
+
+## Use Azure Blob Storage as the directive source
+
+Directive PDFs now live in a dedicated private `directive-source` container.
+The managed-identity ingestion job reads the current Blob corpus without an
+image rebuild, while generated immutable outputs remain isolated in
+`directive-artifacts`. Approved operators use the role-protected, metadata-only
+Sources rail for create-only PDF upload and confirmed deletion; these actions
+do not control ingestion or remove previously published content.
+
+**Implementation plan:** [`TEMP-plan-directives-from-blob.md`](docs/TEMP-plan-directives-from-blob.md)
+
+<sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** Yes · **Implemented date:** 2026-07-25</sub>
+
+## Remove duplicate directive retrieval planning
+
+GPT-5.6 is now the sole directive retrieval planner. The backend executes each
+final intent as a concurrent direct Azure AI Search hybrid query, applies
+backend-owned publication and version filters, and fuses results with stable
+cross-intent reciprocal-rank fusion while preserving the existing tool and
+citation envelopes. Runtime knowledge-base settings, directive knowledge-source
+and knowledge-base provisioning, and the dedicated GPT-5 Nano planner deployment
+were removed in the same direct cutover.
+
+The implementation uses 50 semantic candidates per intent, RRF constant 60, and
+deterministic score, best-rank, matched-intent-count, and document-ID tie
+breakers. The existing Search vectorizer and semantic ranker remain.
+
+Deployment was verified in `rg-agent-memory-rag`: the dedicated GPT-5 Nano
+planner was removed, ingestion verified the direct hybrid query, backend
+readiness passed, and an authenticated directive turn returned ten grounded
+references from two final intents.
+
+<sub>**Date:** 2026-07-25 · **Author:** @michalmar · **Implemented:** Yes · **Implemented date:** 2026-07-25 · **Deployed:** Yes · **Deployment verified:** 2026-07-25</sub>
+
+## Consolidate directive content authority in Cosmos
+
+Cosmos DB is now the runtime authority for exact-version manifests, precomputed
+summaries, and section content. Each published version is one validated catalog
+bundle, sections are immutable generation-scoped content items, and Azure AI
+Search remains a derived retrieval projection. Private Blob Storage retains only
+complete canonical Markdown and source PDFs.
+
+The change is a destructive schema cutover with no migration, compatibility
+reader, or Blob JSON fallback. Existing directive versions must be republished.
+
+**Implementation plan:** [`TEMP-plan-directive-cosmos-content.md`](docs/TEMP-plan-directive-cosmos-content.md)
+
+<sub>**Date:** 2026-07-25 · **Author:** @michalmar · **Implemented:** Yes · **Implemented date:** 2026-07-25</sub>
 
 ## Migrate the directive agent to stateful continuation
 
