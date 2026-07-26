@@ -27,7 +27,10 @@ import {
   isAbortError,
   LatestRequest,
   pdfUrlForPage,
+  sameDirectiveDocument,
+  type DirectiveCitationTarget,
   type DirectiveDocumentLoadStatus,
+  type DirectiveDocumentOpenRequest,
   type DirectiveDocumentReference,
   type DirectiveDocumentTab,
 } from './directive-documents.js';
@@ -109,6 +112,9 @@ export class NativeApp extends LitElement {
   @state() private profileDraft = '';
   @state() private directiveDocumentReference:
     DirectiveDocumentReference | null = null;
+  @state() private directiveDocumentTarget: DirectiveCitationTarget | null =
+    null;
+  @state() private directiveDocumentTargetRevision = 0;
   @state() private directiveDocument: DirectiveDocument | null = null;
   @state() private directiveDocumentStatus:
     DirectiveDocumentLoadStatus = 'idle';
@@ -191,9 +197,9 @@ export class NativeApp extends LitElement {
     setFeedback: (turn: ChatTurn, feedback: 'up' | 'down') =>
       this.setFeedback(turn, feedback),
     openDocument: (
-      reference: DirectiveDocumentReference,
+      request: DirectiveDocumentOpenRequest,
       trigger?: HTMLElement,
-    ) => this.openDirectiveDocument(reference, trigger),
+    ) => this.openDirectiveDocument(request, trigger),
   };
   private profileActions = {
     close: () => this.closeProfile(),
@@ -207,9 +213,9 @@ export class NativeApp extends LitElement {
     selectTab: (tab: DirectiveDocumentTab) =>
       this.selectDirectiveDocumentTab(tab),
     openLinkedDocument: (
-      reference: DirectiveDocumentReference,
+      request: DirectiveDocumentOpenRequest,
       trigger?: HTMLElement,
-    ) => this.openDirectiveDocument(reference, trigger),
+    ) => this.openDirectiveDocument(request, trigger),
     retryDocument: () => void this.loadDirectiveDocument(),
     retryPdf: () => void this.loadDirectivePdf(),
   };
@@ -718,38 +724,54 @@ export class NativeApp extends LitElement {
 
   // ----------------------------------------------------- directive documents
   private openDirectiveDocument(
-    reference: DirectiveDocumentReference,
+    request: DirectiveDocumentOpenRequest,
     trigger?: HTMLElement,
   ): void {
-    if (
-      this.directiveDocumentReference?.directiveId === reference.directiveId
-      && this.directiveDocumentReference.directiveVersionId
-        === reference.directiveVersionId
-    ) {
-      this.selectDirectiveDocumentTab('pdf');
-      requestAnimationFrame(() => {
-        this.renderRoot
-          .querySelector<HTMLElement>('#directive-pdf-tab')
-          ?.focus();
-      });
+    const { reference, target, initialTab } = request;
+    const returnTrigger = this.directiveDocumentReturnTrigger(trigger);
+    if (sameDirectiveDocument(this.directiveDocumentReference, reference)) {
+      this.directiveDocumentTrigger = returnTrigger;
+      this.directiveDocumentReference = reference;
+      this.directiveDocumentTarget = target ?? null;
+      ++this.directiveDocumentTargetRevision;
+      this.refreshDirectivePdfPage();
+      this.selectDirectiveDocumentTab(initialTab);
+      if (initialTab === 'pdf') {
+        requestAnimationFrame(() => {
+          this.renderRoot
+            .querySelector<HTMLElement>('#directive-pdf-tab')
+            ?.focus();
+        });
+      }
       return;
     }
-    const returnTrigger = this.directiveDocumentTrigger ?? trigger;
     ++this.profileLoadGeneration;
     this.closeDirectiveDocument(false);
-    const activeElement = this.shadowRoot?.activeElement;
-    this.directiveDocumentTrigger =
-      returnTrigger
-      ?? (activeElement instanceof HTMLElement ? activeElement : undefined);
+    this.directiveDocumentTrigger = returnTrigger;
     this.directiveDocumentReference = reference;
+    this.directiveDocumentTarget = target ?? null;
+    ++this.directiveDocumentTargetRevision;
     this.directiveDocument = null;
     this.directiveDocumentStatus = 'loading';
     this.directiveDocumentError = '';
-    this.directiveDocumentTab = 'document';
+    this.directiveDocumentTab = initialTab;
     this.directivePdfStatus = 'idle';
     this.directivePdfError = '';
     this.profileOpen = false;
     void this.loadDirectiveDocument();
+    if (initialTab === 'pdf') void this.loadDirectivePdf();
+  }
+
+  private directiveDocumentReturnTrigger(
+    trigger?: HTMLElement,
+  ): HTMLElement | undefined {
+    const activeElement = this.shadowRoot?.activeElement;
+    const candidate = trigger
+      ?? (activeElement instanceof HTMLElement ? activeElement : undefined);
+    if (candidate?.closest('directive-document-viewer')) {
+      return this.directiveDocumentTrigger ?? candidate;
+    }
+    return candidate ?? this.directiveDocumentTrigger;
   }
 
   private async loadDirectiveDocument(): Promise<void> {
@@ -814,7 +836,7 @@ export class NativeApp extends LitElement {
       if (!this.directivePdfRequests.isCurrent(request)) return;
       const objectUrl = URL.createObjectURL(pdf);
       this.directivePdfObjectUrl = objectUrl;
-      this.directivePdfUrl = pdfUrlForPage(objectUrl, reference.pageFrom);
+      this.refreshDirectivePdfPage();
       this.directivePdfStatus = 'ready';
     } catch (error) {
       if (
@@ -839,6 +861,7 @@ export class NativeApp extends LitElement {
     this.abortDirectiveDocumentRequests();
     this.revokeDirectivePdfUrl();
     this.directiveDocumentReference = null;
+    this.directiveDocumentTarget = null;
     this.directiveDocument = null;
     this.directiveDocumentStatus = 'idle';
     this.directiveDocumentError = '';
@@ -864,6 +887,15 @@ export class NativeApp extends LitElement {
     this.directivePdfAbort?.abort();
     this.directiveDocumentAbort = undefined;
     this.directivePdfAbort = undefined;
+  }
+
+  private refreshDirectivePdfPage(): void {
+    this.directivePdfUrl = this.directivePdfObjectUrl
+      ? pdfUrlForPage(
+          this.directivePdfObjectUrl,
+          this.directiveDocumentTarget?.pageFrom,
+        )
+      : null;
   }
 
   private revokeDirectivePdfUrl(): void {
@@ -1423,6 +1455,8 @@ export class NativeApp extends LitElement {
         <directive-document-viewer
           .open=${this.directiveDocumentReference !== null}
           .reference=${this.directiveDocumentReference}
+          .target=${this.directiveDocumentTarget}
+          .targetRevision=${this.directiveDocumentTargetRevision}
           .document=${this.directiveDocument}
           .documentStatus=${this.directiveDocumentStatus}
           .documentError=${this.directiveDocumentError}

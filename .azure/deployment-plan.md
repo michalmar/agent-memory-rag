@@ -1,6 +1,8 @@
 # Azure Deployment Plan - Azure Blob Directive Source
 
 > **Status:** Deployed
+>
+> **Current release status:** Deployed
 
 Generated: 2026-07-25T20:33:12Z
 
@@ -348,3 +350,99 @@ command `directive-ingest` and argument `run-daily`.
 ## 13. Completion
 
 Current phase: deployed.
+
+## 14. Frontend citation section navigation release
+
+Release date: 2026-07-26.
+
+### Scope
+
+This is an immutable frontend-only release. Inline directive citations and
+detailed Sources rows open the existing exact-version document drawer at the
+validated Markdown section, display section/page context, and preserve the cited
+page when the PDF tab is opened. Grouped Documents actions continue to open the
+document at the top. Backend APIs, agent contracts, ingestion, data, RBAC, and
+Terraform infrastructure are unchanged.
+
+### Validation checklist
+
+- [x] Invoke `azure-validate`.
+- [x] All validation checks pass:
+  - [x] 1. Terraform installation.
+  - [x] 2. Azure CLI installation.
+  - [x] 3. Authentication and confirmed subscription.
+  - [x] 4. Terraform initialization.
+  - [x] 5. Terraform recursive format check.
+  - [x] 6. Terraform syntax validation.
+  - [x] 7. Terraform plan preview.
+  - [x] 8. Terraform state-backend access.
+  - [x] 9. Azure Policy validation.
+  - [x] 10. Template-variable resolution check.
+  - [x] 11. Frontend unit tests and production build.
+  - [x] 12. Browser citation-navigation regression flow.
+  - [x] 13. Static least-privilege role verification.
+  - [x] 14. Diff and deployment-script integrity.
+- [x] Record current validation proof and set this release to `Validated`.
+
+### Validation proof
+
+Validated at `2026-07-26T07:09:55Z`.
+
+| Check | Command or review | Result |
+| --- | --- | --- |
+| Toolchain | `terraform version`; `az version` | Terraform 1.13.3 and Azure CLI 2.80.0 |
+| Authentication | `az account show --subscription 7bc68c68-f434-49ad-ab3e-b883ec39da86` | Enabled subscription `ME-MngEnvMCAP372348-mimarusa-1`, tenant `a7b1484c-f66a-496a-b1cf-35631a50396c` |
+| Terraform | `init`; `fmt -check -recursive`; `validate`; `state list`; saved `plan -detailed-exitcode` | Passed; 97 resources readable; exit 0; no changes and 0 changed resources |
+| Saved plan integrity | `shasum -a 256` | `2f88dfd983e74c73829615be2211dccb72e5e0c12088a0a29bf285cea9969f62` |
+| Azure Policy | `policy_assignment_list` at subscription scope | Current Defender, Azure Security Baseline, and MCAP governance assignments reviewed; this frontend image-only release adds or changes no Azure resource |
+| Template variables | Search for unresolved `{{ .Env.* }}` in Terraform inputs | No matches |
+| Frontend | `npm test`; `npm run build` | 32 tests passed; TypeScript and Vite production build passed |
+| Browser flow | Playwright Chromium regression script | Inline and Sources navigation, exact heading focus, same-document reuse/top reset, cited PDF page, external-source preservation, relative PDF intent, and focus restoration passed |
+| Independent review | Five-axis review and re-review | Required scroll-reset finding fixed; no remaining high-confidence issues |
+| Static roles | IaC/diff review | No infrastructure diff or new data operation; the frontend retains only its existing ACR-scoped `AcrPull` assignment |
+| Integrity | `git diff --check`; `bash -n scripts/deploy_images.sh` | Passed |
+| Local image runtime | `docker info` | Docker daemon unavailable; ACR Task build and Container Apps health are deployment gates |
+
+**Saved plan:**
+`/Users/mimarusa/.copilot/session-state/cb9fd353-0eaf-48c5-b9a8-aa60bef10375/files/citation-navigation-validation.tfplan`
+
+**Validated by:** `azure-validate`
+
+### Deployment checklist
+
+- [x] Invoke `azure-deploy`.
+- [x] Build a uniquely tagged frontend image with an ACR Task.
+- [x] Roll only `ca-agmem-frontend` to the immutable image.
+- [x] Verify the new revision is healthy and receives 100% of traffic.
+- [x] Verify the production root, configuration, deployed bundle, and directive
+      citation interaction.
+- [x] Record the image digest, revision, rollback target, endpoint, and portal URL.
+
+### Deployment proof
+
+Deployed at `2026-07-26T07:20:02Z` to
+`ME-MngEnvMCAP372348-mimarusa-1`
+(`7bc68c68-f434-49ad-ab3e-b883ec39da86`) in `eastus2`.
+
+| Item | Result |
+| --- | --- |
+| ACR Task | Run `ch3c` succeeded |
+| Frontend image | `agmem5df652acr.azurecr.io/frontend:citation-sections-20260726071405` |
+| Image digest | `sha256:4e2af92d8f67dd3b9648824b26e59950cdb333d41344732e77f1985966ebc525` |
+| Active revision | `ca-agmem-frontend--0000024`, healthy, provisioned, one replica, 100% traffic |
+| Rollback revision | `ca-agmem-frontend--0000023`, image `frontend:202607252050-blobsource` |
+| Runtime dependency audit | `npm audit --omit=dev`: 0 vulnerabilities |
+| Public endpoint | HTTP 200; deployed `assets/index-Bd2enmIj.js` contains the citation-location implementation |
+| Backend readiness | `ready`; all required dependencies `ok` |
+| Authorization boundary | Anonymous exact-version directive document request returns HTTP 401 |
+| Deployed browser flow | Passed against the production bundle with isolated in-browser test data and API stubs |
+| Live role verification | Frontend principal `2d5ffcf5-89b7-4689-816c-ccc5c62c98bf` has `AcrPull` on the exact ACR scope |
+| Post-deployment drift | Terraform exit 0; no changes and 0 changed resources |
+
+Frontend:
+`https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io/`
+
+Resource group:
+`https://portal.azure.com/#resource/subscriptions/7bc68c68-f434-49ad-ab3e-b883ec39da86/resourceGroups/rg-agent-memory-rag/overview`
+
+**Deployed by:** `azure-deploy`

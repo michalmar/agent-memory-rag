@@ -196,17 +196,33 @@ export const chatTranscriptStyles = css`
     line-height: 0;
   }
 
-  .message-body .inline-citation a {
+  .message-body .inline-citation a,
+  .message-body .inline-citation-button {
+    padding: 0;
+    border: 0;
+    color: var(--accent);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
     font-weight: 600;
+    line-height: 1;
     text-decoration: none;
   }
 
-  .message-body .inline-citation a::before {
+  .message-body .inline-citation a::before,
+  .message-body .inline-citation-button::before {
     content: '[';
   }
 
-  .message-body .inline-citation a::after {
+  .message-body .inline-citation a::after,
+  .message-body .inline-citation-button::after {
     content: ']';
+  }
+
+  .message-body .inline-citation-button:focus-visible {
+    border-radius: 2px;
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   .message-body code {
@@ -373,11 +389,13 @@ export const chatTranscriptStyles = css`
     text-decoration: none;
   }
 
-  button.message-document {
+  button.message-document,
+  button.message-source {
     padding: 0;
     border: 0;
     background: transparent;
     cursor: pointer;
+    font-family: inherit;
     text-align: left;
   }
 
@@ -401,7 +419,8 @@ export const chatTranscriptStyles = css`
 
   a.message-document .message-source-name,
   button.message-document .message-source-name,
-  a.message-source .message-source-name {
+  a.message-source .message-source-name,
+  button.message-source .message-source-name {
     text-decoration: underline;
     text-decoration-color: var(--border-strong);
     text-underline-offset: 2px;
@@ -409,13 +428,15 @@ export const chatTranscriptStyles = css`
 
   a.message-document:hover,
   button.message-document:hover,
-  a.message-source:hover {
+  a.message-source:hover,
+  button.message-source:hover {
     color: var(--accent);
   }
 
   a.message-document:hover .message-source-name,
   button.message-document:hover .message-source-name,
-  a.message-source:hover .message-source-name {
+  a.message-source:hover .message-source-name,
+  button.message-source:hover .message-source-name {
     text-decoration-color: currentColor;
   }
 

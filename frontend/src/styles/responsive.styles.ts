@@ -184,6 +184,10 @@ export const responsiveStyles = css`
       padding: 0 14px;
     }
 
+    .document-citation-location {
+      padding-inline: 14px;
+    }
+
     .document-markdown {
       padding: 22px 16px 40px;
     }

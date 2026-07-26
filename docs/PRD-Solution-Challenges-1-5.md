@@ -35,7 +35,7 @@ for a new conversation and immutable afterward.
 | Hosted MAF capability | Support uses Foundry IQ, stateless order MCP, and session-bound profile/memory tools; directive uses eight strict backend directive tools | Uses Foundry-managed Agent Identity for app-only calls while keeping personal and directive data policy in FastAPI |
 | Retrieval | Support knowledge uses Foundry IQ; directive knowledge uses strict backend gateway tools with direct hybrid Search queries planned by GPT-5.6 | Removes duplicate directive query planning and runtime retrieval switching while preserving purpose-built directive policy |
 | Directive content authority | Cosmos version bundles own exact-version metadata, manifests, summaries, and private document locators; immutable Cosmos content items own section text | Gives manifest and summary tools one point-read authority and removes duplicate live JSON artifacts |
-| Directive source documents | A document citation opens the exact published version as sanitized canonical Markdown, with the original PDF fetched lazily through the authenticated backend | Makes primary evidence inspectable without exposing private Blob coordinates, enabling public storage, or losing cited-version fidelity |
+| Directive source documents | Documents open an exact published version at the top; inline citations and detailed Sources rows open the same sanitized canonical Markdown at the cited section, with the original PDF fetched lazily at the cited page | Makes section/page evidence directly inspectable without exposing private Blob coordinates, enabling public storage, or losing cited-version fidelity |
 | Directive source corpus | Approved operators manage source PDFs in a private Blob container; the manual ingestion job reads the current corpus and source-manager actions never control the job | Removes source documents from container images while keeping ingestion deliberate and source management isolated from published runtime data |
 | Agent selection | Explicit for new chats and immutable per conversation | Prevents silent behavior changes and state corruption |
 | Failover | No automatic cross-agent failover | A conversation remains bound to its original runtime and state |
@@ -61,7 +61,8 @@ for a new conversation and immutable afterward.
 - User-selectable native Prompt, support Hosted MAF, and directive Hosted MAF
   agents.
 - AG-UI streaming, Markdown/citation rendering, exact-version directive document
-  viewing, authenticated original-PDF access, and constrained A2UI tool cards.
+  viewing with section/page navigation, authenticated original-PDF access, and
+  constrained A2UI tool cards.
 - Entra user authentication and application-only Hosted Agent authorization.
 - Terraform-managed Azure infrastructure and RBAC.
 - Privacy-safe telemetry, readiness, release, and rollback controls.
@@ -240,6 +241,10 @@ timeouts remain explicitly agent-specific.
   directive/version identity so the user can inspect the exact published source.
   Canonical Markdown is the default view; the immutable source PDF is available
   through a separate authenticated, lazy-loaded view.
+- Directive inline citations and detailed Sources rows retain section ID,
+  number/title, and page-range metadata. Selecting either opens the exact version,
+  focuses the validated Markdown heading, and anchors the PDF at the cited start
+  page without requiring sentence-, row-, or PDF-region highlighting.
 - Missing or failed retrieval is surfaced; the system never silently falls back to
   another retrieval path.
 - The Prompt Agent's lack of application tools is a capability boundary, not a
@@ -475,10 +480,19 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
 - Render Markdown and citations directly; use the constrained A2UI subset only for
   normalized internal tool cards.
 - Render directive entries in the Documents section as dialog-opening buttons
-  keyed by exact directive/version identity; preserve ordinary links for
-  non-directive sources.
+  keyed by exact directive/version identity and open the document at the top.
+- Render directive inline citations and detailed Sources rows as dialog actions
+  that open the exact version at the cited section; preserve ordinary links and
+  non-link behavior for non-directive sources.
 - Open a responsive, accessible side drawer with sanitized canonical Markdown as
   the default tab and a lazy **Original PDF** tab.
+- Show a **Cited location** banner with source, section, and page metadata. Locate
+  headings by generated section ordinal validated against normalized section
+  number/title, use only a unique normalized fallback, and remain at the document
+  top when the target is unavailable or ambiguous.
+- Focus and briefly outline the located heading, announce the result, respect
+  reduced-motion preferences, and update same-document targets without another
+  document fetch or an implicit PDF-tab switch.
 - Fetch PDF bytes through the authenticated API, create a short-lived Blob URL,
   append a cited-page fragment when available, and support native viewing,
   open-in-new-tab, download, retry, and unsupported-viewer fallback states.
@@ -486,7 +500,7 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
   the authenticated viewer rather than allowing direct navigation.
 - Abort stale document/PDF requests, revoke Blob URLs on close or replacement,
   trap keyboard focus, support Escape and tab-arrow navigation, and restore focus
-  to the triggering Documents entry.
+  to the latest triggering Documents entry, Sources row, or inline citation.
 
 ## 13. Observability and readiness
 
@@ -608,6 +622,10 @@ Entra/RBAC-controlled, and ACA telemetry continues to resolve through AMPLS.
   Markdown is sanitized and readable, and the original PDF can be viewed,
   opened, or downloaded without public Blob access, SAS exposure, or leaked Blob
   coordinates.
+- Every directive inline citation and detailed Sources row opens that exact
+  published version at its validated Markdown heading, displays its section/page
+  context, and starts the PDF at the cited page. Same-document targets reuse the
+  loaded Markdown, while missing or ambiguous headings remain safely at the top.
 - Backend Foundry invocation uses managed identity against the public Entra-only
   endpoint.
 - Hosted application-tool traffic crosses only the documented public frontend

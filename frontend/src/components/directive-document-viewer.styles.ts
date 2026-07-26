@@ -101,6 +101,54 @@ export const directiveDocumentViewerStyles = css`
     color: var(--fg);
   }
 
+  .document-citation-location {
+    position: relative;
+    display: grid;
+    align-items: start;
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--accent-border);
+    background: var(--accent-soft);
+    color: var(--fg);
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .document-citation-icon {
+    color: var(--accent);
+    font-size: 1rem;
+  }
+
+  .document-citation-copy {
+    display: flex;
+    min-width: 0;
+    flex-wrap: wrap;
+    align-items: baseline;
+    font-size: 0.68rem;
+    gap: 3px 8px;
+    line-height: 1.45;
+  }
+
+  .document-citation-copy strong {
+    font-size: 0.7rem;
+  }
+
+  .document-citation-warning {
+    width: 100%;
+    color: var(--danger);
+  }
+
+  .document-citation-live {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    border: 0;
+    margin: -1px;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+  }
+
   .document-viewer-body {
     flex: 1;
     min-height: 0;
@@ -165,11 +213,14 @@ export const directiveDocumentViewerStyles = css`
   .document-markdown h1,
   .document-markdown h2,
   .document-markdown h3,
-  .document-markdown h4 {
+  .document-markdown h4,
+  .document-markdown h5,
+  .document-markdown h6 {
     margin: 1.65em 0 0.55em;
     color: var(--fg);
     letter-spacing: -0.025em;
     line-height: 1.25;
+    scroll-margin-block-start: 24px;
   }
 
   .document-markdown h1 {
@@ -184,6 +235,22 @@ export const directiveDocumentViewerStyles = css`
 
   .document-markdown h3 {
     font-size: 1.02rem;
+  }
+
+  .document-markdown h4,
+  .document-markdown h5,
+  .document-markdown h6 {
+    font-size: 0.94rem;
+  }
+
+  .document-citation-target {
+    border-radius: 3px;
+    animation: document-citation-arrival 1.8s ease-out;
+  }
+
+  .document-citation-target:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: 4px;
   }
 
   .document-markdown p,
@@ -314,6 +381,26 @@ export const directiveDocumentViewerStyles = css`
   @keyframes document-viewer-spin {
     to {
       transform: rotate(360deg);
+    }
+  }
+
+  @keyframes document-citation-arrival {
+    0% {
+      outline: 4px solid var(--accent);
+      outline-offset: 5px;
+      background: var(--accent-soft);
+    }
+
+    100% {
+      outline: 4px solid transparent;
+      outline-offset: 9px;
+      background: transparent;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .document-citation-target {
+      animation: none;
     }
   }
 `;

@@ -1,14 +1,17 @@
 import { html, nothing, type PropertyValues } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
 import type { DirectiveDocument } from '../client.js';
-import type {
-  DirectiveDocumentLoadStatus,
-  DirectiveDocumentReference,
-  DirectiveDocumentTab,
+import {
+  directiveReferenceFromPdfHref,
+  locateDirectiveHeading,
+  type DirectiveCitationTarget,
+  type DirectiveDocumentLoadStatus,
+  type DirectiveDocumentOpenRequest,
+  type DirectiveDocumentReference,
+  type DirectiveDocumentTab,
 } from '../directive-documents.js';
-import { directiveReferenceFromPdfHref } from '../directive-documents.js';
 import { renderSafeDirectiveMarkdown } from '../markdown.js';
 import {
   focusableElements,
@@ -20,7 +23,7 @@ export interface DirectiveDocumentViewerActions {
   close: () => void;
   selectTab: (tab: DirectiveDocumentTab) => void;
   openLinkedDocument: (
-    reference: DirectiveDocumentReference,
+    request: DirectiveDocumentOpenRequest,
     trigger?: HTMLElement,
   ) => void;
   retryDocument: () => void;
@@ -32,6 +35,8 @@ export class DirectiveDocumentViewer extends LightDomElement {
   @property({ type: Boolean }) open = false;
   @property({ attribute: false }) reference: DirectiveDocumentReference | null =
     null;
+  @property({ attribute: false }) target: DirectiveCitationTarget | null = null;
+  @property({ type: Number }) targetRevision = 0;
   @property({ attribute: false }) document: DirectiveDocument | null = null;
   @property() documentStatus: DirectiveDocumentLoadStatus = 'idle';
   @property() documentError = '';
@@ -40,9 +45,12 @@ export class DirectiveDocumentViewer extends LightDomElement {
   @property() pdfError = '';
   @property() pdfUrl: string | null = null;
   @property({ attribute: false }) actions!: DirectiveDocumentViewerActions;
+  @state() private citationLocationStatus:
+    'idle' | 'locating' | 'located' | 'unavailable' = 'idle';
 
   private keydownRoot?: Document | ShadowRoot;
   private pdfKeyboardWindow?: Window;
+  private citationNavigationGeneration = 0;
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
@@ -69,6 +77,110 @@ export class DirectiveDocumentViewer extends LightDomElement {
     ) {
       this.removePdfKeyboardBridge();
     }
+    if (!this.open || !this.target) {
+      ++this.citationNavigationGeneration;
+      this.clearCitationHeading();
+      if (
+        this.open
+        && this.activeTab === 'document'
+        && changed.has('targetRevision')
+      ) {
+        this.querySelector<HTMLElement>('.document-viewer-body')?.scrollTo({
+          top: 0,
+          behavior: 'auto',
+        });
+      }
+      if (this.citationLocationStatus !== 'idle') {
+        this.citationLocationStatus = 'idle';
+      }
+    } else if (
+      this.activeTab === 'document'
+      && this.documentStatus === 'ready'
+      && this.document
+      && (
+        changed.has('open')
+        || changed.has('document')
+        || changed.has('documentStatus')
+        || changed.has('activeTab')
+        || changed.has('target')
+        || changed.has('targetRevision')
+      )
+    ) {
+      void this.navigateToCitationTarget();
+    }
+  }
+
+  private async navigateToCitationTarget(): Promise<void> {
+    const target = this.target;
+    const revision = this.targetRevision;
+    const generation = ++this.citationNavigationGeneration;
+    if (!target || this.activeTab !== 'document') return;
+
+    if (this.citationLocationStatus !== 'locating') {
+      this.citationLocationStatus = 'locating';
+      await this.updateComplete;
+    }
+    if (
+      generation !== this.citationNavigationGeneration
+      || revision !== this.targetRevision
+    ) return;
+
+    let article = this.querySelector<HTMLElement>('.document-markdown');
+    if (!article) return;
+    let headings = Array.from(
+      article.querySelectorAll<HTMLElement>('h2, h3, h4, h5, h6'),
+    );
+    const location = locateDirectiveHeading(
+      headings.map((heading) => heading.textContent ?? ''),
+      target,
+    );
+    const status = location.kind === 'unavailable'
+      ? 'unavailable'
+      : 'located';
+    this.citationLocationStatus = status;
+    await this.updateComplete;
+    if (
+      generation !== this.citationNavigationGeneration
+      || revision !== this.targetRevision
+    ) return;
+
+    article = this.querySelector<HTMLElement>('.document-markdown');
+    if (!article) return;
+    headings = Array.from(
+      article.querySelectorAll<HTMLElement>('h2, h3, h4, h5, h6'),
+    );
+    this.clearCitationHeading();
+    if (location.kind === 'unavailable') {
+      this.querySelector<HTMLElement>('.document-viewer-body')?.scrollTo({
+        top: 0,
+        behavior: 'auto',
+      });
+      return;
+    }
+
+    const targetElement = location.kind === 'document-top'
+      ? article.querySelector<HTMLElement>('h1') ?? article
+      : headings[location.index];
+    if (!targetElement) return;
+    targetElement.id = 'directive-cited-location';
+    targetElement.tabIndex = -1;
+    targetElement.dataset.directiveCitationTarget = 'true';
+    targetElement.classList.remove('document-citation-target');
+    void targetElement.offsetWidth;
+    targetElement.classList.add('document-citation-target');
+    targetElement.scrollIntoView({ block: 'start', behavior: 'auto' });
+    targetElement.focus({ preventScroll: true });
+  }
+
+  private clearCitationHeading(): void {
+    const heading = this.querySelector<HTMLElement>(
+      '[data-directive-citation-target]',
+    );
+    if (!heading) return;
+    heading.classList.remove('document-citation-target');
+    heading.removeAttribute('data-directive-citation-target');
+    heading.removeAttribute('tabindex');
+    if (heading.id === 'directive-cited-location') heading.removeAttribute('id');
   }
 
   private installFocusTrap(): void {
@@ -149,6 +261,7 @@ export class DirectiveDocumentViewer extends LightDomElement {
           ${this.renderTab('document', 'Document')}
           ${this.renderTab('pdf', 'Original PDF')}
         </div>
+        ${this.renderCitationLocation()}
 
         <div
           class="document-viewer-body"
@@ -170,6 +283,60 @@ export class DirectiveDocumentViewer extends LightDomElement {
           @focus=${() => this.focusBoundary('first')}
         ></span>
       </section>
+    `;
+  }
+
+  private renderCitationLocation() {
+    const target = this.target;
+    if (!target) return nothing;
+    const sourceLabel = target.sourceIndex == null
+      ? ''
+      : `Source ${target.sourceIndex + 1}`;
+    const sectionLabel = target.sectionNumber || target.sectionTitle
+      ? [
+          target.sectionNumber
+            ? `Section ${target.sectionNumber}`
+            : 'Section',
+          target.sectionTitle,
+        ].filter(Boolean).join(' · ')
+      : '';
+    const pageLabel = target.pageFrom == null
+      ? ''
+      : target.pageTo != null && target.pageTo !== target.pageFrom
+        ? `Pages ${target.pageFrom}–${target.pageTo}`
+        : `Page ${target.pageFrom}`;
+    const details = [sourceLabel, sectionLabel, pageLabel].filter(Boolean);
+    const liveMessage = {
+      idle: '',
+      locating: 'Locating the cited section.',
+      located: 'Cited section located.',
+      unavailable:
+        'The cited Markdown section could not be located. The document is open at the top.',
+    }[this.citationLocationStatus];
+    return html`
+      <div
+        class="document-citation-location"
+        data-status=${this.citationLocationStatus}
+      >
+        <span
+          class="document-citation-icon material-symbols-outlined"
+          aria-hidden="true"
+        >location_on</span>
+        <div class="document-citation-copy">
+          <strong>Cited location</strong>
+          <span>${details.join(' · ') || 'Location metadata unavailable'}</span>
+          ${this.citationLocationStatus === 'unavailable'
+            ? html`<span class="document-citation-warning">
+                Section unavailable in Markdown; use the cited PDF page.
+              </span>`
+            : nothing}
+        </div>
+        <span
+          class="document-citation-live"
+          role="status"
+          aria-live="polite"
+        >${liveMessage}</span>
+      </div>
     `;
   }
 
@@ -305,7 +472,10 @@ export class DirectiveDocumentViewer extends LightDomElement {
       button.textContent ?? '',
     );
     if (!reference) return;
-    this.actions.openLinkedDocument(reference, button);
+    this.actions.openLinkedDocument(
+      { reference, initialTab: 'pdf' },
+      button,
+    );
   };
 
   private onTabKeydown(

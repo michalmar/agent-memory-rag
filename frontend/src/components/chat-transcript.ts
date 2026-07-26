@@ -19,8 +19,9 @@ import type {
   TokenUsage,
 } from '../client.js';
 import {
+  directiveOpenRequestFromCitation,
   toDirectiveDocumentReference,
-  type DirectiveDocumentReference,
+  type DirectiveDocumentOpenRequest,
 } from '../directive-documents.js';
 import { renderSafeMarkdown } from '../markdown.js';
 import { LightDomElement } from './light-dom-element.js';
@@ -31,7 +32,7 @@ export interface ChatTranscriptActions {
   copy: (turn: ChatTurn) => void;
   setFeedback: (turn: ChatTurn, feedback: 'up' | 'down') => void;
   openDocument: (
-    reference: DirectiveDocumentReference,
+    request: DirectiveDocumentOpenRequest,
     trigger?: HTMLElement,
   ) => void;
 }
@@ -157,7 +158,11 @@ export class ChatTranscript extends LightDomElement {
         </div>
         <div class="message-content">
           ${turn.text
-            ? html`<div class="message-body" @click=${this.onMessageBodyClick}>
+            ? html`<div
+                class="message-body"
+                @click=${(event: MouseEvent) =>
+                  this.onMessageBodyClick(event, turn)}
+              >
                 ${turn.role === 'assistant'
                   ? this.renderMarkdown(turn.text, turn)
                   : turn.text}
@@ -250,9 +255,12 @@ export class ChatTranscript extends LightDomElement {
       'article',
     );
     const directiveReference = toDirectiveDocumentReference(citation);
+    const openRequest = directiveReference
+      ? { reference: directiveReference, initialTab: 'document' as const }
+      : null;
     return html`
       <li class="message-document-item">
-        ${directiveReference
+        ${openRequest
           ? html`<button
               class="message-document"
               type="button"
@@ -261,7 +269,7 @@ export class ChatTranscript extends LightDomElement {
               aria-label=${`Open document ${index + 1}: ${name}`}
               @click=${(event: Event) =>
                 this.actions.openDocument(
-                  directiveReference,
+                  openRequest,
                   event.currentTarget as HTMLElement,
                 )}
             >${content}</button>`
@@ -290,6 +298,7 @@ export class ChatTranscript extends LightDomElement {
     const name = this.citationName(citation, index);
     const details = this.citationDetails(citation);
     const title = this.citationTitle(name, details);
+    const openRequest = directiveOpenRequestFromCitation(citation, index);
     const url = this.citationUrl(citation);
     const content = this.renderCitationContent(
       citation,
@@ -299,7 +308,21 @@ export class ChatTranscript extends LightDomElement {
     );
     return html`
       <li class="message-source-item">
-        ${url
+        ${openRequest
+          ? html`<button
+              type="button"
+              id=${target}
+              class="message-source"
+              title=${title}
+              aria-label=${`Open source ${index + 1}: ${name}${details ? `, ${details}` : ''}`}
+              aria-haspopup="dialog"
+              @click=${(event: Event) =>
+                this.actions.openDocument(
+                  openRequest,
+                  event.currentTarget as HTMLElement,
+                )}
+            >${content}</button>`
+          : url
           ? html`<a
               id=${target}
               class="message-source"
@@ -513,6 +536,9 @@ export class ChatTranscript extends LightDomElement {
       const label = this.escapeAttribute(
         this.citationName(turn.citations[index], index),
       );
+      if (directiveOpenRequestFromCitation(turn.citations[index], index)) {
+        return `<sup class="inline-citation"><button type="button" class="inline-citation-button" data-citation-index="${index}" aria-haspopup="dialog" aria-label="Open source ${index + 1}: ${label}">${index + 1}</button></sup>`;
+      }
       return `<sup class="inline-citation"><a href="#${target}" data-citation-target="${target}" aria-label="Source ${index + 1}: ${label}">${index + 1}</a></sup>`;
     });
   }
@@ -522,8 +548,26 @@ export class ChatTranscript extends LightDomElement {
     return unsafeHTML(renderSafeMarkdown(linked));
   }
 
-  private onMessageBodyClick = (event: MouseEvent): void => {
+  private onMessageBodyClick(event: MouseEvent, turn: ChatTurn): void {
     const element = event.target instanceof Element ? event.target : null;
+    const citationButton = element?.closest<HTMLButtonElement>(
+      'button[data-citation-index]',
+    );
+    if (citationButton) {
+      const index = Number.parseInt(
+        citationButton.dataset.citationIndex ?? '',
+        10,
+      );
+      const citation = turn.citations[index];
+      const request = citation
+        ? directiveOpenRequestFromCitation(citation, index)
+        : null;
+      if (request) {
+        event.preventDefault();
+        this.actions.openDocument(request, citationButton);
+        return;
+      }
+    }
     const link = element?.closest<HTMLAnchorElement>('a[data-citation-target]');
     const target = link?.dataset.citationTarget;
     if (!link || !target) return;
@@ -536,7 +580,7 @@ export class ChatTranscript extends LightDomElement {
     if (sourcesPanel) sourcesPanel.open = true;
     source.scrollIntoView({ block: 'nearest' });
     source.focus({ preventScroll: true });
-  };
+  }
 
   private formatRelativeTime(createdAt?: string): string {
     if (!createdAt) return '';

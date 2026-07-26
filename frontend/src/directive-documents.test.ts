@@ -1,12 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  directiveOpenRequestFromCitation,
   directiveDocumentPath,
   directiveReferenceFromPdfHref,
   directiveSourcePath,
   isAbortError,
   LatestRequest,
+  locateDirectiveHeading,
+  parseDirectiveSectionOrdinal,
   pdfUrlForPage,
+  sameDirectiveDocument,
+  toDirectiveCitationTarget,
   toDirectiveDocumentReference,
 } from './directive-documents.js';
 
@@ -26,7 +31,6 @@ describe('directive document helpers', () => {
       directiveVersionId: '30336958:v1',
       sourceName: 'Driver safety',
       versionLabel: '1.0',
-      pageFrom: 3,
     });
     expect(
       toDirectiveDocumentReference({
@@ -43,6 +47,115 @@ describe('directive document helpers', () => {
         directive_version_id: '72403881:v1',
       }),
     ).toBeNull();
+  });
+
+  it('maps citation metadata separately from exact document identity', () => {
+    const citation = {
+      ref_id: 'section-3',
+      source_name: 'Driver safety',
+      directive_id: '30336958',
+      directive_version_id: '30336958:v1',
+      version_label: '1.0',
+      section_id: 's0003-authorization-and-driver-competence',
+      section_number: '3',
+      section_title: 'Authorization and driver competence',
+      page_from: 4,
+      page_to: 5,
+    };
+
+    expect(toDirectiveCitationTarget(citation, 2)).toEqual({
+      sectionId: 's0003-authorization-and-driver-competence',
+      sectionNumber: '3',
+      sectionTitle: 'Authorization and driver competence',
+      pageFrom: 4,
+      pageTo: 5,
+      sourceIndex: 2,
+    });
+    expect(directiveOpenRequestFromCitation(citation, 2)).toEqual({
+      reference: {
+        directiveId: '30336958',
+        directiveVersionId: '30336958:v1',
+        sourceName: 'Driver safety',
+        versionLabel: '1.0',
+      },
+      target: {
+        sectionId: 's0003-authorization-and-driver-competence',
+        sectionNumber: '3',
+        sectionTitle: 'Authorization and driver competence',
+        pageFrom: 4,
+        pageTo: 5,
+        sourceIndex: 2,
+      },
+      initialTab: 'document',
+    });
+  });
+
+  it('parses generated section ordinals and recognizes document control', () => {
+    expect(parseDirectiveSectionOrdinal('s0000-document-control')).toBe(0);
+    expect(parseDirectiveSectionOrdinal('s0012-driver-training')).toBe(12);
+    expect(parseDirectiveSectionOrdinal('legacy-driver-training')).toBeNull();
+    expect(parseDirectiveSectionOrdinal('s12-driver-training')).toBeNull();
+    expect(
+      locateDirectiveHeading(['1 Scope'], {
+        sectionId: 's0000-document-control',
+      }),
+    ).toEqual({ kind: 'document-top' });
+  });
+
+  it('locates and validates generated heading ordinals', () => {
+    const headings = [
+      '1. Scope',
+      '2 — Driver training',
+      '3. Authorization and driver competence',
+    ];
+
+    expect(
+      locateDirectiveHeading(headings, {
+        sectionId: 's0003-authorization-and-driver-competence',
+        sectionNumber: '3',
+        sectionTitle: 'Authorization and driver competence',
+      }),
+    ).toEqual({ kind: 'heading', index: 2 });
+  });
+
+  it('uses only a unique normalized heading when ordinal validation fails', () => {
+    const headings = [
+      '3. Authorization and driver competence',
+      '4. Vehicle requirements',
+    ];
+
+    expect(
+      locateDirectiveHeading(headings, {
+        sectionId: 's0002-authorization-and-driver-competence',
+        sectionNumber: '3',
+        sectionTitle: 'Authorization & Driver Competence',
+      }),
+    ).toEqual({ kind: 'heading', index: 0 });
+    expect(
+      locateDirectiveHeading(['1. Scope', '2. Scope'], {
+        sectionTitle: 'Scope',
+      }),
+    ).toEqual({ kind: 'unavailable' });
+    expect(
+      locateDirectiveHeading(headings, {
+        sectionId: 'legacy-section',
+      }),
+    ).toEqual({ kind: 'unavailable' });
+  });
+
+  it('compares directive identity independently of targets and tabs', () => {
+    const reference = {
+      directiveId: '30336958',
+      directiveVersionId: '30336958:v1',
+      sourceName: 'Driver safety',
+    };
+    expect(sameDirectiveDocument(reference, { ...reference })).toBe(true);
+    expect(
+      sameDirectiveDocument(reference, {
+        ...reference,
+        directiveVersionId: '30336958:v2',
+      }),
+    ).toBe(false);
   });
 
   it('encodes exact-version API paths and targets the cited page', () => {

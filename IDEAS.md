@@ -2,18 +2,6 @@
 
 Use this file to collect workshop and project ideas. Active ideas stay here; implemented ideas are moved to the Archive section. New ideas are added first.
 
-## Navigate directive citations to exact sections
-
-Make each directive inline citation and detailed Sources row open the exact
-published document in the existing sidebar, scroll and focus the cited Markdown
-section heading, show its page range, and keep the PDF tab anchored to the cited
-start page. Section/page precision is sufficient; sentence, paragraph, table-row,
-and PDF-region highlighting are not required.
-
-**Implementation plan:** [Source citation section/page navigation plan](workspace:plan.md)
-
-<sub>**Date:** 2026-07-25 · **Author:** @michalmar · **Implemented:** No</sub>
-
 ## Implement GitHub Actions CI/CD
 
 Implement the reviewed GitHub Actions CI/CD design, including unprivileged pull-request checks, remote Terraform state, protected OIDC deployments, independent release workflows, drift detection, and tested rollback paths.
@@ -205,3 +193,15 @@ Add a `Documents` section above `Sources` that lists the parent documents used f
 Fix the source-display layout so every source is rendered as one complete item in one row. Keep the document title, version, page or section details, and status badge together; do not split, wrap, or misalign source items across columns or rows.
 
 <sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** Yes · **Implemented date:** 2026-07-24</sub>
+
+## Navigate directive citations to exact sections
+
+Make each directive inline citation and detailed Sources row open the exact
+published document in the existing sidebar, scroll and focus the cited Markdown
+section heading, show its page range, and keep the PDF tab anchored to the cited
+start page. Section/page precision is sufficient; sentence, paragraph, table-row,
+and PDF-region highlighting are not required.
+
+**Implementation plan:** [Source citation section/page navigation plan](workspace:plan.md)
+
+<sub>**Date:** 2026-07-25 · **Author:** @michalmar · **Implemented:** Yes · **Implemented date:** 2026-07-26</sub>

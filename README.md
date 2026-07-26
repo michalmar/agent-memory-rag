@@ -93,8 +93,9 @@ channel tools.
 - **Frontend** (`frontend/`) - Vite + Lit SPA with a login-first Entra gate,
   immutable agent selection, Markdown/citation streaming, an accessible
   Markdown-first directive document viewer with authenticated original-PDF
-  loading, a metadata-only directive source rail for approved operators, and a
-  constrained A2UI subset for internal tool cards.
+  loading and section/page citation navigation, a metadata-only directive source
+  rail for approved operators, and a constrained A2UI subset for internal tool
+  cards.
 - **Infrastructure** (`infra/`) - Terraform for Foundry Basic Setup, Container Apps,
   Search, Cosmos DB catalog/content containers, ACR, private endpoints, monitoring, managed
   identities, and least-privilege RBAC.
@@ -104,16 +105,24 @@ channel tools.
 ### Published directive documents
 
 Directive entries in an answer's **Documents** section open the exact published
-version in a responsive side drawer. The default **Document** tab renders the
-canonical Markdown with a shared `marked` + DOMPurify policy. Relative references
-to another directive PDF are converted into authenticated viewer actions instead
-of direct storage links.
+version at the top in a responsive side drawer. The default **Document** tab
+renders the canonical Markdown with a shared `marked` + DOMPurify policy.
+Relative references to another directive PDF are converted into authenticated
+viewer actions instead of direct storage links.
+
+Inline directive citations and rows in the detailed **Sources** list open that
+same exact-version drawer at the cited Markdown section. A **Cited location**
+banner shows the source number, section, and PDF page range; the matching heading
+is scrolled into view and focused. Moving between citations in one open document
+does not refetch it. If the section cannot be identified uniquely, the document
+stays at the top rather than navigating to a guessed heading.
 
 The **Original PDF** tab is loaded only on demand. The SPA fetches the PDF through
 the delegated-token API, creates a short-lived browser Blob URL, and supports the
 native viewer, open-in-new-tab, and download flows. Citation page metadata adds a
 `#page=` fragment when available. Closing or replacing the document aborts stale
-requests, revokes Blob URLs, and restores focus to the triggering document entry.
+requests, revokes Blob URLs, and restores focus to the latest triggering
+document or citation control.
 
 The backend resolves only an exact published catalog version and exposes:
 
