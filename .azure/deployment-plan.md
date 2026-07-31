@@ -6,7 +6,61 @@
 
 Generated: 2026-07-25T20:33:12Z
 
-## Current release: semantic health badge colors
+## Current release: session agent indicators
+
+Approved: 2026-07-31
+
+This frontend-only release adds a distinct agent badge to every session in the
+left thread panel. The badge uses the persisted agent label and matching icon,
+with a clear fallback for legacy sessions that do not have runtime metadata.
+Azure infrastructure, backend, subscription, and region remain unchanged.
+
+- [x] Add typed agent indicator presentation metadata.
+- [x] Render and style the agent badge in every session row.
+- [x] Cover persisted, inferred, and legacy agent metadata.
+- [x] Run the targeted frontend tests and production build.
+- [x] Validate the image-only release against the existing Terraform state.
+- [x] Build and deploy a uniquely tagged frontend image.
+- [x] Verify the active Azure revision and public endpoint.
+
+### Validation proof
+
+Validated at `2026-07-31T12:54:30Z`.
+
+| Check | Result |
+| --- | --- |
+| Toolchain and authentication | Terraform 1.13.3 and Azure CLI authentication available |
+| Frontend | 2 targeted tests passed; TypeScript and Vite production build passed |
+| Terraform | Initialization, recursive format check, syntax validation, 97-resource state access, and no-change plan passed |
+| Saved plan | No infrastructure changes; SHA-256 `ffcc10abb13323f73bc5f44323ff82cc6840ecbbb39d96d4d2f26b1f0c8bf32f` |
+| Template variables | No unresolved `{{ .Env.* }}` expressions |
+| Static RBAC | Frontend managed identity retains the Terraform-managed `AcrPull` assignment on the exact ACR scope |
+
+**Saved plan:**
+`/tmp/session-agent-indicator.tfplan`
+
+**Validated by:** `azure-validate`
+
+### Deployment proof
+
+Deployed at `2026-07-31T12:56:30Z`.
+
+| Item | Result |
+| --- | --- |
+| Terraform apply | No infrastructure changes; 0 added, 0 changed, 0 destroyed |
+| ACR Task | Run `ch3f` succeeded |
+| Frontend image | `agmem5df652acr.azurecr.io/frontend:session-agents-20260731125529` |
+| Active revision | `ca-agmem-frontend--0000027`, healthy, running, one replica, 100% traffic |
+| Public endpoint | HTTP 200; deployed bundle contains the agent badge and legacy fallback |
+| Backend readiness | HTTP 200 |
+| Live role verification | Frontend identity retains `AcrPull` on the exact ACR scope |
+
+Frontend:
+`https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io/`
+
+**Deployed by:** `azure-deploy`
+
+## Previous release: semantic health badge colors
 
 Approved: 2026-07-31
 

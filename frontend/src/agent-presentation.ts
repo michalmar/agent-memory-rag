@@ -1,4 +1,8 @@
-import type { AgentOption, AgentType } from './client.js';
+import type {
+  AgentOption,
+  AgentType,
+  RuntimeMetadata,
+} from './client.js';
 
 const AGENT_PRESENTATION: Record<
   AgentType,
@@ -32,4 +36,23 @@ export function agentDescription(agentType: AgentType): string {
 
 export function agentIcon(agentType: AgentType): string {
   return AGENT_PRESENTATION[agentType].icon;
+}
+
+export interface AgentIndicator {
+  label: string;
+  icon: string;
+}
+
+export function agentIndicator(metadata?: RuntimeMetadata): AgentIndicator {
+  const agentType = metadata?.agent_type;
+  if (!agentType) {
+    return {
+      label: 'Unknown agent',
+      icon: 'smart_toy',
+    };
+  }
+  return {
+    label: metadata.agent_label ?? agentLabel([], agentType),
+    icon: agentIcon(agentType),
+  };
 }

@@ -412,6 +412,33 @@ export const navigationStyles = css`
     white-space: nowrap;
   }
 
+  .thread-agent {
+    display: inline-flex;
+    max-width: 100%;
+    align-items: center;
+    margin-top: 5px;
+    padding: 2px 6px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--fg-muted);
+    background: var(--bg);
+    font-family: var(--font-mono);
+    font-size: 0.56rem;
+    line-height: 1.35;
+    gap: 4px;
+  }
+
+  .thread-agent .material-symbols-outlined {
+    flex: 0 0 auto;
+    font-size: 0.76rem;
+  }
+
+  .thread-agent-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .row-actions {
     display: flex;
     flex: 0 0 auto;

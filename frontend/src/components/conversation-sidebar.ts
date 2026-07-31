@@ -2,6 +2,7 @@ import { html, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 import { getConfig } from '../auth.js';
+import { agentIndicator } from '../agent-presentation.js';
 import type { ConversationSummary } from '../client.js';
 import type { ResourceStatus } from '../chat-models.js';
 import { LightDomElement } from './light-dom-element.js';
@@ -175,6 +176,7 @@ export class ConversationSidebar extends LightDomElement {
     const memorised = this.memorisedIds.has(conversation.id);
     const active = this.activeConversationId === conversation.id;
     const title = conversation.title ?? 'Untitled thread';
+    const agent = agentIndicator(conversation.metadata);
     return html`
       <div class="thread-row ${active ? 'active' : ''}">
         <button
@@ -187,9 +189,12 @@ export class ConversationSidebar extends LightDomElement {
           <span class="row-meta">
             ${conversation.message_count ?? 0}
             ${(conversation.message_count ?? 0) === 1 ? 'message' : 'messages'}
-            ${conversation.metadata?.agent_label
-              ? ` / ${conversation.metadata.agent_label}`
-              : ''}
+          </span>
+          <span class="thread-agent" title=${`Agent: ${agent.label}`}>
+            <span class="material-symbols-outlined" aria-hidden="true">
+              ${agent.icon}
+            </span>
+            <span class="thread-agent-label">${agent.label}</span>
           </span>
         </button>
         <div class="row-actions">
