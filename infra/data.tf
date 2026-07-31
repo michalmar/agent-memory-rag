@@ -177,7 +177,7 @@ resource "azurerm_search_service" "main" {
   sku                           = var.search_sku
   local_authentication_enabled  = false
   public_network_access_enabled = true
-  semantic_search_sku           = "free"
+  semantic_search_sku           = "standard"
   tags                          = var.tags
 
   identity {

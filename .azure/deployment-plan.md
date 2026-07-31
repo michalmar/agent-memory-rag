@@ -6,6 +6,137 @@
 
 Generated: 2026-07-25T20:33:12Z
 
+## Current release: semantic health badge colors
+
+Approved: 2026-07-31
+
+This frontend-only release gives each health value an explicit semantic color:
+green for `Healthy`, amber for `Degraded`, red for `Unhealthy`, and neutral
+gray for `Checking`. It reuses the existing light/dark theme token system and
+rolls only the frontend Container App image. Azure infrastructure, backend,
+subscription, and regions remain unchanged.
+
+- [x] Update theme tokens and badge state styles.
+- [x] Run frontend tests and production build.
+- [x] Validate the image-only release.
+- [x] Build and deploy a uniquely tagged frontend image.
+- [x] Verify the healthy green badge bundle and active Azure revision.
+
+### Validation proof
+
+Validated at `2026-07-31T11:56:30Z`.
+
+| Check | Result |
+| --- | --- |
+| Toolchain and authentication | Terraform 1.13.3, Azure CLI 2.80.0, and enabled default subscription `7bc68c68-f434-49ad-ab3e-b883ec39da86` |
+| Frontend | 35 tests passed; TypeScript and Vite production build passed |
+| Terraform | Initialization, recursive format check, syntax validation, 97-resource state access, and no-change plan passed |
+| Saved plan | No infrastructure changes; SHA-256 `22ec22d5adc8545ae8e16e9232573de0e274200a11c6259e286c662cfa72b778` |
+| Azure Policy | Six effective policy assignments retrieved without blocking the image-only release |
+| Template variables | No unresolved `{{ .Env.* }}` expressions |
+| Static RBAC | Frontend managed identity retains `AcrPull` on the exact ACR scope |
+
+**Saved plan:**
+`/Users/mimarusa/.copilot/session-state/87b04967-9dab-4fb2-bd6d-c20e7982c81f/files/badge-colors-validation.tfplan`
+
+**Validated by:** `azure-validate`
+
+### Deployment proof
+
+Deployed at `2026-07-31T09:59:30Z`.
+
+| Item | Result |
+| --- | --- |
+| Terraform apply | No infrastructure changes; 0 added, 0 changed, 0 destroyed |
+| ACR Task | Run `ch3e` succeeded |
+| Frontend image | `agmem5df652acr.azurecr.io/frontend:health-colors-20260731095739` |
+| Image digest | `sha256:6ff8e576c39eb6494432e1f423cd80eeec0c22151cfda9af0bbe9ced441c6a72` |
+| Active revision | `ca-agmem-frontend--0000026`, healthy, running, one replica, 100% traffic |
+| Public endpoint | HTTP 200; deployed bundle contains success, warning, and danger badge tokens |
+| Backend readiness | HTTP 200 |
+| Live role verification | Frontend principal retains `AcrPull` on the exact ACR scope |
+
+Frontend:
+`https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io/`
+
+**Deployed by:** `azure-deploy`
+
+## Current release: application health badge and semantic billing
+
+Approved: 2026-07-31
+
+This release adds a continuously refreshed health badge to the authenticated
+application header. The frontend reads the existing public
+`/health/ready` contract without requiring a user token and maps required
+dependency failures to `Unhealthy`, optional dependency failures to
+`Degraded`, and a fully ready response to `Healthy`. Network failures and
+timeouts are reported as `Unhealthy`; polling is bounded and cancelled when
+the component disconnects.
+
+Terraform updates the existing Azure AI Search service in place from free
+semantic-query quota to billed standard semantic search. The subscription,
+tenant, resource group, application region, Search region, identities,
+networking, databases, and indexes remain unchanged.
+
+### Current release execution plan
+
+- [x] Diagnose the production failure and confirm Cosmos DB data-plane health.
+- [x] Confirm the user-approved subscription and regions.
+- [x] Load Azure, Terraform, validation, and deployment guidance.
+- [x] Implement and test the frontend health contract and header badge.
+- [x] Update and format Terraform semantic billing configuration.
+- [x] Set this plan to `Ready for Validation`.
+- [x] Invoke `azure-validate` and record fresh validation proof.
+- [x] Apply the reviewed Terraform plan.
+- [x] Build and deploy a uniquely tagged frontend image.
+- [x] Verify Search semantic billing, backend readiness, the active frontend
+      revision, the public endpoint, and the deployed health badge.
+
+### Current release validation proof
+
+Validated at `2026-07-31T09:49:15Z`.
+
+| Check | Result |
+| --- | --- |
+| Toolchain and authentication | Terraform 1.13.3, Azure CLI 2.80.0, and enabled default subscription `7bc68c68-f434-49ad-ab3e-b883ec39da86` |
+| Terraform | Initialization, recursive format check, syntax validation, and 97-resource state access passed |
+| Saved plan | Exactly one in-place update: `azurerm_search_service.main.semantic_search_sku` from `free` to `standard` |
+| Saved plan integrity | SHA-256 `13246d31bb34a719b1b5034aada0bb04b29ab22e531d9e958f0c96799500d600` |
+| Azure Policy | Subscription and inherited Defender, Security Baseline, MCAP deploy/deny/audit assignments reviewed; no conflict with the in-place Search update |
+| Template variables | No unresolved `{{ .Env.* }}` expressions |
+| Frontend | 35 tests passed; TypeScript and Vite production build passed; local preview returned HTTP 200 and contained the health badge implementation |
+| Review and integrity | Five-axis code review reported no required findings; `git diff --check` and deployment script syntax passed |
+
+**Saved plan:**
+`/Users/mimarusa/.copilot/session-state/87b04967-9dab-4fb2-bd6d-c20e7982c81f/files/health-semantic-validation.tfplan`
+
+**Validated by:** `azure-validate`
+
+### Current release deployment proof
+
+Deployed at `2026-07-31T09:52:39Z`.
+
+| Item | Result |
+| --- | --- |
+| Terraform apply | `azurerm_search_service.main` updated in place; 0 added, 1 changed, 0 destroyed |
+| Azure AI Search | Basic service remains running in West Europe; semantic search is `standard`; semantic hybrid query returned HTTP 200 |
+| ACR Task | Run `ch3d` succeeded |
+| Frontend image | `agmem5df652acr.azurecr.io/frontend:health-badge-202607310951` |
+| Image digest | `sha256:8a52602a3121f22ccb7bd63d3dc64d8f222e3d5a786d9aef3c99b5382e4b6438` |
+| Active revision | `ca-agmem-frontend--0000025`, healthy, running, one replica, 100% traffic |
+| Backend readiness | HTTP 200, `ready`, no failed or degraded dependencies |
+| Public endpoint | HTTP 200; deployed `assets/index-CqXPirKP.js` contains the health badge and dependency-failure labels |
+| Live role verification | Frontend principal retains `AcrPull` on the exact ACR scope |
+| Post-deployment drift | Terraform reports no changes |
+
+Frontend:
+`https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io/`
+
+Resource group:
+`https://portal.azure.com/#resource/subscriptions/7bc68c68-f434-49ad-ab3e-b883ec39da86/resourceGroups/rg-agent-memory-rag/overview`
+
+**Deployed by:** `azure-deploy`
+
 ## 1. Project overview
 
 **Goal:** Deploy the completed cutover from image-packaged directive PDFs to a

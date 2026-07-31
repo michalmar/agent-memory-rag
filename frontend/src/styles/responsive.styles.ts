@@ -95,6 +95,21 @@ export const responsiveStyles = css`
       font-size: 0.87rem;
     }
 
+    .health-badge {
+      width: 26px;
+      padding: 0;
+      justify-content: center;
+    }
+
+    .health-label {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+    }
+
     .header-separator {
       margin: 0 2px;
     }

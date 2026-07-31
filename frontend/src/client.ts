@@ -4,6 +4,7 @@ import {
   directiveDocumentPath,
   directiveSourcePath,
 } from './directive-documents.js';
+import type { HealthResponse } from './health-status.js';
 import { uiLogger } from './ui-logger.js';
 
 export interface AGUIEvent {
@@ -183,6 +184,25 @@ export interface DirectiveDocument {
 
 export class AGUIClient {
   private base = getConfig().apiBaseUrl;
+
+  async health(signal?: AbortSignal): Promise<HealthResponse> {
+    const res = await fetch(`${this.base}/health/ready`, {
+      headers: { Accept: 'application/json' },
+      signal,
+    });
+    if (res.status !== 200 && res.status !== 503) {
+      throw new Error(`/health/ready ${res.status}`);
+    }
+    const value = await res.json() as Partial<HealthResponse>;
+    if (
+      (value.status !== 'ready' && value.status !== 'not_ready')
+      || typeof value.dependencies !== 'object'
+      || value.dependencies === null
+    ) {
+      throw new Error('/health/ready returned an invalid response');
+    }
+    return value as HealthResponse;
+  }
 
   async me(): Promise<Record<string, unknown>> {
     return this.req('/me');

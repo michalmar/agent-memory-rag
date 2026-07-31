@@ -35,6 +35,12 @@ import {
   type DirectiveDocumentTab,
 } from './directive-documents.js';
 import {
+  CHECKING_HEALTH,
+  summarizeHealth,
+  UNAVAILABLE_HEALTH,
+  type ApplicationHealthSummary,
+} from './health-status.js';
+import {
   AUTH_REQUIRED_EVENT,
   type AuthSession,
   getMockUserId,
@@ -83,6 +89,7 @@ export class NativeApp extends LitElement {
     getConfig().authMode === 'mock' ? 'signed-in' : 'checking';
   @state() private authSession: AuthSession | null = null;
   @state() private authError: string | null = null;
+  @state() private applicationHealth: ApplicationHealthSummary = CHECKING_HEALTH;
 
   // Memory-layer UI state
   @state() private sidebarOpen = THREAD_RAIL_DESKTOP.matches;
@@ -129,6 +136,8 @@ export class NativeApp extends LitElement {
   private conversationId: string | null = null;
   private surfaceSeq = 0;
   private toastTimer?: number;
+  private healthTimer?: number;
+  private healthAbort?: AbortController;
   private profileTrigger?: HTMLElement;
   private directiveDocumentTrigger?: HTMLElement;
   private directiveDocumentAbort?: AbortController;
@@ -236,6 +245,13 @@ export class NativeApp extends LitElement {
     this.authError = 'Your session expired. Sign in again to continue.';
     this.authStatus = 'signed-out';
   };
+  private onVisibilityChange = (): void => {
+    if (document.visibilityState === 'visible') {
+      this.startHealthPolling();
+    } else {
+      this.stopHealthPolling();
+    }
+  };
 
   static styles = appStyles;
 
@@ -244,7 +260,9 @@ export class NativeApp extends LitElement {
     THREAD_RAIL_DESKTOP.addEventListener('change', this.onThreadRailBreakpointChange);
     MEMORY_RAIL_DESKTOP.addEventListener('change', this.onMemoryRailBreakpointChange);
     window.addEventListener(AUTH_REQUIRED_EVENT, this.onAuthRequired);
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
     this.applyTheme();
+    if (document.visibilityState === 'visible') this.startHealthPolling();
     if (getConfig().authMode === 'entra') {
       void this.initializeAuthentication();
     } else {
@@ -257,8 +275,10 @@ export class NativeApp extends LitElement {
     THREAD_RAIL_DESKTOP.removeEventListener('change', this.onThreadRailBreakpointChange);
     MEMORY_RAIL_DESKTOP.removeEventListener('change', this.onMemoryRailBreakpointChange);
     window.removeEventListener(AUTH_REQUIRED_EVENT, this.onAuthRequired);
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
     ++this.authGeneration;
     this.chatAbort?.abort();
+    this.stopHealthPolling();
     this.closeDirectiveDocument(false);
     if (this.toastTimer) clearTimeout(this.toastTimer);
   }
@@ -269,6 +289,42 @@ export class NativeApp extends LitElement {
     document
       .querySelector('meta[name="theme-color"]')
       ?.setAttribute('content', this.theme === 'dark' ? '#0E0F10' : '#F6F7F8');
+  }
+
+  private startHealthPolling(): void {
+    if (this.healthTimer) clearInterval(this.healthTimer);
+    void this.refreshApplicationHealth();
+    this.healthTimer = window.setInterval(
+      () => void this.refreshApplicationHealth(),
+      30_000,
+    );
+  }
+
+  private stopHealthPolling(): void {
+    this.healthAbort?.abort();
+    this.healthAbort = undefined;
+    if (this.healthTimer) clearInterval(this.healthTimer);
+    this.healthTimer = undefined;
+  }
+
+  private async refreshApplicationHealth(): Promise<void> {
+    this.healthAbort?.abort();
+    const controller = new AbortController();
+    this.healthAbort = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 8_000);
+    try {
+      const response = await this.client.health(controller.signal);
+      if (this.healthAbort === controller) {
+        this.applicationHealth = summarizeHealth(response);
+      }
+    } catch {
+      if (this.healthAbort === controller && this.isConnected) {
+        this.applicationHealth = UNAVAILABLE_HEALTH;
+      }
+    } finally {
+      clearTimeout(timeout);
+      if (this.healthAbort === controller) this.healthAbort = undefined;
+    }
   }
 
   private showToast(msg: string): void {
@@ -1274,6 +1330,17 @@ export class NativeApp extends LitElement {
             </span>
             <span class="brand-name">Memory Thread</span>
           </div>
+
+          <span
+            class="health-badge ${this.applicationHealth.status}"
+            role="status"
+            aria-live="polite"
+            aria-label="Application health: ${this.applicationHealth.label}"
+            title=${this.applicationHealth.detail}
+          >
+            <span class="health-dot" aria-hidden="true"></span>
+            <span class="health-label">${this.applicationHealth.label}</span>
+          </span>
 
           <div class="header-actions">
             <a

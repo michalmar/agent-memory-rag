@@ -63,6 +63,50 @@ export const navigationStyles = css`
     white-space: nowrap;
   }
 
+  .health-badge {
+    display: inline-flex;
+    min-width: 0;
+    height: 26px;
+    align-items: center;
+    margin-left: 12px;
+    padding: 0 9px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--fg-muted);
+    background: var(--surface-muted);
+    font-family: var(--font-mono);
+    font-size: 0.59rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    gap: 6px;
+  }
+
+  .health-dot {
+    width: 7px;
+    height: 7px;
+    flex: 0 0 7px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  .health-badge.healthy {
+    border-color: var(--success-border);
+    color: var(--success);
+    background: var(--success-soft);
+  }
+
+  .health-badge.degraded {
+    border-color: var(--warning-border);
+    color: var(--warning);
+    background: var(--warning-soft);
+  }
+
+  .health-badge.unhealthy {
+    border-color: var(--danger-border);
+    color: var(--danger);
+    background: var(--danger-soft);
+  }
+
   .header-actions {
     display: flex;
     align-items: center;
