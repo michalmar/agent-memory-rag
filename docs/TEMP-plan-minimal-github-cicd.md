@@ -1,8 +1,10 @@
 # Minimal GitHub application deployment
 
-> **Status:** Planned, not implemented.
+> **Status:** Implemented.
 >
 > **Decision date:** 2026-08-11
+>
+> **Implementation date:** 2026-08-11
 
 ## Goal
 
@@ -139,4 +141,3 @@ require a separate manual Hosted Agent release.
 - The frontend root returns HTTP 200.
 - `/api/health/ready` returns HTTP 200 through the frontend proxy.
 - A failed build or deployment marks the workflow failed.
-

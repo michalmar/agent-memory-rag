@@ -1,0 +1,169 @@
+name: Deploy application
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - backend/**
+      - frontend/**
+      - agent_contracts/**
+      - directive_contracts/**
+      - .github/workflows/deploy-app.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-application
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+      ACR_NAME: ${{ vars.ACR_NAME }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      BACKEND_CONTAINER_APP: ${{ vars.BACKEND_CONTAINER_APP }}
+      FRONTEND_CONTAINER_APP: ${{ vars.FRONTEND_CONTAINER_APP }}
+      IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Sign in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Container Apps CLI extension
+        run: az extension add --name containerapp --upgrade
+
+      - name: Build backend image
+        run: |
+          set -euo pipefail
+          az acr build \
+            --registry "$ACR_NAME" \
+            --image "backend:$IMAGE_TAG" \
+            --file backend/Dockerfile \
+            .
+
+      - name: Build frontend image
+        run: |
+          set -euo pipefail
+          az acr build \
+            --registry "$ACR_NAME" \
+            --image "frontend:$IMAGE_TAG" \
+            --file frontend/Dockerfile \
+            frontend
+
+      - name: Deploy application
+        run: |
+          set -euo pipefail
+
+          wait_for_ready_revision() {
+            local app_name="$1"
+            local expected_image="$2"
+            local latest_revision=""
+            local ready_revision=""
+            local ready_image=""
+
+            for attempt in {1..30}; do
+              latest_revision="$(az containerapp show \
+                --name "$app_name" \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --query 'properties.latestRevisionName' \
+                --output tsv)"
+              ready_revision="$(az containerapp show \
+                --name "$app_name" \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --query 'properties.latestReadyRevisionName' \
+                --output tsv)"
+
+              if [[ -n "$latest_revision" && "$latest_revision" == "$ready_revision" ]]; then
+                ready_image="$(az containerapp revision show \
+                  --name "$app_name" \
+                  --resource-group "$AZURE_RESOURCE_GROUP" \
+                  --revision "$ready_revision" \
+                  --query 'properties.template.containers[0].image' \
+                  --output tsv)"
+                if [[ "$ready_image" == "$expected_image" ]]; then
+                  echo "$app_name revision $ready_revision is ready with $expected_image"
+                  return 0
+                fi
+              fi
+
+              if [[ "$attempt" == "30" ]]; then
+                echo "$app_name did not make the expected image ready after $attempt attempts" >&2
+                echo "Latest revision: $latest_revision" >&2
+                echo "Latest ready revision: $ready_revision" >&2
+                echo "Latest ready image: $ready_image" >&2
+                return 1
+              fi
+              sleep 10
+            done
+          }
+
+          backend_image="$ACR_LOGIN_SERVER/backend:$IMAGE_TAG"
+          frontend_image="$ACR_LOGIN_SERVER/frontend:$IMAGE_TAG"
+
+          az containerapp update \
+            --name "$BACKEND_CONTAINER_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --image "$backend_image" \
+            --output none
+          wait_for_ready_revision "$BACKEND_CONTAINER_APP" "$backend_image"
+
+          az containerapp update \
+            --name "$FRONTEND_CONTAINER_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --image "$frontend_image" \
+            --output none
+          wait_for_ready_revision "$FRONTEND_CONTAINER_APP" "$frontend_image"
+
+      - name: Verify public application
+        run: |
+          set -euo pipefail
+
+          frontend_fqdn="$(az containerapp show \
+            --name "$FRONTEND_CONTAINER_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query 'properties.configuration.ingress.fqdn' \
+            --output tsv)"
+          if [[ -z "$frontend_fqdn" ]]; then
+            echo "Frontend Container App has no ingress FQDN" >&2
+            exit 1
+          fi
+
+          verify_http_200() {
+            local url="$1"
+            local status
+
+            for attempt in {1..18}; do
+              if status="$(curl \
+                  --silent \
+                  --show-error \
+                  --output /dev/null \
+                  --write-out '%{http_code}' \
+                  --connect-timeout 10 \
+                  --max-time 30 \
+                  "$url")" && [[ "$status" == "200" ]]; then
+                return 0
+              fi
+              if [[ "$attempt" == "18" ]]; then
+                echo "$url returned HTTP $status after $attempt attempts" >&2
+                return 1
+              fi
+              sleep 10
+            done
+          }
+
+          frontend_url="https://$frontend_fqdn"
+          verify_http_200 "$frontend_url/"
+          verify_http_200 "$frontend_url/api/health/ready"

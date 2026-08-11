@@ -357,6 +357,13 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 ## Deployment model
 
+Application-only continuous deployment is defined in
+`.github/workflows/deploy-app.yml`. A matching push to `main` rebuilds both
+application images through ACR Tasks, updates the backend and frontend Container
+Apps in sequence, and verifies the public application. The required GitHub OIDC
+secrets and repository variables are documented in the
+[minimal GitHub deployment plan](docs/TEMP-plan-minimal-github-cicd.md).
+
 For a new Microsoft Entra tenant or subscription, follow the
 [cross-tenant Azure deployment runbook](docs/CROSS-TENANT-AZURE-DEPLOYMENT.md).
 It separates Contributor work from Microsoft Entra administration and Azure
