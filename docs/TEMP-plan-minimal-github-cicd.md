@@ -1,8 +1,10 @@
 # Minimal GitHub application deployment
 
-> **Status:** Planned, not implemented.
+> **Status:** Implemented.
 >
 > **Decision date:** 2026-08-11
+>
+> **Implementation date:** 2026-08-11
 
 ## Goal
 
@@ -23,7 +25,8 @@ Add one workflow:
 It runs on:
 
 - a push to `main` that changes application code;
-- an optional manual `workflow_dispatch` for rerunning a deployment.
+- an optional manual `workflow_dispatch` targeting `backend`, `frontend`, or
+  `all`.
 
 The push path filter includes:
 
@@ -32,7 +35,7 @@ backend/**
 frontend/**
 agent_contracts/**
 directive_contracts/**
-.github/workflows/deploy-app.yml
+.dockerignore
 ```
 
 Changes limited to `infra/**`, `agents/**`, `maf_hosting/**`, `setup/**`,
@@ -42,22 +45,33 @@ Changes limited to `infra/**`, `agents/**`, `maf_hosting/**`, `setup/**`,
 
 For every matching push, the workflow:
 
-1. Checks out the exact `main` commit.
-2. Signs in to Azure through GitHub OIDC.
-3. Creates one traceable image tag from the commit SHA and workflow attempt.
-4. Builds and pushes `backend:<tag>` through ACR Tasks using the repository-root
+1. Detects the affected application components from the pushed commit range:
+   - `backend/**`, `agent_contracts/**`, `directive_contracts/**`, and the root
+     `.dockerignore` select the backend;
+   - `frontend/**` selects the frontend.
+   Renames are evaluated as a delete plus an add so both source and destination
+   components are selected.
+2. Starts each selected component as an independent matrix job with its own
+   concurrency group.
+3. After acquiring that component's concurrency slot, checks out the current
+   `main` head and signs in to Azure through GitHub OIDC.
+4. Creates one traceable image tag from that source commit SHA, workflow run ID,
+   and workflow attempt.
+5. Builds and pushes each selected image through ACR Tasks using its existing
    Docker context.
-5. Builds and pushes `frontend:<tag>` through ACR Tasks using the frontend
-   Docker context.
-6. Updates the backend Container App to the new backend image.
-7. Updates the frontend Container App to the new frontend image.
-8. Verifies the public frontend URL and backend readiness endpoint.
+6. Updates each selected Container App and waits for its new revision to become
+   ready with the expected image.
+7. Verifies the public frontend URL and backend readiness endpoint.
 
-Deployments run sequentially with one concurrency group so two pushes cannot
-update the Container Apps at the same time.
+Backend deployments and frontend deployments are serialized independently.
+GitHub can coalesce an older pending run only when a newer run deploys the same
+component. Because source checkout occurs after the component lock is acquired,
+an older workflow run cannot roll a component back to an older `main` commit.
+If a force-push makes the previous commit unavailable, both components deploy
+conservatively.
 
-Both images are rebuilt on every matching push. Detecting and building only the
-changed component is deliberately omitted to keep the first workflow simple.
+An untouched component is neither rebuilt nor updated. A manual run makes the
+target explicit and supports `backend`, `frontend`, or `all`.
 
 ## Minimal GitHub configuration
 
@@ -97,6 +111,10 @@ Create one user-assigned managed identity for GitHub Actions and:
 3. Store its client ID and the existing tenant/subscription IDs in the GitHub
    repository settings listed above.
 
+The implemented deployment identity is `id-agmem-github-5df652` in
+`rg-agent-memory-rag`. Its federated credential trusts only the `main` branch,
+and the required GitHub Actions secrets and repository variables are configured.
+
 The workflow uses short-lived OIDC tokens. It does not need an Azure client
 secret, ACR password, Storage key, or publish profile.
 
@@ -134,9 +152,12 @@ require a separate manual Hosted Agent release.
 
 - A matching application-code push to `main` starts the workflow automatically.
 - An infrastructure-only push does not start it.
-- Backend and frontend ACR builds complete with the same release tag.
-- Both Container Apps reference that release tag after deployment.
+- A backend, shared-contract, or root `.dockerignore`-only change rebuilds and
+  deploys only the backend.
+- A frontend-only change rebuilds and deploys only the frontend.
+- A change spanning both components builds both images in independent component
+  jobs.
+- An untouched Container App keeps its existing image reference.
 - The frontend root returns HTTP 200.
 - `/api/health/ready` returns HTTP 200 through the frontend proxy.
 - A failed build or deployment marks the workflow failed.
-

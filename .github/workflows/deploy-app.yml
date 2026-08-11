@@ -1,0 +1,304 @@
+name: Deploy application
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - backend/**
+      - frontend/**
+      - agent_contracts/**
+      - directive_contracts/**
+      - .dockerignore
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Application component to deploy
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - backend
+          - frontend
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      components: ${{ steps.changes.outputs.components }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine deployment targets
+        id: changes
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+
+          deploy_backend=false
+          deploy_frontend=false
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+              echo "Manual deployments must run from main, got $GITHUB_REF" >&2
+              exit 1
+            fi
+
+            case "$MANUAL_TARGET" in
+              all)
+                deploy_backend=true
+                deploy_frontend=true
+                ;;
+              backend)
+                deploy_backend=true
+                ;;
+              frontend)
+                deploy_frontend=true
+                ;;
+              *)
+                echo "Unsupported manual deployment target: $MANUAL_TARGET" >&2
+                exit 1
+                ;;
+            esac
+          else
+            if [[ ! "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Invalid previous commit SHA: $BEFORE_SHA" >&2
+              exit 1
+            fi
+
+            if [[ "$BEFORE_SHA" == "0000000000000000000000000000000000000000" ]]; then
+              empty_tree="$(git hash-object -t tree /dev/null)"
+              changed_files="$(git diff --no-renames --name-only "$empty_tree" "$GITHUB_SHA")"
+            else
+              if ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+                if ! git fetch --no-tags --depth=1 origin "$BEFORE_SHA"; then
+                  echo "Previous commit is unavailable; deploying both components conservatively" >&2
+                  deploy_backend=true
+                  deploy_frontend=true
+                fi
+              fi
+              if [[ "$deploy_backend" == false && "$deploy_frontend" == false ]]; then
+                changed_files="$(git diff --no-renames --name-only "$BEFORE_SHA" "$GITHUB_SHA")"
+              fi
+            fi
+
+            if [[ "$deploy_backend" == false && "$deploy_frontend" == false ]]; then
+              while IFS= read -r path; do
+                case "$path" in
+                  backend/*|agent_contracts/*|directive_contracts/*|.dockerignore)
+                    deploy_backend=true
+                    ;;
+                  frontend/*)
+                    deploy_frontend=true
+                    ;;
+                esac
+              done <<< "$changed_files"
+            fi
+          fi
+
+          if [[ "$deploy_backend" == true && "$deploy_frontend" == true ]]; then
+            components='["backend","frontend"]'
+          elif [[ "$deploy_backend" == true ]]; then
+            components='["backend"]'
+          elif [[ "$deploy_frontend" == true ]]; then
+            components='["frontend"]'
+          else
+            echo "No deployable application changes were detected" >&2
+            exit 1
+          fi
+
+          echo "components=$components" >> "$GITHUB_OUTPUT"
+          echo "Deploy components: $components"
+
+  deploy:
+    needs: changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.changes.outputs.components) }}
+    concurrency:
+      group: deploy-application-${{ matrix.component }}
+      cancel-in-progress: false
+    env:
+      ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+      ACR_NAME: ${{ vars.ACR_NAME }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      BACKEND_CONTAINER_APP: ${{ vars.BACKEND_CONTAINER_APP }}
+      FRONTEND_CONTAINER_APP: ${{ vars.FRONTEND_CONTAINER_APP }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Sign in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Container Apps CLI extension
+        run: az extension add --name containerapp --upgrade
+
+      - name: Resolve source
+        id: source
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          echo "image_tag=$source_sha-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          echo "Deploying $source_sha"
+
+      - name: Resolve component
+        id: component
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          set -euo pipefail
+
+          case "$COMPONENT" in
+            backend)
+              {
+                echo "app=$BACKEND_CONTAINER_APP"
+                echo "context=."
+                echo "dockerfile=backend/Dockerfile"
+                echo "repository=backend"
+              } >> "$GITHUB_OUTPUT"
+              ;;
+            frontend)
+              {
+                echo "app=$FRONTEND_CONTAINER_APP"
+                echo "context=frontend"
+                echo "dockerfile=frontend/Dockerfile"
+                echo "repository=frontend"
+              } >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unsupported deployment component: $COMPONENT" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Build image
+        env:
+          BUILD_CONTEXT: ${{ steps.component.outputs.context }}
+          DOCKERFILE: ${{ steps.component.outputs.dockerfile }}
+          IMAGE_REPOSITORY: ${{ steps.component.outputs.repository }}
+          IMAGE_TAG: ${{ steps.source.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          az acr build \
+            --registry "$ACR_NAME" \
+            --image "$IMAGE_REPOSITORY:$IMAGE_TAG" \
+            --file "$DOCKERFILE" \
+            "$BUILD_CONTEXT"
+
+      - name: Deploy component
+        env:
+          APP_NAME: ${{ steps.component.outputs.app }}
+          IMAGE_REPOSITORY: ${{ steps.component.outputs.repository }}
+          IMAGE_TAG: ${{ steps.source.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          image="$ACR_LOGIN_SERVER/$IMAGE_REPOSITORY:$IMAGE_TAG"
+          az containerapp update \
+            --name "$APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --image "$image" \
+            --output none
+
+          latest_revision=""
+          ready_revision=""
+          ready_image=""
+          for attempt in {1..30}; do
+            latest_revision="$(az containerapp show \
+              --name "$APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --query 'properties.latestRevisionName' \
+              --output tsv)"
+            ready_revision="$(az containerapp show \
+              --name "$APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --query 'properties.latestReadyRevisionName' \
+              --output tsv)"
+
+            if [[ -n "$latest_revision" && "$latest_revision" == "$ready_revision" ]]; then
+              ready_image="$(az containerapp revision show \
+                --name "$APP_NAME" \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --revision "$ready_revision" \
+                --query 'properties.template.containers[0].image' \
+                --output tsv)"
+              if [[ "$ready_image" == "$image" ]]; then
+                echo "$APP_NAME revision $ready_revision is ready with $image"
+                break
+              fi
+            fi
+
+            if [[ "$attempt" == "30" ]]; then
+              echo "$APP_NAME did not make the expected image ready after $attempt attempts" >&2
+              echo "Latest revision: $latest_revision" >&2
+              echo "Latest ready revision: $ready_revision" >&2
+              echo "Latest ready image: $ready_image" >&2
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Verify public application
+        run: |
+          set -euo pipefail
+
+          frontend_fqdn="$(az containerapp show \
+            --name "$FRONTEND_CONTAINER_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query 'properties.configuration.ingress.fqdn' \
+            --output tsv)"
+          if [[ -z "$frontend_fqdn" ]]; then
+            echo "Frontend Container App has no ingress FQDN" >&2
+            exit 1
+          fi
+
+          verify_http_200() {
+            local url="$1"
+            local status
+
+            for attempt in {1..18}; do
+              if status="$(curl \
+                  --silent \
+                  --show-error \
+                  --output /dev/null \
+                  --write-out '%{http_code}' \
+                  --connect-timeout 10 \
+                  --max-time 30 \
+                  "$url")" && [[ "$status" == "200" ]]; then
+                return 0
+              fi
+              if [[ "$attempt" == "18" ]]; then
+                echo "$url returned HTTP $status after $attempt attempts" >&2
+                return 1
+              fi
+              sleep 10
+            done
+          }
+
+          frontend_url="https://$frontend_fqdn"
+          verify_http_200 "$frontend_url/"
+          verify_http_200 "$frontend_url/api/health/ready"

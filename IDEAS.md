@@ -2,14 +2,6 @@
 
 Use this file to collect workshop and project ideas. Active ideas stay here; implemented ideas are moved to the Archive section. New ideas are added first.
 
-## Implement minimal GitHub application deployment
-
-Add one GitHub Actions workflow that automatically builds and deploys the backend and frontend Container Apps when application code is pushed to `main`. Infrastructure, Hosted Agents, Foundry assets, ingestion, security checks, branch protection, and environment promotion remain outside this minimal version.
-
-**Implementation plan:** [`TEMP-plan-minimal-github-cicd.md`](docs/TEMP-plan-minimal-github-cicd.md)
-
-<sub>**Date:** 2026-07-24 · **Author:** @michalmar · **Implemented:** No</sub>
-
 ## Simplify the directive RAG pattern
 
 Review the directive RAG pattern for unnecessary complexity and simplify its design and implementation without changing required behavior.
@@ -26,6 +18,20 @@ Add leading slash commands to directive agents, such as `/search`, `/compare`, a
 <sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** No</sub>
 
 # Archive
+
+## Implement minimal GitHub application deployment
+
+Added one GitHub Actions workflow with independently serialized component jobs.
+It uses GitHub OIDC to build the affected backend or frontend image through ACR
+Tasks with a traceable tag and updates only its Container App. Shared-contract
+and root Docker-context changes deploy the backend; changes spanning both
+components run both jobs. Every deployment verifies the ready revision plus the
+public frontend and backend readiness endpoints. Manual runs can target either
+component or both.
+
+**Implementation plan:** [`TEMP-plan-minimal-github-cicd.md`](docs/TEMP-plan-minimal-github-cicd.md)
+
+<sub>**Date:** 2026-07-24 · **Author:** @michalmar · **Implemented:** Yes · **Implemented date:** 2026-08-11</sub>
 
 ## Use Azure Blob Storage as the directive source
 
