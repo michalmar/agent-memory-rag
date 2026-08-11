@@ -64,7 +64,7 @@ export class ChatComposer extends LightDomElement {
             <textarea
               id="message-input"
               rows="3"
-              aria-label="Message Memory Thread"
+              aria-label="Message MT"
               aria-describedby="composer-shortcut"
               placeholder=${this.agentType === 'directive-rag'
                 ? 'Ask about a company directive…'

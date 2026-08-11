@@ -93,7 +93,7 @@ export class NativeApp extends LitElement {
 
   // Memory-layer UI state
   @state() private sidebarOpen = THREAD_RAIL_DESKTOP.matches;
-  @state() private memoryPanelOpen = MEMORY_RAIL_DESKTOP.matches;
+  @state() private memoryPanelOpen = false;
   @state() private rightRailMode: RightRailMode = 'memory';
   @state() private conversations: ConversationSummary[] = [];
   @state() private memories: MemoryRow[] = [];
@@ -233,7 +233,7 @@ export class NativeApp extends LitElement {
     if (!event.matches) this.memoryPanelOpen = false;
   };
   private onMemoryRailBreakpointChange = (event: MediaQueryListEvent): void => {
-    this.memoryPanelOpen = event.matches;
+    if (!event.matches) this.memoryPanelOpen = false;
   };
   private onAuthRequired = (): void => {
     if (getConfig().authMode !== 'entra' || this.authStatus !== 'signed-in') return;
@@ -1324,11 +1324,11 @@ export class NativeApp extends LitElement {
             <span class="material-symbols-outlined">menu</span>
           </button>
 
-          <div class="brand" aria-label="Memory Thread">
+          <div class="brand" aria-label="MT">
             <span class="brand-mark" aria-hidden="true">
               <span></span><span></span><span></span>
             </span>
-            <span class="brand-name">Memory Thread</span>
+            <span class="brand-name">MT</span>
           </div>
 
           <span
@@ -1562,7 +1562,7 @@ export class NativeApp extends LitElement {
             <span class="brand-mark" aria-hidden="true">
               <span></span><span></span><span></span>
             </span>
-            <span class="brand-name">Memory Thread</span>
+            <span class="brand-name">MT</span>
           </div>
 
           <div class="auth-heading">
