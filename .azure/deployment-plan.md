@@ -1,10 +1,52 @@
 # Azure Deployment Plan - Azure Blob Directive Source
 
-> **Status:** Deployed
+> **Status:** Validated
 >
-> **Current release status:** Deployed
+> **Current release status:** Validated
 
 Generated: 2026-07-25T20:33:12Z
+
+## Current release: selective GitHub application deployment
+
+Approved: 2026-08-11
+
+This CI/CD-only release adds one GitHub Actions workflow that builds and deploys
+the backend and frontend independently. Backend code, shared contracts, and the
+root Docker context select the backend; frontend code selects the frontend.
+Manual runs can target either component or both. Azure infrastructure and
+application source remain unchanged.
+
+- [x] Detect backend-only, frontend-only, and combined push ranges.
+- [x] Treat cross-component renames as delete plus add.
+- [x] Serialize backend and frontend deployments independently.
+- [x] Check out current `main` only after acquiring the component lock.
+- [x] Build with the existing ACR Tasks Docker contexts.
+- [x] Wait for the expected ready revision and verify public health.
+- [x] Configure and verify GitHub OIDC secrets, variables, federation, and RBAC.
+- [x] Validate workflow syntax, embedded shell, selectors, and deployment roles.
+- [ ] Merge the workflow to `main`.
+- [ ] Run backend-only and frontend-only deployments.
+- [ ] Confirm each deployment leaves the untouched Container App image unchanged.
+- [ ] Record workflow runs, revisions, image references, and live acceptance.
+
+### Validation proof
+
+Validated at `2026-08-11T09:36:00Z`.
+
+| Check | Result |
+| --- | --- |
+| Workflow | `actionlint` passed |
+| Embedded shell | All 7 workflow shell blocks passed `bash -n` |
+| Push selection | Historical backend-only, frontend-only, and combined commit ranges passed |
+| Manual selection | `backend`, `frontend`, and `all` inputs produced the expected matrices |
+| Change boundaries | Cross-component rename and root `.dockerignore` targeting passed |
+| GitHub configuration | Three OIDC secrets and five Azure resource variables are configured |
+| Azure target | `ME-MngEnvMCAP372348-mimarusa-1` / `rg-agent-memory-rag` in `eastus2` is provisioned |
+| Deployment identity | `id-agmem-github-5df652` trusts only `repo:michalmar/agent-memory-rag:ref:refs/heads/main` and has resource-group `Contributor` |
+| Image pull | Backend and frontend managed identities retain ACR-scoped `AcrPull` |
+| Change scope | No Terraform or application-source change; CI/CD workflow and documentation only |
+
+**Validated by:** `azure-validate`
 
 ## Current release: session agent indicators
 
