@@ -46,7 +46,8 @@ For every matching push, the workflow:
 
 1. Checks out the exact `main` commit.
 2. Signs in to Azure through GitHub OIDC.
-3. Creates one traceable image tag from the commit SHA and workflow attempt.
+3. Creates one traceable image tag from the commit SHA, workflow run ID, and
+   workflow attempt.
 4. Builds and pushes `backend:<tag>` through ACR Tasks using the repository-root
    Docker context.
 5. Builds and pushes `frontend:<tag>` through ACR Tasks using the frontend
@@ -98,6 +99,10 @@ Create one user-assigned managed identity for GitHub Actions and:
    `rg-agent-memory-rag` resource group.
 3. Store its client ID and the existing tenant/subscription IDs in the GitHub
    repository settings listed above.
+
+The implemented deployment identity is `id-agmem-github-5df652` in
+`rg-agent-memory-rag`. Its federated credential trusts only the `main` branch,
+and the required GitHub Actions secrets and repository variables are configured.
 
 The workflow uses short-lived OIDC tokens. It does not need an Azure client
 secret, ACR password, Storage key, or publish profile.
