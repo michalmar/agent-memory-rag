@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Configure a Foundry Hosted Agent identity for the application gateway and
 # Agent 365 observability. The role assignments are idempotent.
+# Use --skip-agent365 when Agent 365 is intentionally outside the deployment.
 set -euo pipefail
 
 export AZURE_CONFIG_DIR="${AZURE_CONFIG_DIR:-$HOME/.azure-365}"
@@ -15,6 +16,7 @@ SET_APP_TOOLS_CONNECTION=true
 CONNECTION_OPTION_SET=false
 AGENT365_APP_ID="${AGENT365_OBSERVABILITY_APP_ID:-9b975845-388f-4429-889e-eab1ef63949c}"
 AGENT365_ROLE_ID="8f71190c-00c8-461d-a63b-f74abde9ba52"
+ASSIGN_AGENT365=true
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,6 +33,10 @@ while [[ $# -gt 0 ]]; do
     --no-app-tools-connection)
       SET_APP_TOOLS_CONNECTION=false
       CONNECTION_OPTION_SET=true
+      shift
+      ;;
+    --skip-agent365)
+      ASSIGN_AGENT365=false
       shift
       ;;
     *) echo "unknown arg: $1" >&2; exit 2;;
@@ -97,24 +103,28 @@ APP_ROLE_ID="$(
 
 assign_app_role "$PRINCIPAL_ID" "$RESOURCE_SP_ID" "$APP_ROLE_ID" "AgentTools.Invoke"
 
-AGENT365_RESOURCE_SP_ID="$(
-  az ad sp show --id "$AGENT365_APP_ID" --query id -o tsv
-)"
-AGENT365_ROLE_VALUE="$(
-  az ad sp show --id "$AGENT365_APP_ID" \
-    --query "appRoles[?id=='${AGENT365_ROLE_ID}' && value=='Agent365.Observability.OtelWrite'].value | [0]" \
-    -o tsv
-)"
-[[ "$AGENT365_ROLE_VALUE" == "Agent365.Observability.OtelWrite" ]] || {
-  echo "ERROR: Agent365.Observability.OtelWrite is unavailable in this tenant" >&2
-  exit 1
-}
+if [[ "$ASSIGN_AGENT365" == true ]]; then
+  AGENT365_RESOURCE_SP_ID="$(
+    az ad sp show --id "$AGENT365_APP_ID" --query id -o tsv
+  )"
+  AGENT365_ROLE_VALUE="$(
+    az ad sp show --id "$AGENT365_APP_ID" \
+      --query "appRoles[?id=='${AGENT365_ROLE_ID}' && value=='Agent365.Observability.OtelWrite'].value | [0]" \
+      -o tsv
+  )"
+  [[ "$AGENT365_ROLE_VALUE" == "Agent365.Observability.OtelWrite" ]] || {
+    echo "ERROR: Agent365.Observability.OtelWrite is unavailable in this tenant" >&2
+    exit 1
+  }
 
-assign_app_role \
-  "$PRINCIPAL_ID" \
-  "$AGENT365_RESOURCE_SP_ID" \
-  "$AGENT365_ROLE_ID" \
-  "Agent365.Observability.OtelWrite"
+  assign_app_role \
+    "$PRINCIPAL_ID" \
+    "$AGENT365_RESOURCE_SP_ID" \
+    "$AGENT365_ROLE_ID" \
+    "Agent365.Observability.OtelWrite"
+else
+  echo "Skipped Agent365.Observability.OtelWrite by explicit request."
+fi
 
 if [[ -n "$AZD_PROJECT_DIR" ]]; then
   [[ -f "$AZD_PROJECT_DIR/azure.yaml" ]] || {

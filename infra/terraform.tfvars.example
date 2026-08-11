@@ -1,4 +1,23 @@
-subscription_id = "7bc68c68-f434-49ad-ab3e-b883ec39da86"
-location        = "eastus2"
+subscription_id     = "00000000-0000-0000-0000-000000000000"
+location            = "eastus2"
+search_location     = "westeurope"
+resource_group_name = "rg-agent-memory-rag"
+name_prefix         = "agmem"
+
 entra_tenant_id = "00000000-0000-0000-0000-000000000000"
 entra_client_id = "00000000-0000-0000-0000-000000000000"
+
+tags = {
+  project = "agent-memory-rag"
+  env     = "demo"
+  owner   = "replace-me"
+}
+
+foundry_prompt_enabled  = false
+foundry_hosted_enabled  = false
+directive_agent_enabled = false
+directive_agent_visible = false
+
+hosted_agent_principal_ids           = []
+support_hosted_agent_principal_ids   = []
+directive_hosted_agent_principal_ids = []

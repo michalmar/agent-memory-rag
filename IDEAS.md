@@ -14,6 +14,8 @@ Implement the reviewed GitHub Actions CI/CD design, including unprivileged pull-
 
 Review the directive RAG pattern for unnecessary complexity and simplify its design and implementation without changing required behavior.
 
+**Implementation plan:** [`TEMP-plan-simplify-directive-rag.md`](docs/TEMP-plan-simplify-directive-rag.md)
+
 <sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** No</sub>
 
 

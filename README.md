@@ -357,6 +357,12 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 ## Deployment model
 
+For a new Microsoft Entra tenant or subscription, follow the
+[cross-tenant Azure deployment runbook](docs/CROSS-TENANT-AZURE-DEPLOYMENT.md).
+It separates Contributor work from Microsoft Entra administration and Azure
+authorization tasks, and documents the target-specific Terraform and Hosted
+Agent changes required before deployment.
+
 1. Configure `infra/terraform.tfvars` from
    `infra/terraform.tfvars.example`.
 2. Provision Azure resources and RBAC with Terraform.
