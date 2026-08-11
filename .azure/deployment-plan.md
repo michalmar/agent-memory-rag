@@ -1,8 +1,8 @@
 # Azure Deployment Plan - Azure Blob Directive Source
 
-> **Status:** Validated
+> **Status:** Deployed
 >
-> **Current release status:** Validated
+> **Current release status:** Deployed
 
 Generated: 2026-07-25T20:33:12Z
 
@@ -24,10 +24,10 @@ application source remain unchanged.
 - [x] Wait for the expected ready revision and verify public health.
 - [x] Configure and verify GitHub OIDC secrets, variables, federation, and RBAC.
 - [x] Validate workflow syntax, embedded shell, selectors, and deployment roles.
-- [ ] Merge the workflow to `main`.
-- [ ] Run backend-only and frontend-only deployments.
-- [ ] Confirm each deployment leaves the untouched Container App image unchanged.
-- [ ] Record workflow runs, revisions, image references, and live acceptance.
+- [x] Merge the workflow to `main`.
+- [x] Run backend-only and frontend-only deployments.
+- [x] Confirm each deployment leaves the untouched Container App image unchanged.
+- [x] Record workflow runs, revisions, image references, and live acceptance.
 
 ### Validation proof
 
@@ -47,6 +47,31 @@ Validated at `2026-08-11T09:36:00Z`.
 | Change scope | No Terraform or application-source change; CI/CD workflow and documentation only |
 
 **Validated by:** `azure-validate`
+
+### Deployment proof
+
+Deployed at `2026-08-11T09:46:00Z`.
+
+| Item | Result |
+| --- | --- |
+| Pull request | [#2](https://github.com/michalmar/agent-memory-rag/pull/2) merged as `66e684374890817d294637db7031b7e2d81b989c` |
+| Backend-only run | [31478710782](https://github.com/michalmar/agent-memory-rag/actions/runs/31478710782) succeeded; only `deploy (backend)` ran |
+| Frontend-only run | [31478990188](https://github.com/michalmar/agent-memory-rag/actions/runs/31478990188) succeeded; only `deploy (frontend)` ran |
+| Backend isolation | Backend changed from `202607252050-blobsource`; frontend remained `session-agents-20260731125529` |
+| Frontend isolation | Frontend changed from `session-agents-20260731125529`; backend retained the image from run `31478710782` |
+| Backend image | `agmem5df652acr.azurecr.io/backend:66e684374890817d294637db7031b7e2d81b989c-31478710782-1` (`sha256:6b658e856fa70488bd13c5e95250765e3bfe2699010e8b1187357888cbbec295`) |
+| Frontend image | `agmem5df652acr.azurecr.io/frontend:66e684374890817d294637db7031b7e2d81b989c-31478990188-1` (`sha256:cabdb3633a6b29801c1f9378bfbab6ca9408cc8a007a03d91e8c338cf3c0ec26`) |
+| Revisions | Backend `ca-agmem-backend--0000060` and frontend `ca-agmem-frontend--0000028` are healthy, running, and latest-ready |
+| Live acceptance | Frontend returned HTTP 200; `/api/health/ready` returned HTTP 200 with status `ready` and every dependency `ok` |
+| Live RBAC | Deployment identity retains resource-group `Contributor`; both Container App identities retain ACR-scoped `AcrPull` |
+
+Frontend:
+`https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io/`
+
+Resource group:
+`https://portal.azure.com/#resource/subscriptions/7bc68c68-f434-49ad-ab3e-b883ec39da86/resourceGroups/rg-agent-memory-rag/overview`
+
+**Deployed by:** `azure-deploy`
 
 ## Current release: session agent indicators
 
