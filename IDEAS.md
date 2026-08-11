@@ -15,7 +15,9 @@ Review the directive RAG pattern for unnecessary complexity and simplify its des
 
 Add leading slash commands to directive agents, such as `/search`, `/compare`, and `/id`, with clear routing, validation, and help behavior.
 
-<sub>**Date:** 2026-07-23 · **Author:** Unknown · **Implemented:** No</sub>
+**Implementation plan:** [`TEMP-plan-directive-agent-slash-commands.md`](docs/TEMP-plan-directive-agent-slash-commands.md)
+
+<sub>**Date:** 2026-07-23 · **Author:** Unknown · **Planned:** Yes · **Planned date:** 2026-08-11 · **Implemented:** No</sub>
 
 # Archive
 
