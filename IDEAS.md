@@ -2,11 +2,11 @@
 
 Use this file to collect workshop and project ideas. Active ideas stay here; implemented ideas are moved to the Archive section. New ideas are added first.
 
-## Implement GitHub Actions CI/CD
+## Implement minimal GitHub application deployment
 
-Implement the reviewed GitHub Actions CI/CD design, including unprivileged pull-request checks, remote Terraform state, protected OIDC deployments, independent release workflows, drift detection, and tested rollback paths.
+Add one GitHub Actions workflow that automatically builds and deploys the backend and frontend Container Apps when application code is pushed to `main`. Infrastructure, Hosted Agents, Foundry assets, ingestion, security checks, branch protection, and environment promotion remain outside this minimal version.
 
-**Implementation plan:** [GitHub Actions CI/CD design proposal](.azure/deployment-plan.md#github-actions-cicd-design-proposal---2026-07-24)
+**Implementation plan:** [`TEMP-plan-minimal-github-cicd.md`](docs/TEMP-plan-minimal-github-cicd.md)
 
 <sub>**Date:** 2026-07-24 · **Author:** @michalmar · **Implemented:** No</sub>
 
