@@ -21,12 +21,13 @@ Add leading slash commands to directive agents, such as `/search`, `/compare`, a
 
 ## Implement minimal GitHub application deployment
 
-Added one serialized GitHub Actions workflow that uses GitHub OIDC to build the
-backend and frontend images through ACR Tasks with a shared traceable tag,
-updates both Container Apps in sequence, and verifies their image references
-plus the public frontend and backend readiness endpoints. Only matching
-application changes on `main` trigger it automatically; manual reruns remain
-available.
+Added one GitHub Actions workflow with independently serialized component jobs.
+It uses GitHub OIDC to build the affected backend or frontend image through ACR
+Tasks with a traceable tag and updates only its Container App. Shared-contract
+and root Docker-context changes deploy the backend; changes spanning both
+components run both jobs. Every deployment verifies the ready revision plus the
+public frontend and backend readiness endpoints. Manual runs can target either
+component or both.
 
 **Implementation plan:** [`TEMP-plan-minimal-github-cicd.md`](docs/TEMP-plan-minimal-github-cicd.md)
 

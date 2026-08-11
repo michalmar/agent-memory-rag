@@ -358,10 +358,12 @@ curl -H "Authorization: Bearer $TOKEN" \
 ## Deployment model
 
 Application-only continuous deployment is defined in
-`.github/workflows/deploy-app.yml`. A matching push to `main` rebuilds both
-application images through ACR Tasks, updates the backend and frontend Container
-Apps in sequence, and verifies the public application. The required GitHub OIDC
-secrets and repository variables are documented in the
+`.github/workflows/deploy-app.yml`. A matching push to `main` rebuilds and
+updates only the affected Container App: backend and shared-contract changes
+or root Docker-context changes deploy the backend, while frontend changes deploy
+the frontend. Changes spanning both components deploy through independent
+component jobs. The required GitHub OIDC secrets and repository variables are
+documented in the
 [minimal GitHub deployment plan](docs/TEMP-plan-minimal-github-cicd.md).
 
 For a new Microsoft Entra tenant or subscription, follow the
