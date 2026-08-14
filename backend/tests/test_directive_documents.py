@@ -22,6 +22,7 @@ from agent_memory_backend.directive_artifacts import DirectiveArtifactRepository
 from agent_memory_backend.directive_documents import (
     DirectiveDocumentResponse,
     DirectiveDocumentService,
+    DirectiveSourceReference,
     DirectiveSourceStream,
 )
 from agent_memory_backend.directive_errors import DirectiveDataUnavailable
@@ -183,6 +184,19 @@ class DirectiveDocumentServiceTests(unittest.IsolatedAsyncioTestCase):
             [(_DIRECTIVE_ID, _VERSION_ID)],
         )
 
+    async def test_resolving_source_does_not_open_the_pdf_stream(self) -> None:
+        catalog = _Catalog()
+        artifacts = _Artifacts()
+        service = DirectiveDocumentService(catalog, artifacts)
+
+        source = await service.resolve_source(_DIRECTIVE_ID, _VERSION_ID)
+
+        self.assertIsNotNone(source)
+        assert source is not None
+        self.assertEqual(source.source_filename, "Řidičský předpis 42.PDF")
+        self.assertEqual(source.source_hash, _HASH)
+        self.assertEqual(artifacts.stream_names, [])
+
     async def test_missing_version_does_not_read_artifacts(self) -> None:
         catalog = _Catalog()
         catalog.bundle = None
@@ -263,15 +277,37 @@ class _RouteService:
     document: DirectiveDocumentResponse | None = None
     source: DirectiveSourceStream | None = None
     error: Exception | None = None
+    document_request: tuple[str, str] | None = None
+    source_request: tuple[str, str] | None = None
+    stream_source_calls: int = 0
 
-    async def get_document(self, _directive_id: str, _version_id: str):
+    async def get_document(self, directive_id: str, version_id: str):
+        self.document_request = (directive_id, version_id)
         if self.error:
             raise self.error
         return self.document
 
-    async def get_source(self, _directive_id: str, _version_id: str):
+    async def resolve_source(self, directive_id: str, version_id: str):
+        self.source_request = (directive_id, version_id)
         if self.error:
             raise self.error
+        if self.source is None:
+            return None
+        return DirectiveSourceReference(
+            source_filename=self.source.source_filename,
+            source_hash=self.source.source_hash,
+            source_blob_name="directives/test/source.pdf",
+        )
+
+    async def stream_source(
+        self,
+        source: DirectiveSourceReference,
+    ) -> DirectiveSourceStream:
+        del source
+        self.stream_source_calls += 1
+        if self.error:
+            raise self.error
+        assert self.source is not None
         return self.source
 
 
@@ -304,6 +340,31 @@ class DirectiveDocumentRouteTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, document)
 
+    async def test_routes_normalize_unicode_query_identity_at_the_backend(self) -> None:
+        document = DirectiveDocumentResponse(
+            directive_id=_DIRECTIVE_ID,
+            directive_version_id=_VERSION_ID,
+            title="Driver safety",
+            version_label="1.0",
+            effective_from="2025-01-01",
+            source_filename="driver-safety.pdf",
+            total_pages=4,
+            markdown="# Driver safety",
+        )
+        service = _RouteService(document=document)
+        with patch.object(server.services, "directive_documents", service):
+            result = await server.get_directive_document(
+                " číslo / 7 ",
+                "číslo/7:v01.0",
+                _user(),
+            )
+
+        self.assertEqual(result, document)
+        self.assertEqual(
+            service.document_request,
+            ("ČÍSLO/7", "ČÍSLO/7:v1"),
+        )
+
     async def test_pdf_route_sets_private_inline_headers(self) -> None:
         async def chunks() -> AsyncIterator[bytes]:
             yield b"%PDF"
@@ -313,10 +374,11 @@ class DirectiveDocumentRouteTests(unittest.IsolatedAsyncioTestCase):
             source_hash=_HASH,
             chunks=chunks(),
         )
+        service = _RouteService(source=source)
         with patch.object(
             server.services,
             "directive_documents",
-            _RouteService(source=source),
+            service,
         ):
             response = await server.get_directive_source(
                 _DIRECTIVE_ID,
@@ -335,12 +397,42 @@ class DirectiveDocumentRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.headers["etag"], f'"{_HASH}"')
         self.assertEqual(
             response.headers["cache-control"],
-            "private, max-age=3600, immutable",
+            "private, max-age=0, must-revalidate",
         )
         self.assertEqual(
             response.headers["x-content-type-options"],
             "nosniff",
         )
+
+    async def test_pdf_route_revalidates_matching_etag(self) -> None:
+        async def chunks() -> AsyncIterator[bytes]:
+            yield b"%PDF"
+
+        source = DirectiveSourceStream(
+            source_filename="driver safety.pdf",
+            source_hash=_HASH,
+            chunks=chunks(),
+        )
+        service = _RouteService(source=source)
+        with patch.object(
+            server.services,
+            "directive_documents",
+            service,
+        ):
+            response = await server.get_directive_source(
+                _DIRECTIVE_ID,
+                _VERSION_ID,
+                _user(),
+                f'W/"{_HASH}"',
+            )
+
+        self.assertEqual(response.status_code, 304)
+        self.assertEqual(response.headers["etag"], f'"{_HASH}"')
+        self.assertEqual(
+            response.headers["cache-control"],
+            "private, max-age=0, must-revalidate",
+        )
+        self.assertEqual(service.stream_source_calls, 0)
 
     async def test_routes_map_missing_and_unavailable_versions(self) -> None:
         with patch.object(

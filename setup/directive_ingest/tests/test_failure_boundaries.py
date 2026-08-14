@@ -27,6 +27,7 @@ async def test_document_intelligence_uses_acquired_bearer_token() -> None:
             assert authorization.startswith("Bearer ")
             assert authorization.endswith("test-token")
             assert authorization == "Bearer " + "test-token"
+            assert kwargs["params"]["stringIndexType"] == "unicodeCodePoint"
             return httpx.Response(
                 200,
                 json={
@@ -58,7 +59,7 @@ async def test_document_intelligence_uses_acquired_bearer_token() -> None:
         finally:
             await extractor.close()
 
-    assert run(extract()) == 1
+    assert await extract() == 1
 
 
 @pytest.mark.asyncio

@@ -12,9 +12,9 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 load_dotenv()
@@ -24,6 +24,7 @@ from agent_contracts import (
     render_instructions,
 )
 from directive_contracts import (
+    build_directive_version_id,
     normalize_directive_id,
     validate_directive_source_basename,
     validate_directive_version_id,
@@ -480,12 +481,13 @@ async def get_directive_source(
     directive_id: str = Query(..., min_length=1, max_length=128),
     directive_version_id: str = Query(..., min_length=1, max_length=200),
     _user: User = Depends(get_current_user),
+    if_none_match: str | None = Header(default=None, alias="If-None-Match"),
 ):
     directive_id, directive_version_id = _normalize_directive_query(
         directive_id, directive_version_id
     )
     try:
-        source = await services.directive_documents.get_source(
+        source = await services.directive_documents.resolve_source(
             directive_id,
             directive_version_id,
         )
@@ -497,20 +499,44 @@ async def get_directive_source(
     if source is None:
         raise HTTPException(status_code=404, detail="Directive version not found")
 
-    encoded_filename = quote(source.source_filename, safe="")
+    headers = _directive_source_headers(source.source_filename, source.source_hash)
+    if _if_none_match_matches(if_none_match, headers["ETag"]):
+        return Response(status_code=304, headers=headers)
+    try:
+        stream = await services.directive_documents.stream_source(source)
+    except DirectiveDataUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Directive document is temporarily unavailable",
+        ) from exc
     return StreamingResponse(
-        source.chunks,
+        stream.chunks,
         media_type="application/pdf",
-        headers={
-            "Cache-Control": "private, max-age=3600, immutable",
-            "Content-Disposition": (
-                'inline; filename="directive.pdf"; '
-                f"filename*=UTF-8''{encoded_filename}"
-            ),
-            "ETag": f'"{source.source_hash}"',
-            "X-Content-Type-Options": "nosniff",
-        },
+        headers=headers,
     )
+
+
+def _directive_source_headers(source_filename: str, source_hash: str) -> dict[str, str]:
+    encoded_filename = quote(source_filename, safe="")
+    return {
+        "Cache-Control": "private, max-age=0, must-revalidate",
+        "Content-Disposition": (
+            'inline; filename="directive.pdf"; '
+            f"filename*=UTF-8''{encoded_filename}"
+        ),
+        "ETag": f'"{source_hash}"',
+        "X-Content-Type-Options": "nosniff",
+    }
+
+
+def _if_none_match_matches(header: str | None, etag: str) -> bool:
+    if not isinstance(header, str) or not header:
+        return False
+    for candidate in header.split(","):
+        candidate = candidate.strip()
+        if candidate == "*" or candidate.removeprefix("W/") == etag:
+            return True
+    return False
 
 
 def _normalize_directive_query(
@@ -518,8 +544,17 @@ def _normalize_directive_query(
 ) -> tuple[str, str]:
     try:
         normalized_id = normalize_directive_id(directive_id)
+        marker = directive_version_id.rfind(":v")
+        if marker <= 0:
+            raise ValueError(
+                "Directive version ID must use '<directive_id>:v<version>'"
+            )
+        normalized_version_id = build_directive_version_id(
+            directive_version_id[:marker],
+            directive_version_id[marker + 2 :],
+        )
         return normalized_id, validate_directive_version_id(
-            directive_version_id, normalized_id
+            normalized_version_id, normalized_id
         )
     except (TypeError, ValueError) as exc:
         raise HTTPException(

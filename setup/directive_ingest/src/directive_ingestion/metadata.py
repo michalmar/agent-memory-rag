@@ -205,7 +205,17 @@ def _table_matches(
         normalized = normalize_label(text)
         inline = _inline_value(text, aliases)
         if inline:
-            values.append(_match(inline, text, cell.page_number, cell.polygon, cell.spans, extraction))
+            values.append(
+                _match(
+                    inline,
+                    text,
+                    cell.page_number,
+                    cell.polygon,
+                    cell.spans,
+                    extraction,
+                    table.spans,
+                )
+            )
             continue
         if normalized not in aliases:
             continue
@@ -221,6 +231,7 @@ def _table_matches(
                     cell.polygon,
                     cell.spans,
                     extraction,
+                    table.spans,
                 )
             )
     return values
@@ -278,6 +289,7 @@ def _match(
     polygon: tuple[float, ...],
     spans: tuple,
     extraction: ExtractedDocument,
+    fallback_spans: tuple = (),
 ) -> _ValueMatch:
     vertical = polygon[1] / extraction.page(page_number).height
     authority_rank = 2 if page_number == 2 else 1 if vertical >= 0.80 else 0
@@ -286,8 +298,40 @@ def _match(
         source_text=source_text,
         page_number=page_number,
         authority_rank=authority_rank,
-        offset=spans[0].offset,
+        offset=_source_order_offset(
+            extraction, page_number, polygon, spans, fallback_spans
+        ),
     )
+
+
+def _source_order_offset(
+    extraction: ExtractedDocument,
+    page_number: int,
+    polygon: tuple[float, ...],
+    *span_sets: tuple,
+) -> int:
+    offsets = [
+        span.offset
+        for spans in span_sets
+        for span in spans
+        if span.page_number == page_number
+    ]
+    if offsets:
+        return min(offsets)
+    page_spans = [
+        span
+        for span in extraction.content_spans
+        if span.page_number == page_number
+    ]
+    if not page_spans:
+        raise DirectiveMetadataError(
+            f"Metadata references an unknown page: {page_number}"
+        )
+    page = extraction.page(page_number)
+    page_start = min(span.offset for span in page_spans)
+    page_length = sum(span.length for span in page_spans)
+    vertical = min(polygon[1::2]) / page.height if polygon else 0
+    return page_start + int(max(0, min(1, vertical)) * max(page_length - 1, 0))
 
 
 def _deduplicate_matches(values: list[_ValueMatch]) -> list[_ValueMatch]:
@@ -327,7 +371,25 @@ def _extract_title(extraction: ExtractedDocument) -> _ValueMatch:
     title_paragraphs = extraction.page_role_paragraphs(1, "title")
     if title_paragraphs:
         title = max(title_paragraphs, key=lambda item: len(item.text.strip()))
-        return _ValueMatch(title.text.strip(), title.text, 1, 0, title.spans[0].offset)
+        region = next(
+            (
+                item
+                for item in title.bounding_regions
+                if item.page_number == 1
+            ),
+            None,
+        )
+        if region is None:
+            raise DirectiveMetadataError("Directive title must be established on page 1")
+        return _ValueMatch(
+            title.text.strip(),
+            title.text,
+            1,
+            0,
+            _source_order_offset(
+                extraction, 1, region.polygon, title.spans
+            ),
+        )
     candidates = [
         line
         for line in extraction.lines
@@ -362,7 +424,9 @@ def _extract_title(extraction: ExtractedDocument) -> _ValueMatch:
         selected.text,
         1,
         0,
-        selected.spans[0].offset,
+        _source_order_offset(
+            extraction, 1, selected.polygon, selected.spans
+        ),
     )
 
 
@@ -390,7 +454,13 @@ def render_first_two_pages(
         table_items = [
             (
                 min(
-                    cell.spans[0].offset
+                    _source_order_offset(
+                        extraction,
+                        page_number,
+                        cell.polygon,
+                        cell.spans,
+                        table.spans,
+                    )
                     for cell in table.cells
                     if cell.page_number == page_number
                 ),
@@ -406,15 +476,19 @@ def render_first_two_pages(
             if line.page_number != page_number or _is_decorative(line.text):
                 continue
             if any(
-                _comparison_text(line.text) == _comparison_text(cell.text)
-                and _spans_overlap(line.spans, cell.spans)
-                and _polygons_overlap(line.polygon, cell.polygon)
+                _line_is_owned_by_table(line, table)
                 for _, _, table in table_items
-                for cell in table.cells
-                if cell.page_number == page_number
             ):
                 continue
-            items.append((line.spans[0].offset, line.text.strip(), False))
+            items.append(
+                (
+                    _source_order_offset(
+                        extraction, page_number, line.polygon, line.spans
+                    ),
+                    line.text.strip(),
+                    False,
+                )
+            )
         page_blocks: list[str] = []
         line_block: list[str] = []
         for _, rendered, is_table in sorted(items, key=lambda item: item[0]):
@@ -453,14 +527,22 @@ def _render_table(table: ExtractedTable, page_number: int) -> str:
         if cell.page_number != page_number:
             continue
         row = rows.setdefault(cell.row_index, [""] * table.column_count)
-        row[cell.column_index] = cell.text.strip()
+        row[cell.column_index] = _markdown_table_cell(cell.text)
     rendered = [
         "| " + " | ".join(row) + " |"
         for _, row in sorted(rows.items())
     ]
-    if len(rendered) >= 2:
-        rendered.insert(1, "| " + " | ".join("---" for _ in range(table.column_count)) + " |")
+    if rendered:
+        rendered.insert(
+            1,
+            "| " + " | ".join("---" for _ in range(table.column_count)) + " |",
+        )
     return "\n".join(rendered)
+
+
+def _markdown_table_cell(value: str) -> str:
+    normalized = " ".join(value.split())
+    return normalized.replace("\\", "\\\\").replace("|", "\\|")
 
 
 def _comparison_text(value: str) -> str:
@@ -471,19 +553,21 @@ def _is_decorative(value: str) -> bool:
     return bool(_COUNTER.fullmatch(value))
 
 
-def _spans_overlap(left: tuple, right: tuple) -> bool:
-    return any(
-        left_span.offset < right_span.offset + right_span.length
-        and right_span.offset < left_span.offset + left_span.length
-        for left_span in left
-        for right_span in right
-    )
-
-
-def _polygons_overlap(left: tuple[float, ...], right: tuple[float, ...]) -> bool:
-    left_x, left_y = left[::2], left[1::2]
-    right_x, right_y = right[::2], right[1::2]
-    return (
-        max(min(left_x), min(right_x)) <= min(max(left_x), max(right_x))
-        and max(min(left_y), min(right_y)) <= min(max(left_y), max(right_y))
+def _line_is_owned_by_table(line: ExtractedLine, table: ExtractedTable) -> bool:
+    if not line.spans:
+        return False
+    cell_spans = [
+        span
+        for cell in table.cells
+        if cell.page_number == line.page_number
+        for span in cell.spans
+    ]
+    return bool(cell_spans) and all(
+        any(
+            cell_span.offset <= line_span.offset
+            and line_span.offset + line_span.length
+            <= cell_span.offset + cell_span.length
+            for cell_span in cell_spans
+        )
+        for line_span in line.spans
     )

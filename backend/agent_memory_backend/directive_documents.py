@@ -56,6 +56,13 @@ class DirectiveSourceStream:
     chunks: AsyncIterator[bytes]
 
 
+@dataclass(frozen=True)
+class DirectiveSourceReference:
+    source_filename: str
+    source_hash: str
+    source_blob_name: str
+
+
 class DirectiveDocumentService:
     def __init__(
         self,
@@ -99,6 +106,19 @@ class DirectiveDocumentService:
         directive_id: str,
         directive_version_id: str,
     ) -> DirectiveSourceStream | None:
+        source = await self.resolve_source(
+            directive_id,
+            directive_version_id,
+        )
+        if source is None:
+            return None
+        return await self.stream_source(source)
+
+    async def resolve_source(
+        self,
+        directive_id: str,
+        directive_version_id: str,
+    ) -> DirectiveSourceReference | None:
         directive_id, directive_version_id = _normalize_identity(
             directive_id, directive_version_id
         )
@@ -109,12 +129,20 @@ class DirectiveDocumentService:
         if resolved is None:
             return None
         public_version = self._catalog.public_version(resolved)
-        chunks = await self._artifacts.stream_bytes(
-            resolved.artifacts.source_blob_name
-        )
-        return DirectiveSourceStream(
+        return DirectiveSourceReference(
             source_filename=_safe_source_filename(public_version["source_filename"]),
             source_hash=resolved.source_hash,
+            source_blob_name=resolved.artifacts.source_blob_name,
+        )
+
+    async def stream_source(
+        self,
+        source: DirectiveSourceReference,
+    ) -> DirectiveSourceStream:
+        chunks = await self._artifacts.stream_bytes(source.source_blob_name)
+        return DirectiveSourceStream(
+            source_filename=source.source_filename,
+            source_hash=source.source_hash,
             chunks=chunks,
         )
 

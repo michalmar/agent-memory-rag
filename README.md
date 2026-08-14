@@ -100,7 +100,9 @@ channel tools.
   Search, Cosmos DB catalog/content containers, ACR, private endpoints, monitoring, managed
   identities, and least-privilege RBAC.
 - **Direct Foundry release** (`scripts/release_foundry_assets.sh`) - configures
-  Search/Foundry IQ and publishes the Prompt Agent without setup containers.
+  Search/Foundry IQ and publishes the Prompt Agent without setup containers. Its
+  setup virtual environment installs the local `directive_contracts` and
+  `agent_contracts` packages and verifies both imports before release work begins.
 
 ### Published directive documents
 
@@ -421,12 +423,14 @@ touches source data. Deploy the compatible image with
 `validate`, an explicit operator confirmation, full ingestion (which bootstraps
 `directive-chunks-v2`), and cross-store `verify`. Terraform's durable job
 default is the nonpublishing `maintenance` command; the reset also removes any
-existing derived v2 Search index while retaining v1. Apply the targeted job
-Terraform change before the window, then run validation and inspect its complete
-sanitized evidence separately:
+existing derived v2 Search index while retaining v1. Apply the reviewed Terraform
+plan before the window, including
+`azurerm_role_assignment.deployer_directive_source_reader`, then run validation
+and inspect its complete sanitized evidence separately:
 
 ```bash
-terraform -chdir=infra apply -target=azurerm_container_app_job.directive_ingestion
+terraform -chdir=infra plan -input=false -out=directive-v2.tfplan
+terraform -chdir=infra apply directive-v2.tfplan
 DIRECTIVE_VALIDATE_EVIDENCE_FILE=/tmp/directive-v2-validation.json \
   ./scripts/deploy_directive_ingestion.sh validate <immutable-release-tag>
 ```
@@ -434,22 +438,21 @@ DIRECTIVE_VALIDATE_EVIDENCE_FILE=/tmp/directive-v2-validation.json \
 Validation prints a fresh `DIRECTIVE-PUBLISH-V2-...` approval token bound to the
 complete canonical validation record, pinned image digest, and source inventory
 digest. The producer `run_id` is distinct from Azure execution IDs, which remain
-only in the evidence wrapper. Before `run-daily`, deployment atomically reserves
-`publication-approval/<validation-digest>.json` with create-only semantics;
-replays are rejected and the marker is retained after successful publication. The
+only in the evidence wrapper. During publish, the deployment script derives the
+approved digests and mandate checksum from that evidence and atomically reserves
+`publication-approval/<validation-digest>.json` with create-only semantics.
+Operators do not create the marker or export `DIRECTIVE_APPROVED_*` values.
+Replays are rejected and the marker is retained after successful publication. The
 marker core is an exact `directive.approval.v2` record containing
 `validation_digest`, `environment_digest`, `source_inventory_digest`, and
 `processing_hash`, plus the exact `mandate_checksum`; Azure image and execution
 provenance is kept only in its wrapper.
-producer contract also caps the publication at 32 sorted, unique directives and
-requires complete cross-store counts and digests.
-dispatch passes nonsecret per-execution overrides for
-`DIRECTIVE_APPROVED_VALIDATION_DIGEST`,
-`DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST`, and
-`DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST`; the live execution must echo the
-same pinned image, processing version, Search index, and digests before writes.
-The marker is never released after a dispatch attempt, including a timeout or
-lost CLI response.
+The producer contract also caps the publication at 32 sorted, unique directives
+and requires complete cross-store counts and digests. The script passes derived,
+nonsecret per-execution approval overrides; the live execution must echo the same
+pinned image, processing version, Search index, and digests before writes. The
+marker is never released after a dispatch attempt, including a timeout or lost CLI
+response.
 Publish later, noninteractively, only with that evidence and token:
 
 ```bash
@@ -505,25 +508,24 @@ Agent changes required before deployment.
 5. Create the ignored target assignment file from
    `setup/directives/mandatory/mand.csv.example`; never commit or share the
    resulting `mand.csv`.
-6. Generate and approve a `directive-ingest validate` record for the exact
-   target environment and source corpus. Export its `validation_digest`, plus
-   the canonical environment and source-inventory digests, as
-   `DIRECTIVE_APPROVED_VALIDATION_DIGEST`,
-   `DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST`, and
-   `DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST`. Before publication, write the
-   exact `directive.approval.v2` record at
-   `publication-approval/<validation_digest>.json`, binding those three values,
-   the processing hash, and the required top-level `mandate_checksum` from the
-   validation record. That checksum is derived from canonical tenant-qualified
-   mandate assignments, so tenant changes are approval-bound. Run
-   `scripts/deploy_directive_ingestion.sh <release>` to build the ingestion
-   image, verify exact source-reader/artifact-contributor roles, run preflight,
-   publish the approved source corpus, and verify the resulting state.
-7. Run `scripts/release_foundry_assets.sh all` to configure Search/Foundry IQ and
-   publish the native Prompt Agent directly.
-7. Build and deploy each selected Hosted MAF image to the Foundry project through
+6. Generate and inspect a `directive-ingest validate` record for the exact target
+   environment and source corpus:
+   `DIRECTIVE_VALIDATE_EVIDENCE_FILE=/tmp/directive-v2-validation.json
+   ./scripts/deploy_directive_ingestion.sh validate <immutable-release-tag>`.
+   Confirm the resulting `DIRECTIVE-PUBLISH-V2-...` token, then run
+   `DIRECTIVE_VALIDATE_EVIDENCE_FILE=/tmp/directive-v2-validation.json
+   DIRECTIVE_VALIDATE_CONFIRMATION=DIRECTIVE-PUBLISH-V2-<token>
+   DIRECTIVE_VERIFY_EVIDENCE_FILE=/tmp/directive-v2-verify.json
+   ./scripts/deploy_directive_ingestion.sh publish`. The script derives the
+   approval values from evidence and reserves the approval marker itself. The
+   mandate checksum is derived from canonical tenant-qualified mandate assignments,
+   so tenant changes are approval-bound.
+7. Run `scripts/release_foundry_assets.sh all` to configure Search/Foundry IQ,
+   verify local contract-package imports, and publish the native Prompt Agent
+   directly.
+8. Build and deploy each selected Hosted MAF image to the Foundry project through
    its azd project; local Docker is not required.
-8. Configure the generated Hosted Agent identity, including the application MCP
+9. Configure the generated Hosted Agent identity, including the application MCP
    and Agent 365 roles plus the MCP connection ID:
 
    ```bash
@@ -535,7 +537,7 @@ Agent changes required before deployment.
    ```
 
    This step requires Application Administrator or Global Administrator.
-9. Deploy backend/frontend images and enable agents only after readiness and live
+10. Deploy backend/frontend images and enable agents only after readiness and live
    acceptance pass.
 
 `scripts/build_hosted_agent_image.sh` is the single authoritative build path for

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -52,6 +53,14 @@ def test_processing_hash_is_filterable_for_generation_cleanup() -> None:
     }
 
     assert fields["processing_hash"]["filterable"] is True
+    assert fields["id"] == {
+        "name": "id",
+        "type": "Edm.String",
+        "key": True,
+        "filterable": True,
+        "sortable": True,
+        "retrievable": True,
+    }
     assert fields["is_valid"] == {
         "name": "is_valid",
         "type": "Edm.Boolean",
@@ -275,3 +284,48 @@ async def test_exact_visibility_propagates_transport_errors() -> None:
 
     with pytest.raises(httpx.TransportError, match="Search unavailable"):
         await repository.validate_published_chunk_ids(directive, ["chunk-1"])
+
+
+@pytest.mark.asyncio
+async def test_key_enumeration_seeks_all_results_beyond_one_page() -> None:
+    repository = _repository()
+    repository._config.search_api_version = "2026-04-01"
+    all_keys = [f"chunk-{index:04d}" for index in range(1501)]
+    requests: list[dict[str, object]] = []
+
+    async def request(*_args, **kwargs):
+        payload = kwargs["payload"]
+        requests.append(payload)
+        filter_expression = payload["filter"]
+        match = re.search(r"id gt '([^']+)'", filter_expression)
+        start = all_keys.index(match.group(1)) + 1 if match is not None else 0
+        return {
+            "value": [
+                {"id": key}
+                for key in all_keys[start : start + payload["top"]]
+            ]
+        }
+
+    repository._request = request
+
+    keys = await repository._find_keys("publication_state eq 'published'")
+
+    assert keys == all_keys
+    assert len(keys) == len(set(keys)) == 1501
+    assert all(request["orderby"] == "id asc" for request in requests)
+    assert all("skip" not in request for request in requests)
+    assert requests[1]["filter"] == (
+        "(publication_state eq 'published') and id gt 'chunk-0999'"
+    )
+
+
+@pytest.mark.asyncio
+async def test_key_enumeration_rejects_nonascending_pages() -> None:
+    repository = _repository()
+    repository._config.search_api_version = "2026-04-01"
+    repository._request = AsyncMock(
+        return_value={"value": [{"id": "chunk-2"}, {"id": "chunk-1"}]}
+    )
+
+    with pytest.raises(RuntimeError, match="ascending order"):
+        await repository._find_keys("")

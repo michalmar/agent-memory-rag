@@ -190,6 +190,7 @@ class DocumentIntelligenceExtractor:
             params={
                 "api-version": self._api_version,
                 "outputContentFormat": "markdown",
+                "stringIndexType": "unicodeCodePoint",
             },
             content=pdf,
         )
@@ -284,17 +285,20 @@ class DocumentIntelligenceExtractor:
             span for page in pages for span in page.spans
         )
         _validate_page_spans(content_spans, len(markdown))
+        pages_by_number = {page.page_number: page for page in pages}
         lines = tuple(
             line
             for page, raw_page in zip(pages, raw_pages, strict=True)
-            for line in _parse_lines(raw_page, page.page_number)
+            for line in _parse_lines(raw_page, page)
         )
         paragraphs = tuple(
-            _parse_paragraph(value, content_spans, len(markdown))
+            _parse_paragraph(
+                value, content_spans, len(markdown), pages_by_number
+            )
             for value in _optional_list(result, "paragraphs")
         )
         tables = tuple(
-            _parse_table(value, content_spans, len(markdown))
+            _parse_table(value, content_spans, len(markdown), pages_by_number)
             for value in _optional_list(result, "tables")
         )
         _validate_nested_records(
@@ -358,9 +362,13 @@ def _require_text(value: Any, name: str, *, allow_empty: bool = False) -> str:
 
 
 def _parse_spans(
-    raw: Any, name: str, *, allow_zero_length: bool = False
+    raw: Any,
+    name: str,
+    *,
+    allow_empty: bool = False,
+    allow_zero_length: bool = False,
 ) -> tuple[tuple[int, int], ...]:
-    if not isinstance(raw, list) or not raw:
+    if not isinstance(raw, list) or (not raw and not allow_empty):
         raise RuntimeError(f"Document Intelligence {name} must be a non-empty array")
     values = tuple(
         (
@@ -386,6 +394,37 @@ def _parse_polygon(raw: Any, name: str) -> tuple[float, ...]:
     return tuple(_require_number(value, name) for value in raw)
 
 
+def _validate_polygon_in_page(
+    polygon: tuple[float, ...], page: ExtractedPage, name: str
+) -> None:
+    # Layout independently rounds page-edge geometry by small fractions.
+    tolerance = 0.05
+    x_values = polygon[::2]
+    y_values = polygon[1::2]
+    if (
+        min(x_values) < -tolerance
+        or max(x_values) > page.width + tolerance
+        or min(y_values) < -tolerance
+        or max(y_values) > page.height + tolerance
+    ):
+        raise RuntimeError(f"Document Intelligence {name} is outside page bounds")
+
+
+def _parse_bounding_region(
+    value: Any, name: str, pages_by_number: dict[int, ExtractedPage]
+) -> BoundingRegion:
+    region = _require_object(value, name)
+    page_number = _require_int(
+        region.get("pageNumber"), f"{name}.pageNumber", minimum=1
+    )
+    page = pages_by_number.get(page_number)
+    if page is None:
+        raise RuntimeError(f"Document Intelligence {name} references an unknown page")
+    polygon = _parse_polygon(region.get("polygon"), f"{name}.polygon")
+    _validate_polygon_in_page(polygon, page, f"{name}.polygon")
+    return BoundingRegion(page_number=page_number, polygon=polygon)
+
+
 def _parse_page(value: Any, expected_page: int) -> ExtractedPage:
     page = _require_object(value, "page")
     page_number = _require_int(page.get("pageNumber"), "page.pageNumber", minimum=1)
@@ -408,45 +447,46 @@ def _parse_page(value: Any, expected_page: int) -> ExtractedPage:
     )
 
 
-def _parse_lines(page: Any, page_number: int) -> tuple[ExtractedLine, ...]:
-    values = _optional_list(_require_object(page, "page"), "lines")
+def _parse_lines(
+    raw_page: Any, page: ExtractedPage
+) -> tuple[ExtractedLine, ...]:
+    values = _optional_list(_require_object(raw_page, "page"), "lines")
     return tuple(
         ExtractedLine(
-            page_number=page_number,
+            page_number=page.page_number,
             text=_require_text(
                 _require_object(value, "line").get("content"), "line.content"
             ),
             spans=tuple(
-                ContentSpan(offset, length, page_number)
+                ContentSpan(offset, length, page.page_number)
                 for offset, length in _parse_spans(
                     _require_object(value, "line").get("spans"), "line.spans"
                 )
             ),
-            polygon=_parse_polygon(
-                _require_object(value, "line").get("polygon"), "line.polygon"
-            ),
+            polygon=_parse_line_polygon(value, page),
         )
         for value in values
     )
 
 
+def _parse_line_polygon(value: Any, page: ExtractedPage) -> tuple[float, ...]:
+    polygon = _parse_polygon(
+        _require_object(value, "line").get("polygon"), "line.polygon"
+    )
+    _validate_polygon_in_page(polygon, page, "line.polygon")
+    return polygon
+
+
 def _parse_paragraph(
-    value: Any, page_spans: tuple[ContentSpan, ...], content_length: int
+    value: Any,
+    page_spans: tuple[ContentSpan, ...],
+    content_length: int,
+    pages_by_number: dict[int, ExtractedPage],
 ) -> ExtractedParagraph:
     paragraph = _require_object(value, "paragraph")
     regions = tuple(
-        BoundingRegion(
-            page_number=_require_int(
-                _require_object(region, "paragraph.boundingRegion").get(
-                    "pageNumber"
-                ),
-                "paragraph.boundingRegion.pageNumber",
-                minimum=1,
-            ),
-            polygon=_parse_polygon(
-                _require_object(region, "paragraph.boundingRegion").get("polygon"),
-                "paragraph.boundingRegion.polygon",
-            ),
+        _parse_bounding_region(
+            region, "paragraph.boundingRegion", pages_by_number
         )
         for region in _required_list(paragraph, "boundingRegions")
     )
@@ -472,14 +512,19 @@ def _parse_paragraph(
 
 
 def _parse_table(
-    value: Any, page_spans: tuple[ContentSpan, ...], content_length: int
+    value: Any,
+    page_spans: tuple[ContentSpan, ...],
+    content_length: int,
+    pages_by_number: dict[int, ExtractedPage],
 ) -> ExtractedTable:
     table = _require_object(value, "table")
     row_count = _require_int(table.get("rowCount"), "table.rowCount", minimum=1)
     column_count = _require_int(
         table.get("columnCount"), "table.columnCount", minimum=1
     )
-    raw_cells: list[tuple[dict[str, Any], dict[str, Any], int, int, int, int, int]] = []
+    raw_cells: list[
+        tuple[dict[str, Any], BoundingRegion, int, int, int, int, int]
+    ] = []
     for value in _required_list(table, "cells"):
         cell = _require_object(value, "table.cell")
         regions = _required_list(cell, "boundingRegions")
@@ -487,10 +532,10 @@ def _parse_table(
             raise RuntimeError(
                 "Document Intelligence table cell needs one bounding region"
             )
-        region = _require_object(regions[0], "table.cell.boundingRegion")
-        page_number = _require_int(
-            region.get("pageNumber"), "table.cell.pageNumber", minimum=1
+        region = _parse_bounding_region(
+            regions[0], "table.cell.boundingRegion", pages_by_number
         )
+        page_number = region.page_number
         row_index = _require_int(cell.get("rowIndex"), "table.cell.rowIndex")
         column_index = _require_int(
             cell.get("columnIndex"), "table.cell.columnIndex"
@@ -518,7 +563,7 @@ def _parse_table(
         tuple(
             ContentSpan(offset, length, 0)
             for offset, length in _parse_spans(
-                table.get("spans"), "table.spans"
+                table.get("spans"), "table.spans", allow_empty=True
             )
         ),
         page_spans,
@@ -526,21 +571,14 @@ def _parse_table(
         "table.spans",
     )
     regions = tuple(
-        BoundingRegion(
-            page_number=_require_int(
-                _require_object(value, "table.boundingRegion").get("pageNumber"),
-                "table.boundingRegion.pageNumber",
-                minimum=1,
-            ),
-            polygon=_parse_polygon(
-                _require_object(value, "table.boundingRegion").get("polygon"),
-                "table.boundingRegion.polygon",
-            ),
+        _parse_bounding_region(
+            value, "table.boundingRegion", pages_by_number
         )
         for value in _required_list(table, "boundingRegions")
     )
     table_pages = {span.page_number for span in table_spans}
-    if {region.page_number for region in regions} != table_pages:
+    region_pages = {region.page_number for region in regions}
+    if table_pages and not table_pages <= region_pages:
         raise RuntimeError(
             "Document Intelligence table spans and regions disagree"
         )
@@ -563,6 +601,7 @@ def _parse_table(
                 for offset, length in _parse_spans(
                     cell.get("spans"),
                     "table.cell.spans",
+                    allow_empty=not text,
                     allow_zero_length=not text,
                 )
             ),
@@ -574,7 +613,7 @@ def _parse_table(
             raise RuntimeError(
                 "Document Intelligence non-empty table cell needs positive spans"
             )
-        _validate_cell_in_table(spans, page_number, region, table_spans, regions)
+        _validate_cell_in_table(spans, region, table_spans, regions)
         cells.append(
             ExtractedTableCell(
                 page_number=page_number,
@@ -583,9 +622,7 @@ def _parse_table(
                 row_span=row_span,
                 column_span=column_span,
                 text=text,
-                polygon=_parse_polygon(
-                    region.get("polygon"), "table.cell.polygon"
-                ),
+                polygon=region.polygon,
                 spans=spans,
             )
         )
@@ -626,56 +663,49 @@ def _validate_table_occupancy(
 
 def _validate_cell_in_table(
     cell_spans: tuple[ContentSpan, ...],
-    cell_page: int,
-    cell_region: dict[str, Any],
+    cell_region: BoundingRegion,
     table_spans: tuple[ContentSpan, ...],
     table_regions: tuple[BoundingRegion, ...],
 ) -> None:
-    if cell_page not in {region.page_number for region in table_regions}:
+    same_page_regions = [
+        region
+        for region in table_regions
+        if region.page_number == cell_region.page_number
+    ]
+    if not same_page_regions:
         raise RuntimeError(
             "Document Intelligence table cell page is outside table regions"
         )
-    if not any(
-        _polygon_contains(region.polygon, _parse_polygon(
-            cell_region.get("polygon"), "table.cell.polygon"
-        ))
-        for region in table_regions
-        if region.page_number == cell_page
+    spans_are_owned = bool(cell_spans) and bool(table_spans)
+    if spans_are_owned:
+        for cell_span in cell_spans:
+            if not any(
+                table_span.page_number == cell_span.page_number
+                and table_span.offset <= cell_span.offset
+                and cell_span.offset + cell_span.length
+                <= table_span.offset + table_span.length
+                for table_span in table_spans
+            ):
+                raise RuntimeError(
+                    "Document Intelligence table cell span is outside table spans"
+                )
+    if not spans_are_owned and not any(
+        _polygons_overlap(region.polygon, cell_region.polygon)
+        for region in same_page_regions
     ):
         raise RuntimeError(
-            "Document Intelligence table cell polygon is outside table regions"
+            "Document Intelligence table cell has no table association"
         )
-    for cell_span in cell_spans:
-        if not any(
-            table_span.page_number == cell_span.page_number
-            and table_span.offset <= cell_span.offset
-            and cell_span.offset + cell_span.length
-            <= table_span.offset + table_span.length
-            for table_span in table_spans
-        ):
-            raise RuntimeError(
-                "Document Intelligence table cell span is outside table spans"
-            )
 
 
-def _polygon_contains(
-    outer: tuple[float, ...], inner: tuple[float, ...]
+def _polygons_overlap(
+    left: tuple[float, ...], right: tuple[float, ...]
 ) -> bool:
-    # Layout independently rounds table and cell boundaries at shared edges.
-    tolerance = 0.05
-    outer_x = outer[::2]
-    outer_y = outer[1::2]
-    inner_x = inner[::2]
-    inner_y = inner[1::2]
+    left_x, left_y = left[::2], left[1::2]
+    right_x, right_y = right[::2], right[1::2]
     return (
-        min(outer_x) - tolerance
-        <= min(inner_x)
-        <= max(inner_x)
-        <= max(outer_x) + tolerance
-        and min(outer_y) - tolerance
-        <= min(inner_y)
-        <= max(inner_y)
-        <= max(outer_y) + tolerance
+        max(min(left_x), min(right_x)) <= min(max(left_x), max(right_x))
+        and max(min(left_y), min(right_y)) <= min(max(left_y), max(right_y))
     )
 
 
@@ -722,18 +752,20 @@ def _validate_nested_records(
             raise RuntimeError(
                 "Document Intelligence paragraph spans and regions disagree"
             )
-        if parsed[0].offset < previous_offset:
+        if parsed and parsed[0].offset < previous_offset:
             raise RuntimeError(
                 "Document Intelligence paragraphs must be content-ordered"
             )
-        previous_offset = parsed[-1].offset
+        if parsed:
+            previous_offset = parsed[-1].offset
     previous_offset = -1
     for table in tables:
-        if table.spans[0].offset < previous_offset:
+        if table.spans and table.spans[0].offset < previous_offset:
             raise RuntimeError(
                 "Document Intelligence tables must be content-ordered"
             )
-        previous_offset = table.spans[-1].offset
+        if table.spans:
+            previous_offset = table.spans[-1].offset
         _validate_ordered_items(
             ((cell.page_number, cell.spans, "table.cell") for cell in table.cells),
             page_spans,
@@ -755,6 +787,8 @@ def _validate_ordered_items(
         )
         if any(span.page_number != page_number for span in parsed):
             raise RuntimeError(f"Document Intelligence {name} spans cross pages")
+        if not parsed:
+            continue
         if parsed[0].offset < prior_by_page.get(page_number, -1):
             raise RuntimeError(f"Document Intelligence {name}s must be content-ordered")
         prior_by_page[page_number] = parsed[0].offset

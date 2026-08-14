@@ -57,6 +57,181 @@ directive_assert_execution_mode_json() {
     ' <<<"$container_json" >/dev/null
 }
 
+directive_assert_execution_override_json() {
+  local container_json="$1"
+  local expected_argument="$2"
+  local expected_image="$3"
+  local expected_cpu="$4"
+  local expected_memory="$5"
+  python3 - "$expected_argument" "$expected_image" "$expected_cpu" \
+    "$expected_memory" "$container_json" <<'PY'
+import json
+import sys
+
+expected_argument, expected_image, expected_cpu, expected_memory, raw = sys.argv[1:]
+container = json.loads(raw)
+if not isinstance(container, dict):
+    raise SystemExit("execution container is not an object")
+if container.get("name") != "directive-ingestion":
+    raise SystemExit("execution container name is not pinned")
+if container.get("image") != expected_image:
+    raise SystemExit("execution image is not pinned")
+if container.get("command") != ["directive-ingest"] or container.get("args") != [expected_argument]:
+    raise SystemExit("execution command is not pinned")
+resources = container.get("resources")
+if not isinstance(resources, dict):
+    raise SystemExit("execution resources are missing")
+try:
+    cpu_matches = float(resources.get("cpu")) == float(expected_cpu)
+except (TypeError, ValueError):
+    cpu_matches = False
+if not cpu_matches or resources.get("memory") != expected_memory:
+    raise SystemExit("execution resources are not pinned")
+PY
+}
+
+directive_render_execution_env_vars() {
+  local raw_env_json="$1"
+  local expected_argument="$2"
+  local expected_processing_version="$3"
+  local expected_search_index="$4"
+  local expected_validation_digest="${5:-}"
+  local expected_environment_digest="${6:-}"
+  local expected_source_digest="${7:-}"
+  python3 - "$raw_env_json" "$expected_argument" \
+    "$expected_processing_version" "$expected_search_index" \
+    "$expected_validation_digest" "$expected_environment_digest" \
+    "$expected_source_digest" <<'PY'
+import json
+import sys
+
+raw, mode, processing_version, search_index, validation_digest, \
+    environment_digest, source_digest = sys.argv[1:]
+try:
+    env = json.loads(raw)
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"job environment is invalid JSON: {exc}")
+if not isinstance(env, list) or not env:
+    raise SystemExit("job environment is missing")
+approval_names = {
+    "DIRECTIVE_APPROVED_VALIDATION_DIGEST",
+    "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST",
+    "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST",
+}
+values = {}
+for item in env:
+    if not isinstance(item, dict):
+        raise SystemExit("job environment contains a non-object entry")
+    name = item.get("name")
+    value = item.get("value")
+    if (
+        not isinstance(name, str)
+        or not name
+        or not isinstance(value, str)
+        or any(character in value for character in "\t\r\n")
+        or name in values
+        or "secretRef" in item
+    ):
+        raise SystemExit("job environment contains an unsafe or duplicate value")
+    values[name] = value
+if (
+    values.get("DIRECTIVE_PROCESSING_VERSION") != processing_version
+    or values.get("DIRECTIVE_SEARCH_INDEX") != search_index
+):
+    raise SystemExit("job environment is not the expected v2 configuration")
+for name in approval_names:
+    values.pop(name, None)
+if mode in {"run-daily", "verify"}:
+    expected_approvals = {
+        "DIRECTIVE_APPROVED_VALIDATION_DIGEST": validation_digest,
+        "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST": environment_digest,
+        "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST": source_digest,
+    }
+    if any(
+        len(value) != 64 or any(character not in "0123456789abcdef" for character in value)
+        for value in expected_approvals.values()
+    ):
+        raise SystemExit("execution approval digest is invalid")
+    values.update(expected_approvals)
+elif any((validation_digest, environment_digest, source_digest)):
+    raise SystemExit("unapproved execution received approval values")
+for name, value in sorted(values.items()):
+    print(f"{name}\t{value}")
+PY
+}
+
+directive_assert_job_start_override_args() {
+  local expected_argument="$1"
+  local expected_image="$2"
+  local expected_cpu="$3"
+  local expected_memory="$4"
+  shift 4
+  python3 - "$expected_argument" "$expected_image" "$expected_cpu" \
+    "$expected_memory" "$@" <<'PY'
+import sys
+
+expected_argument, expected_image, expected_cpu, expected_memory, *args = sys.argv[1:]
+required = {
+    "--container-name": "directive-ingestion",
+    "--image": expected_image,
+    "--cpu": expected_cpu,
+    "--memory": expected_memory,
+    "--command": "directive-ingest",
+    "--args": expected_argument,
+}
+for flag, expected in required.items():
+    try:
+        position = args.index(flag)
+    except ValueError:
+        raise SystemExit(f"job start is missing {flag}")
+    if position + 1 >= len(args) or args[position + 1] != expected:
+        raise SystemExit(f"job start has an invalid {flag}")
+if args.count("--env-vars") != 1:
+    raise SystemExit("job start must carry exactly one complete environment override")
+env_start = args.index("--env-vars") + 1
+try:
+    env_end = args.index("--query", env_start)
+except ValueError:
+    env_end = len(args)
+env_vars = args[env_start:env_end]
+if not env_vars or any("=" not in item for item in env_vars):
+    raise SystemExit("job start environment override is incomplete")
+names = [item.split("=", 1)[0] for item in env_vars]
+if len(names) != len(set(names)):
+    raise SystemExit("job start environment override has duplicate names")
+PY
+}
+
+directive_build_job_start_override_args() {
+  local expected_argument="$1"
+  local job_name="$2"
+  local resource_group="$3"
+  local container_name="$4"
+  local image="$5"
+  local cpu="$6"
+  local memory="$7"
+  shift 7
+  [[ "$container_name" == directive-ingestion ]] || return 1
+  [[ "$#" -gt 0 ]] || return 1
+  DIRECTIVE_JOB_START_ARGS=(
+    --name "$job_name"
+    --resource-group "$resource_group"
+    --container-name "$container_name"
+    --image "$image"
+    --cpu "$cpu"
+    --memory "$memory"
+    --command directive-ingest
+    --args "$expected_argument"
+    --env-vars
+    "$@"
+    --query name
+    --output tsv
+  )
+  directive_assert_job_start_override_args \
+    "$expected_argument" "$image" "$cpu" "$memory" \
+    "${DIRECTIVE_JOB_START_ARGS[@]}"
+}
+
 directive_assert_approved_execution_json() {
   local container_json="$1"
   local expected_argument="$2"
@@ -66,6 +241,8 @@ directive_assert_approved_execution_json() {
   local expected_validation_digest="$6"
   local expected_processing_version="$7"
   local expected_search_index="$8"
+  directive_assert_execution_override_json \
+    "$container_json" "$expected_argument" "$expected_image" 1 2Gi || return
   python3 - "$expected_image" "$expected_environment_digest" \
     "$expected_source_digest" "$expected_validation_digest" \
     "$expected_processing_version" "$expected_search_index" \
@@ -171,6 +348,10 @@ for item in current:
             container.get("image") == expected_image
             and container.get("command") == ["directive-ingest"]
             and container.get("args") == [expected_argument]
+            and container.get("name") == "directive-ingestion"
+            and isinstance(container.get("resources"), dict)
+            and float(container["resources"].get("cpu", 0)) == 1.0
+            and container["resources"].get("memory") == "2Gi"
             and env.get("DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST") == expected_environment_digest
             and env.get("DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST") == expected_source_digest
             and env.get("DIRECTIVE_APPROVED_VALIDATION_DIGEST") == expected_validation_digest

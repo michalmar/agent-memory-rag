@@ -19,9 +19,22 @@ VALIDATE_RECORD="$(mktemp)"
 VERIFY_RECORD="$(mktemp)"
 NORMALIZED_RECORD="$(mktemp)"
 BAD_RECORD="$(mktemp)"
+FINALIZE_ERROR="$(mktemp)"
+RELEASE_VENV="$(mktemp -d)"
+RELEASE_LOG="$(mktemp)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/directive_infrastructure_guards.sh"
-trap 'rm -f "$FIXTURE" "$FIXTURE.verify" "$PLAN" "$BAD_PLAN" "$RAW_LOG" "$RECORD" "$OVERSIZE_LOG" "$MOCK_AZ" "$MOCK_TERRAFORM" "$MOCK_LOG" "$EVIDENCE" "$INVENTORY_OUTPUT" "$ENVIRONMENT" "$VALIDATE_RECORD" "$VERIFY_RECORD" "$NORMALIZED_RECORD" "$BAD_RECORD"' EXIT
+
+cleanup() {
+  rm -f \
+    "$FIXTURE" "$FIXTURE.verify" "$PLAN" "$BAD_PLAN" "$RAW_LOG" "$RECORD" \
+    "$OVERSIZE_LOG" "$MOCK_AZ" "$MOCK_TERRAFORM" "$MOCK_LOG" "$EVIDENCE" \
+    "$INVENTORY_OUTPUT" "$ENVIRONMENT" "$VALIDATE_RECORD" "$VERIFY_RECORD" \
+    "$NORMALIZED_RECORD" "$BAD_RECORD" "$FINALIZE_ERROR" "$RELEASE_LOG" \
+    "$RELEASE_VENV/bin/python" "$RELEASE_VENV/bin/terraform"
+  rmdir "$RELEASE_VENV/bin" "$RELEASE_VENV" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 /bin/bash -u "$SCRIPT_DIR/deploy_directive_ingestion.sh" --self-test >/dev/null
 /bin/bash -u "$RESET_SCRIPT" --self-test >/dev/null
@@ -38,18 +51,84 @@ if grep -q 'Nonempty DIRECTIVE_APPROVED_\*_DIGEST' \
   exit 1
 fi
 
+mkdir "$RELEASE_VENV/bin"
+cat >"$RELEASE_VENV/bin/python" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$RELEASE_LOG"
+case "$1" in
+  -m)
+    [[ "${2:-}" == pip && "${3:-}" == install ]] || exit 1
+    [[ " $* " == *" $RELEASE_REPO_ROOT/directive_contracts "* ]] || exit 1
+    [[ " $* " == *" $RELEASE_REPO_ROOT/agent_contracts "* ]] || exit 1
+    ;;
+  -c)
+    [[ "${2:-}" == "import directive_contracts, agent_contracts" ]] || exit 1
+    ;;
+  "$RELEASE_REPO_ROOT/setup/knowledgebase/setup_search.py"|\
+  "$RELEASE_REPO_ROOT/setup/agents/release_prompt_agent.py")
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+cat >"$RELEASE_VENV/bin/terraform" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'mock-value\n'
+EOF
+chmod +x "$RELEASE_VENV/bin/python" "$RELEASE_VENV/bin/terraform"
+RELEASE_REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)" \
+  RELEASE_LOG="$RELEASE_LOG" \
+  SETUP_VENV_DIR="$RELEASE_VENV" \
+  PATH="$RELEASE_VENV/bin:$PATH" \
+  /bin/bash -u "$SCRIPT_DIR/release_foundry_assets.sh" all >/dev/null
+grep -q 'setup_search.py' "$RELEASE_LOG"
+grep -q 'release_prompt_agent.py' "$RELEASE_LOG"
+
 cat >"$FIXTURE" <<'EOF'
-{"name":"directive-ingestion","command":["directive-ingest"],"args":["verify"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+{"name":"directive-ingestion","command":["directive-ingest"],"args":["verify"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resources":{"cpu":1,"memory":"2Gi"}}
 EOF
 
 directive_assert_execution_mode_json "$(<"$FIXTURE")" verify
 cat >"$FIXTURE" <<'EOF'
-{"name":"directive-ingestion","command":["directive-ingest"],"args":["validate"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+{"name":"directive-ingestion","command":["directive-ingest"],"args":["validate"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resources":{"cpu":1,"memory":"2Gi"}}
 EOF
 directive_assert_unapproved_execution_json "$(<"$FIXTURE")" validate
 
+BASE_EXECUTION_ENV='[{"name":"AZURE_CLIENT_ID","value":"client"},{"name":"DIRECTIVE_PROCESSING_VERSION","value":"directive-v2-czech-layout"},{"name":"DIRECTIVE_SEARCH_INDEX","value":"directive-chunks-v2"}]'
+for mode in bootstrap preflight validate; do
+  START_ENV=()
+  while IFS=$'\t' read -r name value; do
+    START_ENV+=("$name=$value")
+  done < <(
+    directive_render_execution_env_vars \
+      "$BASE_EXECUTION_ENV" "$mode" directive-v2-czech-layout directive-chunks-v2
+  )
+  directive_build_job_start_override_args \
+    "$mode" job-test rg-test directive-ingestion \
+    registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    1 2Gi "${START_ENV[@]}"
+done
+
+for mode in run-daily verify; do
+  START_ENV=()
+  while IFS=$'\t' read -r name value; do
+    START_ENV+=("$name=$value")
+  done < <(
+    directive_render_execution_env_vars \
+      "$BASE_EXECUTION_ENV" "$mode" directive-v2-czech-layout directive-chunks-v2 \
+      dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+      eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+      ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+  )
+  directive_build_job_start_override_args \
+    "$mode" job-test rg-test directive-ingestion \
+    registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    1 2Gi "${START_ENV[@]}"
+done
+
 cat >"$FIXTURE" <<'EOF'
-{"name":"directive-ingestion","command":["directive-ingest"],"args":["run-daily"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","env":[{"name":"DIRECTIVE_PROCESSING_VERSION","value":"directive-v2-czech-layout"},{"name":"DIRECTIVE_SEARCH_INDEX","value":"directive-chunks-v2"},{"name":"DIRECTIVE_APPROVED_VALIDATION_DIGEST","value":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},{"name":"DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST","value":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST","value":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}]}
+{"name":"directive-ingestion","command":["directive-ingest"],"args":["run-daily"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resources":{"cpu":1,"memory":"2Gi"},"env":[{"name":"DIRECTIVE_PROCESSING_VERSION","value":"directive-v2-czech-layout"},{"name":"DIRECTIVE_SEARCH_INDEX","value":"directive-chunks-v2"},{"name":"DIRECTIVE_APPROVED_VALIDATION_DIGEST","value":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},{"name":"DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST","value":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST","value":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}]}
 EOF
 directive_assert_approved_execution_json \
   "$(<"$FIXTURE")" \
@@ -60,7 +139,7 @@ directive_assert_approved_execution_json \
   dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
   directive-v2-czech-layout directive-chunks-v2
 BEFORE_EXECUTIONS='[{"name":"old-run"}]'
-NEW_EXECUTION='[{"name":"old-run"},{"name":"new-run","properties":{"template":{"containers":[{"name":"directive-ingestion","command":["directive-ingest"],"args":["run-daily"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","env":[{"name":"DIRECTIVE_PROCESSING_VERSION","value":"directive-v2-czech-layout"},{"name":"DIRECTIVE_SEARCH_INDEX","value":"directive-chunks-v2"},{"name":"DIRECTIVE_APPROVED_VALIDATION_DIGEST","value":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},{"name":"DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST","value":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST","value":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}]}]}}}]'
+NEW_EXECUTION='[{"name":"old-run"},{"name":"new-run","properties":{"template":{"containers":[{"name":"directive-ingestion","command":["directive-ingest"],"args":["run-daily"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resources":{"cpu":1,"memory":"2Gi"},"env":[{"name":"DIRECTIVE_PROCESSING_VERSION","value":"directive-v2-czech-layout"},{"name":"DIRECTIVE_SEARCH_INDEX","value":"directive-chunks-v2"},{"name":"DIRECTIVE_APPROVED_VALIDATION_DIGEST","value":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},{"name":"DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST","value":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST","value":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}]}]}}}]'
 if directive_select_new_approved_execution_names \
   "$BEFORE_EXECUTIONS" "$BEFORE_EXECUTIONS" run-daily \
   registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
@@ -356,10 +435,12 @@ chmod +x "$MOCK_AZ" "$MOCK_TERRAFORM"
 MOCK_LOG="$MOCK_LOG" AZ_BIN="$MOCK_AZ" TERRAFORM_BIN="$MOCK_TERRAFORM" \
   /bin/bash -u "$RESET_SCRIPT" dry-run --inventory-evidence "$EVIDENCE" >"$INVENTORY_OUTPUT"
 if MOCK_LOG="$MOCK_LOG" AZ_BIN="$MOCK_AZ" TERRAFORM_BIN="$MOCK_TERRAFORM" \
-  /bin/bash -u "$RESET_SCRIPT" finalize >/dev/null 2>/dev/null; then
+  /bin/bash -u "$RESET_SCRIPT" finalize >/dev/null 2>"$FINALIZE_ERROR"; then
   echo "finalize without evidence was accepted before execution" >&2
   exit 1
 fi
+grep -q 'Finalize requires --verification-file from a successful v2 verify execution' \
+  "$FINALIZE_ERROR"
 grep -q '^artifact_prefix=publication-lock/$' "$INVENTORY_OUTPUT"
 grep -q '^artifact_prefix=publication-claims/$' "$INVENTORY_OUTPUT"
 if grep -Eq 'containerapp job update|containerapp job stop|cosmosdb sql container delete|terraform.*(plan|apply)' "$MOCK_LOG"; then

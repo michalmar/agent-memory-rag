@@ -395,28 +395,54 @@ class DirectiveSearchRepository:
     ) -> list[str]:
         keys: list[str] = []
         page_size = 1000
-        skip = 0
+        last_key: str | None = None
         while len(keys) < limit:
+            page_filter = filter_expression
+            if last_key is not None:
+                continuation = f"id gt '{_odata_string(last_key)}'"
+                page_filter = (
+                    f"({filter_expression}) and {continuation}"
+                    if filter_expression
+                    else continuation
+                )
             payload: dict[str, Any] = {
                 "search": "*",
                 "select": "id",
                 "top": min(page_size, limit - len(keys)),
-                "skip": skip,
+                "orderby": "id asc",
             }
-            if filter_expression:
-                payload["filter"] = filter_expression
+            if page_filter:
+                payload["filter"] = page_filter
             result = await self._request(
                 "POST",
                 f"/indexes/{self._config.search_index}/docs/search",
                 api_version=self._config.search_api_version,
                 payload=payload,
             )
-            page = result.get("value", [])
-            page_keys = [
-                item["id"]
-                for item in page
-                if isinstance(item.get("id"), str)
-            ]
+            page = result.get("value")
+            if not isinstance(page, list):
+                raise RuntimeError("Search key enumeration returned an invalid page")
+            page_keys: list[str] = []
+            for item in page:
+                if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                    raise RuntimeError(
+                        "Search key enumeration returned a malformed key"
+                    )
+                page_keys.append(item["id"])
+            if len(set(page_keys)) != len(page_keys):
+                raise RuntimeError(
+                    "Search key enumeration returned duplicate keys in a page"
+                )
+            if any(
+                key <= previous
+                for previous, key in zip(
+                    (last_key, *page_keys[:-1]), page_keys, strict=True
+                )
+                if previous is not None
+            ):
+                raise RuntimeError(
+                    "Search key enumeration did not advance in ascending order"
+                )
             keys.extend(page_keys)
             requested = min(page_size, limit - (len(keys) - len(page_keys)))
             if len(page) < requested:
@@ -427,7 +453,7 @@ class DirectiveSearchRepository:
                         "Search reconciliation exceeded its bounded key limit"
                     )
                 return keys
-            skip += len(page)
+            last_key = page_keys[-1]
         return keys
 
     async def _delete_keys(self, keys: Iterable[str]) -> None:
@@ -611,6 +637,18 @@ class DirectiveSearchRepository:
                 "Existing directive index must make directive_id searchable "
                 "for semantic keyword prioritization"
             )
+        identifier = fields.get("id") or {}
+        if (
+            identifier.get("type") != "Edm.String"
+            or identifier.get("key") is not True
+            or identifier.get("filterable") is not True
+            or identifier.get("sortable") is not True
+            or identifier.get("retrievable") is not True
+        ):
+            raise RuntimeError(
+                "Existing directive index requires a filterable, sortable, "
+                "retrievable id key"
+            )
         for name in ("title", "content"):
             if fields[name].get("analyzer") != "cs.microsoft":
                 raise RuntimeError(
@@ -752,6 +790,8 @@ class DirectiveSearchRepository:
                 "type": "Edm.String",
                 "key": True,
                 "filterable": True,
+                "sortable": True,
+                "retrievable": True,
             },
             *[
                 {

@@ -22,35 +22,44 @@ esac
 
 tf() { terraform -chdir="$INFRA_DIR" output -raw "$1"; }
 
+set_tf_environment() {
+    local name="$1"
+    local output="$2"
+    local value
+    value="$(tf "$output")"
+    export "$name=$value"
+}
+
 if [[ ! -x "$VENV_DIR/bin/python" ]]; then
     python3 -m venv "$VENV_DIR"
 fi
 
 "$VENV_DIR/bin/python" -m pip install --quiet \
     -r "$REPO_ROOT/setup/knowledgebase/requirements.txt" \
-    -r "$REPO_ROOT/setup/agents/requirements.txt"
+    -r "$REPO_ROOT/setup/agents/requirements.txt" \
+    "$REPO_ROOT/directive_contracts" \
+    "$REPO_ROOT/agent_contracts"
+"$VENV_DIR/bin/python" -c 'import directive_contracts, agent_contracts'
 
-export AZURE_OPENAI_ENDPOINT="$(tf openai_endpoint)"
-export AZURE_OPENAI_RESOURCE_URI="$(tf openai_resource_uri)"
-export AZURE_OPENAI_CHAT_DEPLOYMENT="$(tf chat_deployment)"
+set_tf_environment AZURE_OPENAI_ENDPOINT openai_endpoint
+set_tf_environment AZURE_OPENAI_RESOURCE_URI openai_resource_uri
+set_tf_environment AZURE_OPENAI_CHAT_DEPLOYMENT chat_deployment
 export AZURE_OPENAI_CHAT_MODEL="$AZURE_OPENAI_CHAT_DEPLOYMENT"
-export AZURE_OPENAI_EMBED_DEPLOYMENT="$(tf embedding_deployment)"
-export SEARCH_ENDPOINT="$(tf search_endpoint)"
-export SEARCH_KB="$(tf search_knowledge_base)"
-export SEARCH_ORDERS_INDEX="$(tf search_orders_index)"
-export SEARCH_POLICY_INDEX="$(tf search_policy_index)"
-export SEARCH_ORDERS_KNOWLEDGE_SOURCE="$(tf search_orders_knowledge_source)"
-export SEARCH_POLICY_KNOWLEDGE_SOURCE="$(tf search_policy_knowledge_source)"
-export SEARCH_KNOWLEDGE_API_VERSION="$(tf search_knowledge_api_version)"
+set_tf_environment AZURE_OPENAI_EMBED_DEPLOYMENT embedding_deployment
+set_tf_environment SEARCH_ENDPOINT search_endpoint
+set_tf_environment SEARCH_KB search_knowledge_base
+set_tf_environment SEARCH_ORDERS_INDEX search_orders_index
+set_tf_environment SEARCH_POLICY_INDEX search_policy_index
+set_tf_environment SEARCH_ORDERS_KNOWLEDGE_SOURCE search_orders_knowledge_source
+set_tf_environment SEARCH_POLICY_KNOWLEDGE_SOURCE search_policy_knowledge_source
+set_tf_environment SEARCH_KNOWLEDGE_API_VERSION search_knowledge_api_version
 
-export FOUNDRY_PROJECT_ENDPOINT="$(tf foundry_agents_project_endpoint)"
+set_tf_environment FOUNDRY_PROJECT_ENDPOINT foundry_agents_project_endpoint
 export AZURE_AI_MODEL_DEPLOYMENT_NAME="$AZURE_OPENAI_CHAT_DEPLOYMENT"
-export FOUNDRY_IQ_CONNECTION_ID="$(tf foundry_iq_connection_name)"
-export FOUNDRY_IQ_MCP_ENDPOINT="$(tf foundry_iq_mcp_endpoint)"
-export FOUNDRY_PROMPT_AGENT_NAME="$(tf foundry_prompt_agent_name)"
-export AGENT_RELEASE_ID="$(tf agent_release_id)"
-export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
-
+set_tf_environment FOUNDRY_IQ_CONNECTION_ID foundry_iq_connection_name
+set_tf_environment FOUNDRY_IQ_MCP_ENDPOINT foundry_iq_mcp_endpoint
+set_tf_environment FOUNDRY_PROMPT_AGENT_NAME foundry_prompt_agent_name
+set_tf_environment AGENT_RELEASE_ID agent_release_id
 if [[ "$MODE" == "all" || "$MODE" == "knowledge" ]]; then
     echo "==> Configuring Search indexes and Foundry IQ"
     "$VENV_DIR/bin/python" "$REPO_ROOT/setup/knowledgebase/setup_search.py"

@@ -166,6 +166,8 @@ REPOSITORY="directive-ingestion"
 IMAGE=""
 IMAGE_DIGEST=""
 JOB_CONTAINER="directive-ingestion"
+JOB_CPU="1"
+JOB_MEMORY="2Gi"
 VALIDATION_CONFIRMATION="${DIRECTIVE_VALIDATE_CONFIRMATION:-}"
 VERIFY_EVIDENCE_FILE="${DIRECTIVE_VERIFY_EVIDENCE_FILE:-}"
 EXPECTED_PROCESSING_VERSION="directive-v2-czech-layout"
@@ -183,6 +185,7 @@ EXPECTED_ENVIRONMENT_DIGEST=""
 APPROVED_ENVIRONMENT_DIGEST=""
 APPROVED_SOURCE_INVENTORY_DIGEST=""
 STARTED_EXECUTIONS=()
+EXECUTION_ENV_VARS=()
 PUBLICATION_MARKER_RESERVED=false
 PUBLICATION_DISPATCH_ATTEMPTED=false
 PUBLICATION_EXECUTION_SNAPSHOT="[]"
@@ -646,6 +649,40 @@ assert_execution_image() {
   }
 }
 
+prepare_execution_env_vars() {
+  local expected_argument="$1"
+  local env_json env_file
+  local approval_validation="" approval_environment="" approval_source=""
+  if [[ "$expected_argument" == run-daily || "$expected_argument" == verify ]]; then
+    approval_validation="$VALIDATION_PRODUCER_DIGEST"
+    approval_environment="$EXPECTED_ENVIRONMENT_DIGEST"
+    approval_source="$APPROVED_SOURCE_INVENTORY_DIGEST"
+  fi
+  env_json="$(
+    az containerapp job show \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --query "properties.template.containers[?name=='$JOB_CONTAINER'].env | [0]" \
+      --output json
+  )"
+  env_file="$(mktemp)"
+  if ! directive_render_execution_env_vars \
+    "$env_json" "$expected_argument" "$EXPECTED_PROCESSING_VERSION" \
+    "$EXPECTED_SEARCH_INDEX" "$approval_validation" "$approval_environment" \
+    "$approval_source" >"$env_file"; then
+    rm -f "$env_file"
+    die "Live job environment cannot be used as a complete v2 execution override"
+  fi
+  EXECUTION_ENV_VARS=()
+  while IFS=$'\t' read -r name value; do
+    [[ -n "$name" ]] || continue
+    EXECUTION_ENV_VARS+=("$name=$value")
+  done <"$env_file"
+  rm -f "$env_file"
+  [[ "${#EXECUTION_ENV_VARS[@]}" -gt 0 ]] || die \
+    "Complete v2 execution override has no environment values"
+}
+
 track_started_execution() {
   local execution_name="$1"
   local known
@@ -702,7 +739,7 @@ recover_publication_execution() {
 
 start_job_execution() {
   local expected_argument="$1"
-  local execution_name execution_name_file start_args=()
+  local execution_name execution_name_file job_start_args=()
   local execution_snapshot
   assert_live_maintenance_mode
   assert_no_active_execution
@@ -713,17 +750,8 @@ start_job_execution() {
       "Approved environment digest is invalid"
     [[ "$APPROVED_SOURCE_INVENTORY_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
       "Approved source inventory digest is invalid"
-    start_args=(
-      --env-vars
-      "DIRECTIVE_APPROVED_VALIDATION_DIGEST=$VALIDATION_PRODUCER_DIGEST"
-      "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST=$EXPECTED_ENVIRONMENT_DIGEST"
-      "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST=$APPROVED_SOURCE_INVENTORY_DIGEST"
-      --query name
-      --output tsv
-    )
-  else
-    start_args=(--query name --output tsv)
   fi
+  prepare_execution_env_vars "$expected_argument"
   if [[ "$expected_argument" == run-daily ]]; then
     execution_snapshot="$(snapshot_execution_ids)" || die \
       "Could not snapshot executions before publication dispatch"
@@ -731,12 +759,12 @@ start_job_execution() {
     PUBLICATION_DISPATCH_ATTEMPTED=true
   fi
   execution_name_file="$(mktemp)"
-  if ! az containerapp job start \
-      --name "$JOB_NAME" \
-      --resource-group "$RG" \
-      --command directive-ingest \
-      --args "$expected_argument" \
-      "${start_args[@]}" >"$execution_name_file"
+  directive_build_job_start_override_args \
+    "$expected_argument" "$JOB_NAME" "$RG" "$JOB_CONTAINER" "$IMAGE" \
+    "$JOB_CPU" "$JOB_MEMORY" "${EXECUTION_ENV_VARS[@]}" || \
+    die "Complete job start override is malformed"
+  job_start_args=("${DIRECTIVE_JOB_START_ARGS[@]}")
+  if ! az containerapp job start "${job_start_args[@]}" >"$execution_name_file"
   then
     rm -f "$execution_name_file"
     if [[ "$expected_argument" == run-daily ]]; then
@@ -770,6 +798,9 @@ start_job_execution() {
       --query "properties.template.containers[?name=='$JOB_CONTAINER'] | [0]" \
       --output json
   )"
+  directive_assert_execution_override_json \
+    "$execution_container" "$expected_argument" "$IMAGE" "$JOB_CPU" "$JOB_MEMORY" || \
+    die "Execution did not apply the complete pinned container override"
   if [[ "$expected_argument" == run-daily || "$expected_argument" == verify ]]; then
     directive_assert_approved_execution_json \
       "$execution_container" "$expected_argument" "$IMAGE" \
@@ -795,6 +826,12 @@ assert_v2_search_schema() {
       ([.fields[]?.name] as $names |
         (["id", "directive_id", "directive_version_id", "is_valid",
           "content", "content_vector"] - $names | length) == 0) and
+      ([.fields[]? | select(.name == "id") |
+        .type == "Edm.String" and
+        .key == true and
+        .filterable == true and
+        .sortable == true and
+        .retrievable == true] | any) and
       ([.fields[]? | select(.name == "content_vector") | .dimensions]
         | any(. == 3072))
     ' "$INDEX_SCHEMA_FILE" >/dev/null || {

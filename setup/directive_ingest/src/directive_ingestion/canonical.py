@@ -192,7 +192,9 @@ def _line_body(extraction: ExtractedDocument) -> tuple[str, tuple[int, ...]]:
     text = "\n".join(line.text for line in values)
     offsets: list[int] = []
     for index, line in enumerate(values):
-        origin = line.spans[0].offset
+        origin = _source_offset(
+            extraction, line.page_number, line.polygon, line.spans
+        )
         if index:
             offsets.append(origin)
         offsets.extend(range(origin, origin + len(line.text)))
@@ -223,7 +225,12 @@ def _repeated_header_footer_offsets(extraction: ExtractedDocument) -> set[int]:
         value = _comparison_text(line.text)
         if value:
             candidates.setdefault(value, []).append(
-                (line.page_number, line.spans[0].offset)
+                (
+                    line.page_number,
+                    _source_offset(
+                        extraction, line.page_number, line.polygon, line.spans
+                    ),
+                )
             )
     return {
             offset
@@ -235,7 +242,7 @@ def _repeated_header_footer_offsets(extraction: ExtractedDocument) -> set[int]:
 
 def _edge_counter_offsets(extraction: ExtractedDocument) -> set[int]:
     return {
-        line.spans[0].offset
+        _source_offset(extraction, line.page_number, line.polygon, line.spans)
         for line in extraction.lines
         if line.page_number >= 3
         and line.polygon
@@ -315,12 +322,54 @@ def _body_headings(
         )
     ]
     for paragraph in role_headings:
-        index = body.index_for_source_offset(paragraph.spans[0].offset)
+        region = next(
+            (
+                item
+                for item in paragraph.bounding_regions
+                if item.page_number >= 3
+            ),
+            None,
+        )
+        if region is None:
+            continue
+        index = body.index_for_source_offset(
+            _source_offset(
+                extraction,
+                region.page_number,
+                region.polygon,
+                paragraph.spans,
+            )
+        )
         if index is None:
             continue
         if not any(position == index for position, _, _ in headings):
             headings.append((index, paragraph.text.strip(), 2))
     return sorted(headings, key=lambda item: item[0])
+
+
+def _source_offset(
+    extraction: ExtractedDocument,
+    page_number: int,
+    polygon: tuple[float, ...],
+    spans: tuple,
+) -> int:
+    page_offsets = [
+        span.offset for span in spans if span.page_number == page_number
+    ]
+    if page_offsets:
+        return min(page_offsets)
+    page_spans = [
+        span
+        for span in extraction.content_spans
+        if span.page_number == page_number
+    ]
+    if not page_spans:
+        return 0
+    page = extraction.page(page_number)
+    page_start = min(span.offset for span in page_spans)
+    page_length = sum(span.length for span in page_spans)
+    vertical = min(polygon[1::2]) / page.height if polygon else 0
+    return page_start + int(max(0, min(1, vertical)) * max(page_length - 1, 0))
 
 
 def _build_sections(

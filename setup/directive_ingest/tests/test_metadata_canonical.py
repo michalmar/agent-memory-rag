@@ -10,7 +10,11 @@ import pytest
 
 from directive_ingestion.canonical import parse_canonical
 from directive_ingestion.document_intelligence import DocumentIntelligenceExtractor
-from directive_ingestion.metadata import DirectiveMetadataError, normalize_label
+from directive_ingestion.metadata import (
+    DirectiveMetadataError,
+    normalize_label,
+    render_first_two_pages,
+)
 from directive_ingestion.source import SourceDocument, SourceProvenance
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -383,9 +387,7 @@ def test_document_intelligence_accepts_empty_table_cell_and_multispan_line() -> 
     table = payload["analyzeResult"]["tables"][0]
     empty = table["cells"][1]
     empty["content"] = ""
-    empty["spans"] = [
-        {"offset": empty["spans"][0]["offset"], "length": 0}
-    ]
+    empty["spans"] = []
     line = payload["analyzeResult"]["pages"][0]["lines"][0]
     interleaved_line = payload["analyzeResult"]["pages"][0]["lines"][2]
     line["spans"] = [
@@ -396,9 +398,36 @@ def test_document_intelligence_accepts_empty_table_cell_and_multispan_line() -> 
     extraction = DocumentIntelligenceExtractor._parse_result(payload)
 
     assert extraction.tables[0].cells[1].text == ""
-    assert extraction.tables[0].cells[1].spans[0].length == 0
+    assert extraction.tables[0].cells[1].spans == ()
     assert len(extraction.lines[0].spans) == 2
     assert extraction.lines[0].spans[1].offset > extraction.lines[1].spans[0].offset
+
+
+def test_document_intelligence_accepts_empty_unspanned_cell_and_table() -> None:
+    payload = _synthetic_structural_payload(3, 12, 8, 1)
+    table = payload["analyzeResult"]["tables"][0]
+    table["spans"] = []
+    empty = table["cells"][1]
+    empty["content"] = ""
+    empty["spans"] = []
+
+    extraction = DocumentIntelligenceExtractor._parse_result(payload)
+
+    assert extraction.tables[0].spans == ()
+    assert extraction.tables[0].cells[1].spans == ()
+
+
+def test_document_intelligence_requires_an_unspanned_cell_to_overlap_table() -> None:
+    payload = _synthetic_structural_payload(3, 12, 8, 1)
+    table = payload["analyzeResult"]["tables"][0]
+    table["spans"] = []
+    empty = table["cells"][1]
+    empty["content"] = ""
+    empty["spans"] = []
+    empty["boundingRegions"][0]["polygon"] = [20, 0, 21, 0, 21, 1, 20, 1]
+
+    with pytest.raises(RuntimeError, match="no table association"):
+        DocumentIntelligenceExtractor._parse_result(payload)
 
 
 @pytest.mark.parametrize(
@@ -430,14 +459,113 @@ def test_document_intelligence_rejects_same_page_cell_span_outside_parent() -> N
         DocumentIntelligenceExtractor._parse_result(payload)
 
 
-def test_document_intelligence_rejects_same_page_cell_polygon_outside_parent() -> None:
+def test_document_intelligence_accepts_independent_page_bounded_table_polygons() -> None:
     payload = _synthetic_structural_payload(3, 12, 8, 1)
     payload["analyzeResult"]["tables"][0]["cells"][0]["boundingRegions"][0][
         "polygon"
     ] = [10.051, 0, 11, 0, 11, 1, 10.051, 1]
 
-    with pytest.raises(RuntimeError, match="polygon is outside"):
+    extraction = DocumentIntelligenceExtractor._parse_result(payload)
+
+    assert extraction.tables[0].cells[0].polygon[0] == 10.051
+
+
+def test_metadata_rendering_orders_empty_unspanned_table_by_geometry() -> None:
+    fixture = json.loads((FIXTURES / "directive_v2_layout_a.json").read_text())
+    payload = _payload(fixture)
+    payload["analyzeResult"]["tables"] = [
+        {
+            "rowCount": 1,
+            "columnCount": 1,
+            "spans": [],
+            "boundingRegions": [
+                {"pageNumber": 2, "polygon": [0, 70, 10, 70, 10, 71, 0, 71]}
+            ],
+            "cells": [
+                {
+                    "content": "",
+                    "rowIndex": 0,
+                    "columnIndex": 0,
+                    "spans": [],
+                    "boundingRegions": [
+                        {
+                            "pageNumber": 2,
+                            "polygon": [0, 70, 10, 70, 10, 71, 0, 71],
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+
+    rendered, _ = render_first_two_pages(
         DocumentIntelligenceExtractor._parse_result(payload)
+    )
+
+    assert "### Page 2" in rendered
+    assert "|  |" in rendered
+    assert "| --- |" in rendered
+
+
+def test_metadata_rendering_uses_span_owned_lines_and_escaped_table_cells() -> None:
+    fixture = json.loads((FIXTURES / "directive_v2_layout_a.json").read_text())
+    payload = _payload(fixture)
+    first, second, third = payload["analyzeResult"]["pages"][1]["lines"][:3]
+    payload["analyzeResult"]["tables"] = [
+        {
+            "rowCount": 1,
+            "columnCount": 3,
+            "spans": [
+                {
+                    "offset": first["spans"][0]["offset"],
+                    "length": (
+                        third["spans"][0]["offset"]
+                        + third["spans"][0]["length"]
+                        - first["spans"][0]["offset"]
+                    ),
+                }
+            ],
+            "boundingRegions": [
+                {"pageNumber": 2, "polygon": [0, 0, 10, 0, 10, 100, 0, 100]}
+            ],
+            "cells": [
+                {
+                    "content": "Přepsaná\\hodnota | první\nřádek",
+                    "rowIndex": 0,
+                    "columnIndex": 0,
+                    "spans": first["spans"],
+                    "boundingRegions": [
+                        {"pageNumber": 2, "polygon": first["polygon"]}
+                    ],
+                },
+                {
+                    "content": second["content"],
+                    "rowIndex": 0,
+                    "columnIndex": 1,
+                    "spans": second["spans"],
+                    "boundingRegions": [
+                        {"pageNumber": 2, "polygon": second["polygon"]}
+                    ],
+                },
+                {
+                    "content": third["content"],
+                    "rowIndex": 0,
+                    "columnIndex": 2,
+                    "spans": third["spans"],
+                    "boundingRegions": [
+                        {"pageNumber": 2, "polygon": third["polygon"]}
+                    ],
+                },
+            ],
+        }
+    ]
+
+    rendered, _ = render_first_two_pages(
+        DocumentIntelligenceExtractor._parse_result(payload)
+    )
+
+    assert first["content"] not in rendered
+    assert "Přepsaná\\\\hodnota \\| první řádek" in rendered
 
 
 @pytest.mark.parametrize(

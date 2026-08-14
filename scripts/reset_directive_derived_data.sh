@@ -18,6 +18,10 @@ MAINTENANCE_DRAIN_ATTEMPTS="${DIRECTIVE_MAINTENANCE_DRAIN_ATTEMPTS:-60}"
 MAINTENANCE_DRAIN_DELAY_SECONDS="${DIRECTIVE_MAINTENANCE_DRAIN_DELAY_SECONDS:-10}"
 V1_INDEX="${DIRECTIVE_SEARCH_V1_INDEX:-directive-chunks-v1}"
 V2_INDEX="directive-chunks-v2"
+JOB_CONTAINER="directive-ingestion"
+JOB_CPU="1"
+JOB_MEMORY="2Gi"
+PROCESSING_VERSION="directive-v2-czech-layout"
 MODE="dry-run"
 EXECUTE_FLAG=false
 CONFIRMATION_TOKEN=""
@@ -29,6 +33,7 @@ EXPECTED_ENVIRONMENT_DIGEST=""
 SOURCE_INVENTORY_DIGEST=""
 SOURCE_COUNT=0
 STARTED_EXECUTIONS=()
+FRESH_VERIFY_ENV_VARS=()
 COSMOS_PLAN_FILE=""
 COSMOS_PLAN_JSON_FILE=""
 MAINTENANCE_TOUCHED=false
@@ -868,7 +873,7 @@ assert_verify_execution_contract() {
       --name "$JOB_NAME" \
       --resource-group "$RG" \
       --job-execution-name "$execution_name" \
-      --query "properties.template.containers[?name=='directive-ingestion'] | [0]" \
+      --query "properties.template.containers[?name=='$JOB_CONTAINER'] | [0]" \
       --output json
   )"
   actual_image="$(
@@ -876,16 +881,43 @@ assert_verify_execution_contract() {
       --name "$JOB_NAME" \
       --resource-group "$RG" \
       --job-execution-name "$execution_name" \
-      --query "properties.template.containers[?name=='directive-ingestion'].image | [0]" \
+      --query "properties.template.containers[?name=='$JOB_CONTAINER'].image | [0]" \
       --output tsv
   )"
   directive_assert_approved_execution_json \
     "$container_json" verify "$expected_image" \
     "$APPROVED_ENVIRONMENT_DIGEST" "$APPROVED_SOURCE_INVENTORY_DIGEST" \
-    "$APPROVED_VALIDATION_DIGEST" directive-v2-czech-layout "$V2_INDEX" || \
+    "$APPROVED_VALIDATION_DIGEST" "$PROCESSING_VERSION" "$V2_INDEX" || \
     die "Fresh execution did not use the exact approved directive-ingest verify contract"
   [[ "$actual_image" == "$expected_image" ]] || \
     die "Fresh verification execution image changed from the pinned live image"
+}
+
+prepare_fresh_verify_env_vars() {
+  local env_json env_file name value
+  env_json="$(
+    "${AZ_CMD[@]}" containerapp job show \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --query "properties.template.containers[?name=='$JOB_CONTAINER'].env | [0]" \
+      --output json
+  )"
+  env_file="$(mktemp)"
+  if ! directive_render_execution_env_vars \
+    "$env_json" verify "$PROCESSING_VERSION" "$V2_INDEX" \
+    "$APPROVED_VALIDATION_DIGEST" "$APPROVED_ENVIRONMENT_DIGEST" \
+    "$APPROVED_SOURCE_INVENTORY_DIGEST" >"$env_file"; then
+    rm -f "$env_file"
+    die "Live job environment cannot be used as a complete v2 verify override"
+  fi
+  FRESH_VERIFY_ENV_VARS=()
+  while IFS=$'\t' read -r name value; do
+    [[ -n "$name" ]] || continue
+    FRESH_VERIFY_ENV_VARS+=("$name=$value")
+  done <"$env_file"
+  rm -f "$env_file"
+  [[ "${#FRESH_VERIFY_ENV_VARS[@]}" -gt 0 ]] || die \
+    "Complete v2 verify override has no environment values"
 }
 
 set_verify_approval_overrides() {
@@ -937,8 +969,9 @@ recover_fresh_verify_execution() {
 
 start_fresh_verify() {
   local execution_name status log_file live_image execution_image record_digest started_at
-  local execution_name_file execution_snapshot
+  local execution_name_file execution_snapshot job_start_args=()
   set_verify_approval_overrides
+  prepare_fresh_verify_env_vars
   enter_maintenance_mode
   wait_for_active_executions_to_drain
   live_image="$(
@@ -957,17 +990,13 @@ start_fresh_verify() {
   )"
   execution_name_file="$(mktemp)"
   local dispatch_status=0
-  if "${AZ_CMD[@]}" containerapp job start \
-      --name "$JOB_NAME" \
-      --resource-group "$RG" \
-      --command directive-ingest \
-      --args verify \
-      --env-vars \
-      "DIRECTIVE_APPROVED_VALIDATION_DIGEST=$APPROVED_VALIDATION_DIGEST" \
-      "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST=$APPROVED_ENVIRONMENT_DIGEST" \
-      "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST=$APPROVED_SOURCE_INVENTORY_DIGEST" \
-      --query name \
-      --output tsv >"$execution_name_file"; then
+  directive_build_job_start_override_args \
+    verify "$JOB_NAME" "$RG" "$JOB_CONTAINER" "$live_image" \
+    "$JOB_CPU" "$JOB_MEMORY" "${FRESH_VERIFY_ENV_VARS[@]}" || \
+    die "Complete fresh verify override is malformed"
+  job_start_args=("${DIRECTIVE_JOB_START_ARGS[@]}")
+  if "${AZ_CMD[@]}" containerapp job start "${job_start_args[@]}" \
+    >"$execution_name_file"; then
     dispatch_status=0
   else
     dispatch_status=$?
@@ -1019,7 +1048,7 @@ start_fresh_verify() {
   "${AZ_CMD[@]}" containerapp job logs show \
     --name "$JOB_NAME" \
     --resource-group "$RG" \
-    --container directive-ingestion \
+    --container "$JOB_CONTAINER" \
     --execution "$execution_name" \
     --tail 300 \
     --format text >"$log_file"
@@ -1030,7 +1059,7 @@ start_fresh_verify() {
   directive_validate_producer_record \
     "$log_file.record" "$log_file.validated" \
     directive.verify.v2 "$EXPECTED_ENVIRONMENT_FILE" \
-    "$SOURCE_INVENTORY_DIGEST" directive-v2-czech-layout "$V2_INDEX" || {
+    "$SOURCE_INVENTORY_DIGEST" "$PROCESSING_VERSION" "$V2_INDEX" || {
     rm -f "$log_file" "$log_file.record" "$log_file.validated"
     die "Fresh v2 verify producer record failed the exact schema and digest checks"
   }
@@ -1039,7 +1068,7 @@ start_fresh_verify() {
       --name "$JOB_NAME" \
       --resource-group "$RG" \
       --job-execution-name "$execution_name" \
-      --query "properties.template.containers[?name=='directive-ingestion'].image | [0]" \
+      --query "properties.template.containers[?name=='$JOB_CONTAINER'].image | [0]" \
       --output tsv
   )"
   [[ "$execution_image" == "$live_image" && "$execution_image" == *@sha256:* ]] || \
@@ -1054,7 +1083,7 @@ start_fresh_verify() {
     --arg job "$JOB_NAME" \
     --arg environment_digest "$EXPECTED_ENVIRONMENT_DIGEST" \
     --arg source_digest "$SOURCE_INVENTORY_DIGEST" \
-    --arg processing_version "directive-v2-czech-layout" \
+    --arg processing_version "$PROCESSING_VERSION" \
     --arg search_index "$V2_INDEX" \
     '{producer_record: .,
       wrapper: {
@@ -1133,7 +1162,7 @@ finalize_v1() {
     "${AZ_CMD[@]}" containerapp job show \
       --name "$JOB_NAME" \
       --resource-group "$RG" \
-      --query "properties.template.containers[?name=='directive-ingestion'].image | [0]" \
+      --query "properties.template.containers[?name=='$JOB_CONTAINER'].image | [0]" \
       --output tsv
   )"
   [[ "$live_image" == *"@$evidence_image" ]] || die \

@@ -578,6 +578,9 @@ Terraform assigned the current user the required data roles. After propagation:
 ./scripts/release_foundry_assets.sh all
 ```
 
+The script installs the local `directive_contracts` and `agent_contracts`
+packages into its setup environment and checks both imports before release work.
+
 Keep `foundry_prompt_enabled = false` until the release is verified.
 
 Before continuing to image and agent releases, complete all release identifiers

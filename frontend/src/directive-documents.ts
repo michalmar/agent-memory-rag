@@ -6,9 +6,6 @@ const MAX_DIRECTIVE_VERSION_ID_LENGTH = 200;
 const DIRECTIVE_VERSION_ID_PREFIX = ':v';
 const DIRECTIVE_VERSION = /^\d+(?:\.\d+)?$/;
 const SEPARATOR_SPACING = /\s*([/._-])\s*/gu;
-// Python 3.11 does not uppercase these code points that newer browser
-// runtimes uppercase, so preserve the backend's canonical public IDs.
-const BACKEND_UNCHANGED_UPPERCASE = new Set(['ƛ', 'ɤ', 'ꟓ', 'ꟕ']);
 
 export type DirectiveDocumentTab = 'document' | 'pdf';
 export type DirectiveDocumentLoadStatus =
@@ -217,17 +214,6 @@ export function isAbortError(error: unknown): boolean {
   );
 }
 
-function uppercaseDirectiveId(value: string): string {
-  return Array.from(
-    value,
-    (character) => (
-      BACKEND_UNCHANGED_UPPERCASE.has(character)
-        ? character
-        : character.toUpperCase()
-    ),
-  ).join('');
-}
-
 export function normalizeDirectiveId(value: string): string {
   if (typeof value !== 'string') {
     throw new TypeError('Directive ID must be a string');
@@ -238,7 +224,6 @@ export function normalizeDirectiveId(value: string): string {
   }
   normalized = normalized.trim().replace(/\s+/gu, ' ');
   normalized = normalized.replace(SEPARATOR_SPACING, '$1');
-  normalized = uppercaseDirectiveId(normalized);
   if (!normalized) {
     throw new Error('Directive ID must not be empty');
   }
