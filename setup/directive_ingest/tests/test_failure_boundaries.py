@@ -278,3 +278,25 @@ async def test_wrong_same_checksum_mandates_are_not_treated_as_current() -> None
 
     assert await repository.is_current(parsed) is False
     repository._has_inactive.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_candidate_bundle_is_validated_before_cleanup_marker() -> None:
+    source = SimpleNamespace(source_name="directive.pdf", source_hash="a" * 64)
+    metadata = SimpleNamespace(
+        directive_id="d-1",
+        directive_version_id="d-1:v1",
+    )
+    source_metadata = SimpleNamespace(source=source, metadata=metadata)
+    bundle = SimpleNamespace(
+        directive_id="d-1",
+        directive_version_id="d-1:v1",
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.config = SimpleNamespace(processing_hash="b" * 64)
+    runner.source_states = SimpleNamespace(load=AsyncMock(return_value=object()))
+    runner._state_has_live_publication = AsyncMock(return_value=True)
+
+    await runner._validate_candidate_documents([source_metadata], [bundle])
+
+    runner._state_has_live_publication.assert_awaited_once()

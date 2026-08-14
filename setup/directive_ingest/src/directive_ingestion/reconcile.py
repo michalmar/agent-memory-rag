@@ -1251,6 +1251,12 @@ class DirectiveIngestionRunner:
         }
         marker = await self.commits.load()
         if marker is None:
+            candidates = [
+                snapshot.item.bundle
+                for snapshot in getattr(self, "_publication_snapshots", [])
+            ]
+            if candidates:
+                await self._validate_candidate_documents(metadata, candidates)
             existing_state_names = await self.source_states.list_names()
             if (
                 not stale
@@ -1294,6 +1300,41 @@ class DirectiveIngestionRunner:
                     state.directive_metadata,
                     state.artifact_generation_id,
                 )
+
+    async def _validate_candidate_documents(
+        self,
+        metadata: list[SourceMetadata],
+        replaced: list[PublishedDirectiveVersion],
+    ) -> None:
+        """Validate each activated candidate before cleanup can be committed."""
+        expected = {
+            (item.metadata.directive_id, item.metadata.directive_version_id)
+            for item in metadata
+        }
+        replaced_identities = {
+            (bundle.directive_id, bundle.directive_version_id)
+            for bundle in replaced
+        }
+        for item in metadata:
+            identity = (
+                item.metadata.directive_id,
+                item.metadata.directive_version_id,
+            )
+            if identity not in replaced_identities:
+                continue
+            state = await self.source_states.load(
+                item.source, self.config.processing_hash
+            )
+            if state is None or not await self._state_has_live_publication(
+                item.source, state
+            ):
+                raise RuntimeError(
+                    "Candidate publication does not match its source state"
+                )
+        if not replaced_identities <= expected:
+            raise RuntimeError(
+                "Candidate publication contains an unexpected directive version"
+            )
 
     async def _state_has_live_publication(
         self,
