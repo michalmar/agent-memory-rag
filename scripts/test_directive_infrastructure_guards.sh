@@ -17,15 +17,27 @@ ENVIRONMENT="$(mktemp)"
 VALIDATE_RECORD="$(mktemp)"
 VERIFY_RECORD="$(mktemp)"
 NORMALIZED_RECORD="$(mktemp)"
+BAD_RECORD="$(mktemp)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/directive_infrastructure_guards.sh"
-trap 'rm -f "$FIXTURE" "$PLAN" "$BAD_PLAN" "$RAW_LOG" "$RECORD" "$OVERSIZE_LOG" "$MOCK_AZ" "$MOCK_TERRAFORM" "$MOCK_LOG" "$EVIDENCE" "$ENVIRONMENT" "$VALIDATE_RECORD" "$VERIFY_RECORD" "$NORMALIZED_RECORD"' EXIT
+trap 'rm -f "$FIXTURE" "$PLAN" "$BAD_PLAN" "$RAW_LOG" "$RECORD" "$OVERSIZE_LOG" "$MOCK_AZ" "$MOCK_TERRAFORM" "$MOCK_LOG" "$EVIDENCE" "$ENVIRONMENT" "$VALIDATE_RECORD" "$VERIFY_RECORD" "$NORMALIZED_RECORD" "$BAD_RECORD"' EXIT
 
 cat >"$FIXTURE" <<'EOF'
 {"name":"directive-ingestion","command":["directive-ingest"],"args":["verify"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 EOF
 
 directive_assert_execution_mode_json "$(<"$FIXTURE")" verify
+
+cat >"$FIXTURE" <<'EOF'
+{"name":"directive-ingestion","command":["directive-ingest"],"args":["run-daily"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","env":[{"name":"DIRECTIVE_PROCESSING_VERSION","value":"directive-v2-czech-layout"},{"name":"DIRECTIVE_SEARCH_INDEX","value":"directive-chunks-v2"},{"name":"DIRECTIVE_APPROVED_VALIDATION_DIGEST","value":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},{"name":"DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST","value":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST","value":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}]}
+EOF
+directive_assert_publication_execution_json \
+  "$(<"$FIXTURE")" \
+  registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
+  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  directive-v2-czech-layout directive-chunks-v2
 
 printf '%s\n' 'INFO prefix' '{"success":true,"environment":{},"cross_store":{"content":{"count":1}}}' >"$RAW_LOG"
 directive_extract_producer_record "$RAW_LOG" "$RECORD"
@@ -131,10 +143,12 @@ cross_store = {
 }
 verify = {k: v for k, v in base.items() if k not in {"record_schema", "mandate_count", "mandate_user_count", "failures", "validation_digest"}}
 verify.update({"record_schema": "directive.verify.v2", "run_id": "verify-run", "warnings": [], "warning_count": 0, "cross_store": cross_store})
+verify["validation_digest"] = base["validation_digest"]
 projection = {k: verify[k] for k in (
     "record_schema", "environment", "processing_version", "processing_hash",
     "search_index", "source_count", "source_inventory_digest", "directive_count",
-    "normalized_directive_ids", "directive_version_ids", "cross_store",
+    "normalized_directive_ids", "directive_version_ids", "validation_digest",
+    "cross_store",
 )}
 verify["state_digest"] = digest(projection)
 verify["verify_digest"] = digest({k: v for k, v in verify.items() if k != "verify_digest"})
@@ -149,6 +163,54 @@ directive_validate_producer_record \
   "$VERIFY_RECORD" "$NORMALIZED_RECORD" \
   directive.verify.v2 "$ENVIRONMENT" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   directive-v2-czech-layout directive-chunks-v2
+
+expect_invalid_verify() {
+  local label="$1"
+  if directive_validate_producer_record \
+    "$BAD_RECORD" "$NORMALIZED_RECORD" \
+    directive.verify.v2 "$ENVIRONMENT" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    directive-v2-czech-layout directive-chunks-v2 >/dev/null 2>&1; then
+    echo "$label was accepted" >&2
+    exit 1
+  fi
+}
+
+while IFS= read -r invalid_label; do
+  python3 - "$VERIFY_RECORD" "$BAD_RECORD" "$invalid_label" <<'PY'
+import json
+import pathlib
+import sys
+record = json.loads(pathlib.Path(sys.argv[1]).read_text())
+label = sys.argv[3]
+if label == "bool warning_count":
+    record["warning_count"] = True
+elif label == "extra top-level field":
+    record["unexpected"] = "field"
+elif label == "wrapper execution id":
+    record["verification_execution_id"] = "azure-name"
+elif label == "invalid severity":
+    record["warnings"] = [{"code": "W1", "severity": "info"}]
+    record["warning_count"] = 1
+elif label == "duplicate warnings":
+    record["warnings"] = [{"code": "W1", "severity": "warning"}] * 2
+    record["warning_count"] = 2
+elif label == "unsorted warnings":
+    record["warnings"] = [
+        {"code": "W2", "severity": "warning"},
+        {"code": "W1", "severity": "warning"},
+    ]
+    record["warning_count"] = 2
+pathlib.Path(sys.argv[2]).write_text(json.dumps(record), encoding="utf-8")
+PY
+  expect_invalid_verify "$invalid_label"
+done <<'EOF'
+bool warning_count
+extra top-level field
+wrapper execution id
+invalid severity
+duplicate warnings
+unsorted warnings
+EOF
 
 cat >"$PLAN" <<'EOF'
 {"resource_changes":[

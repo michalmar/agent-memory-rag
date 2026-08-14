@@ -436,7 +436,16 @@ complete canonical validation record, pinned image digest, and source inventory
 digest. The producer `run_id` is distinct from Azure execution IDs, which remain
 only in the evidence wrapper. Before `run-daily`, deployment atomically reserves
 `publication-approval/<validation-digest>.json` with create-only semantics;
-replays are rejected and the marker is retained after successful publication.
+replays are rejected and the marker is retained after successful publication. The
+producer contract also caps the publication at 32 sorted, unique directives and
+requires complete cross-store counts and digests.
+dispatch passes nonsecret per-execution overrides for
+`DIRECTIVE_APPROVED_VALIDATION_DIGEST`,
+`DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST`, and
+`DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST`; the live execution must echo the
+same pinned image, processing version, Search index, and digests before writes.
+The marker is never released after a dispatch attempt, including a timeout or
+lost CLI response.
 Publish later, noninteractively, only with that evidence and token:
 
 ```bash

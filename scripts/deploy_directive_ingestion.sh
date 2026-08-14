@@ -118,9 +118,12 @@ SOURCE_INVENTORY_FILE="$(mktemp)"
 VALIDATION_RECORD_DIGEST=""
 VALIDATION_PRODUCER_DIGEST=""
 SOURCE_INVENTORY_DIGEST=""
+EXPECTED_ENVIRONMENT_DIGEST=""
+APPROVED_ENVIRONMENT_DIGEST=""
+APPROVED_SOURCE_INVENTORY_DIGEST=""
 STARTED_EXECUTIONS=()
 PUBLICATION_MARKER_RESERVED=false
-PUBLICATION_STARTED=false
+PUBLICATION_DISPATCH_ATTEMPTED=false
 
 ACR_SCOPE="$(
   az acr show --name "$ACR_NAME" --resource-group "$RG" --query id --output tsv
@@ -164,7 +167,7 @@ cleanup() {
   local status=$?
   trap - EXIT
   set +e
-  if [[ "$PUBLICATION_MARKER_RESERVED" == true && "$PUBLICATION_STARTED" != true ]]; then
+  if [[ "$PUBLICATION_MARKER_RESERVED" == true && "$PUBLICATION_DISPATCH_ATTEMPTED" != true ]]; then
     az storage blob delete \
       --account-name "$STORAGE_ACCOUNT" \
       --container-name "$ARTIFACT_BLOB_CONTAINER" \
@@ -172,6 +175,9 @@ cleanup() {
       --auth-mode login \
       --delete-snapshots include \
       --output none || echo "ERROR: failed to roll back unused publication approval reservation" >&2
+  fi
+  if [[ "$PUBLICATION_DISPATCH_ATTEMPTED" == true ]]; then
+    discover_publication_execution || true
   fi
   if [[ "$status" -ne 0 && -n "${JOB_NAME:-}" ]]; then
     stop_started_executions
@@ -236,6 +242,8 @@ write_expected_environment() {
 }
 
 write_expected_environment
+
+EXPECTED_ENVIRONMENT_DIGEST="$(sha256_text "$(jq -S -c . "$EXPECTED_ENVIRONMENT_FILE")")"
 
 stop_started_executions() {
   local execution_name status
@@ -401,12 +409,16 @@ reserve_publication_approval() {
   jq -S -n \
     --arg validation_digest "$VALIDATION_PRODUCER_DIGEST" \
     --arg source_digest "$SOURCE_INVENTORY_DIGEST" \
+    --arg environment_digest "$EXPECTED_ENVIRONMENT_DIGEST" \
     --arg image_digest "$IMAGE_DIGEST" \
+    --arg processing_version "$EXPECTED_PROCESSING_VERSION" \
     --arg search_index "$EXPECTED_SEARCH_INDEX" \
     '{
       validation_digest: $validation_digest,
       source_inventory_digest: $source_digest,
+      environment_digest: $environment_digest,
       image_digest: $image_digest,
+      processing_version: $processing_version,
       search_index: $search_index
     }' >"$marker_file"
   if ! az storage blob upload \
@@ -530,48 +542,128 @@ assert_execution_image() {
   }
 }
 
+track_started_execution() {
+  local execution_name="$1"
+  local known
+  [[ -n "$execution_name" ]] || return 1
+  for known in "${STARTED_EXECUTIONS[@]}"; do
+    [[ "$known" == "$execution_name" ]] && {
+      STARTED_EXECUTION_NAME="$execution_name"
+      return 0
+    }
+  done
+  STARTED_EXECUTIONS+=("$execution_name")
+  STARTED_EXECUTION_NAME="$execution_name"
+}
+
+discover_publication_execution() {
+  local executions execution_name
+  [[ "$PUBLICATION_DISPATCH_ATTEMPTED" == true ]] || return 0
+  executions="$(
+    az containerapp job execution list \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --output json 2>/dev/null
+  )" || return 1
+  execution_name="$(
+    python3 - "$IMAGE" "$EXPECTED_ENVIRONMENT_DIGEST" \
+      "$APPROVED_SOURCE_INVENTORY_DIGEST" "$VALIDATION_PRODUCER_DIGEST" \
+      "$EXPECTED_PROCESSING_VERSION" "$EXPECTED_SEARCH_INDEX" "$executions" <<'PY'
+import json
+import sys
+
+image, environment_digest, source_digest, validation_digest, \
+    processing_version, search_index, raw = sys.argv[1:]
+items = json.loads(raw)
+if not isinstance(items, list):
+    raise SystemExit(0)
+for item in items:
+    props = item.get("properties", {}) if isinstance(item, dict) else {}
+    template = props.get("template", {}) if isinstance(props, dict) else {}
+    containers = template.get("containers", []) if isinstance(template, dict) else []
+    for container in containers:
+        if not isinstance(container, dict) or container.get("name") != "directive-ingestion":
+            continue
+        env = {
+            value.get("name"): value.get("value")
+            for value in container.get("env", [])
+            if isinstance(value, dict)
+        }
+        if (
+            container.get("image") == image
+            and container.get("command") == ["directive-ingest"]
+            and container.get("args") == ["run-daily"]
+            and env.get("DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST") == environment_digest
+            and env.get("DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST") == source_digest
+            and env.get("DIRECTIVE_APPROVED_VALIDATION_DIGEST") == validation_digest
+            and env.get("DIRECTIVE_PROCESSING_VERSION") == processing_version
+            and env.get("DIRECTIVE_SEARCH_INDEX") == search_index
+        ):
+            name = item.get("name")
+            if isinstance(name, str) and name:
+                print(name)
+                raise SystemExit(0)
+PY
+  )"
+  [[ -z "$execution_name" ]] || track_started_execution "$execution_name"
+}
+
 start_job_execution() {
   local expected_argument="$1"
-  local execution_name
-  local -a execution_env
-  execution_env=()
-  case "$expected_argument" in
-    run-daily)
-      execution_env=(
-        --env-vars
-        "DIRECTIVE_APPROVED_VALIDATION_DIGEST=$DIRECTIVE_APPROVED_VALIDATION_DIGEST"
-        "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST=$DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST"
-        "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST=$DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST"
-      )
-      ;;
-    verify)
-      execution_env=(
-        --env-vars
-        "DIRECTIVE_APPROVED_VALIDATION_DIGEST=$DIRECTIVE_APPROVED_VALIDATION_DIGEST"
-      )
-      ;;
-  esac
+  local execution_name start_args=()
   assert_live_maintenance_mode
   assert_no_active_execution
-  execution_name="$(
+  if [[ "$expected_argument" == run-daily ]]; then
+    [[ "$VALIDATION_PRODUCER_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
+      "Publication approval validation digest is invalid"
+    [[ "$EXPECTED_ENVIRONMENT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
+      "Publication approval environment digest is invalid"
+    [[ "$APPROVED_SOURCE_INVENTORY_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
+      "Publication approval source inventory digest is invalid"
+    start_args=(
+      --env-vars
+      "DIRECTIVE_APPROVED_VALIDATION_DIGEST=$VALIDATION_PRODUCER_DIGEST"
+      "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST=$EXPECTED_ENVIRONMENT_DIGEST"
+      "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST=$APPROVED_SOURCE_INVENTORY_DIGEST"
+    )
+    PUBLICATION_DISPATCH_ATTEMPTED=true
+  fi
+  if ! execution_name="$(
     az containerapp job start \
       --name "$JOB_NAME" \
       --resource-group "$RG" \
       --command directive-ingest \
       --args "$expected_argument" \
-      "${execution_env[@]}" \
+      "${start_args[@]}" \
       --query name \
       --output tsv
-  )"
+  )"; then
+    [[ "$expected_argument" == run-daily ]] && discover_publication_execution || true
+    return 1
+  fi
   [[ -n "$execution_name" ]] || {
+    [[ "$expected_argument" == run-daily ]] && discover_publication_execution || true
     echo "ERROR: Container Apps did not return an execution name" >&2
     return 1
   }
-  STARTED_EXECUTIONS+=("$execution_name")
-  STARTED_EXECUTION_NAME="$execution_name"
-  [[ "$expected_argument" == run-daily ]] && PUBLICATION_STARTED=true
+  track_started_execution "$execution_name"
   assert_execution_mode "$execution_name" "$expected_argument"
   assert_execution_image "$execution_name"
+  if [[ "$expected_argument" == run-daily ]]; then
+    local execution_container
+    execution_container="$(
+      az containerapp job execution show \
+        --name "$JOB_NAME" \
+        --resource-group "$RG" \
+        --job-execution-name "$execution_name" \
+        --query "properties.template.containers[?name=='$JOB_CONTAINER'] | [0]" \
+        --output json
+    )"
+    directive_assert_publication_execution_json \
+      "$execution_container" "$IMAGE" "$EXPECTED_ENVIRONMENT_DIGEST" \
+      "$APPROVED_SOURCE_INVENTORY_DIGEST" "$VALIDATION_PRODUCER_DIGEST" \
+      "$EXPECTED_PROCESSING_VERSION" "$EXPECTED_SEARCH_INDEX"
+  fi
 }
 
 assert_v2_search_schema() {
@@ -650,7 +742,9 @@ validation_confirmation_token() {
   printf 'DIRECTIVE-PUBLISH-V2-%s\n' \
     "$(sha256_text "$record_digest
 $IMAGE_DIGEST
-$SOURCE_INVENTORY_DIGEST" | cut -c1-24)"
+$SOURCE_INVENTORY_DIGEST
+$EXPECTED_ENVIRONMENT_DIGEST
+$VALIDATION_PRODUCER_DIGEST" | cut -c1-24)"
 }
 
 refresh_source_inventory() {
@@ -727,6 +821,8 @@ load_validation_evidence() {
   IMAGE="$ACR_LOGIN/$REPOSITORY@$IMAGE_DIGEST"
   VALIDATE_EXECUTION="$(jq -r '.wrapper.validation_execution_id // empty' "$VALIDATION_EVIDENCE_FILE")"
   SOURCE_INVENTORY_DIGEST="$(jq -r '.wrapper.source_inventory_digest // empty' "$VALIDATION_EVIDENCE_FILE")"
+  APPROVED_SOURCE_INVENTORY_DIGEST="$SOURCE_INVENTORY_DIGEST"
+  APPROVED_ENVIRONMENT_DIGEST="$(jq -r '.wrapper.environment_digest // empty' "$VALIDATION_EVIDENCE_FILE")"
   VALIDATION_RECORD_DIGEST="$(jq -r '.wrapper.validation_record_digest // empty' "$VALIDATION_EVIDENCE_FILE")"
   VALIDATION_PRODUCER_DIGEST="$(jq -r '.producer_record.validation_digest // empty' "$VALIDATION_EVIDENCE_FILE")"
   [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
@@ -735,6 +831,10 @@ load_validation_evidence() {
   }
   [[ -n "$VALIDATE_EXECUTION" && "$SOURCE_INVENTORY_DIGEST" =~ ^[0-9a-f]{64}$ ]] || {
     echo "ERROR: validation evidence is missing execution or source digest" >&2
+    return 1
+  }
+  [[ "$APPROVED_ENVIRONMENT_DIGEST" == "$EXPECTED_ENVIRONMENT_DIGEST" ]] || {
+    echo "ERROR: validation evidence environment digest differs from live Terraform" >&2
     return 1
   }
   [[ "$VALIDATION_RECORD_DIGEST" =~ ^[0-9a-f]{64}$ ]] || {
@@ -769,12 +869,14 @@ write_validation_evidence() {
       --arg job "$JOB_NAME" \
       --arg processing_version "$EXPECTED_PROCESSING_VERSION" \
       --arg search_index "$EXPECTED_SEARCH_INDEX" \
+      --arg environment_digest "$EXPECTED_ENVIRONMENT_DIGEST" \
       '
         {
           producer_record: .,
           wrapper: {
             image_digest: $image_digest,
             image_reference: $image_reference,
+            environment_digest: $environment_digest,
             source_inventory_digest: $source_digest,
             validation_execution_id: $execution,
             subscription_id: $subscription,
@@ -798,6 +900,8 @@ write_validation_evidence() {
     <(printf '%s\n' "$canonical_record") >"$VALIDATION_EVIDENCE_FILE"
   VALIDATION_RECORD_DIGEST="$record_digest"
   VALIDATION_PRODUCER_DIGEST="$(jq -r '.validation_digest' "$VALIDATION_SUMMARY_FILE")"
+  APPROVED_SOURCE_INVENTORY_DIGEST="$SOURCE_INVENTORY_DIGEST"
+  APPROVED_ENVIRONMENT_DIGEST="$EXPECTED_ENVIRONMENT_DIGEST"
   echo "validation_record_digest=$VALIDATION_RECORD_DIGEST"
 }
 
@@ -850,10 +954,12 @@ revalidate_validation_evidence() {
       --arg job "$JOB_NAME" \
       --arg processing_version "$EXPECTED_PROCESSING_VERSION" \
       --arg search_index "$EXPECTED_SEARCH_INDEX" \
+      --arg environment_digest "$EXPECTED_ENVIRONMENT_DIGEST" \
       '. + {
         wrapper: {
           image_digest: $image_digest,
           image_reference: $image_reference,
+          environment_digest: $environment_digest,
           source_inventory_digest: $source_digest,
           validation_execution_id: $execution,
           subscription_id: $subscription,
@@ -870,6 +976,10 @@ revalidate_validation_evidence() {
     "Validation evidence does not match the pinned Azure execution output"
   VALIDATION_RECORD_DIGEST="$actual_digest"
   VALIDATION_PRODUCER_DIGEST="$(jq -r '.validation_digest' "$VALIDATION_SUMMARY_FILE")"
+  [[ "$(jq -r '.wrapper.environment_digest' "$VALIDATION_EVIDENCE_FILE")" == "$EXPECTED_ENVIRONMENT_DIGEST" ]] || \
+    die "Validation evidence environment digest changed"
+  [[ "$(jq -r '.producer_record.validation_digest' "$VALIDATION_EVIDENCE_FILE")" == "$VALIDATION_PRODUCER_DIGEST" ]] || \
+    die "Validation evidence producer digest changed"
 }
 
 write_verification_evidence() {
@@ -887,12 +997,19 @@ write_verification_evidence() {
     echo "ERROR: verification summary is incomplete for v2 finalization" >&2
     return 1
   }
+  [[ "$(jq -r '.validation_digest' "$validated_record")" == "$VALIDATION_PRODUCER_DIGEST" ]] || {
+    rm -f "$validated_record"
+    echo "ERROR: verification is not linked to the approved validation digest" >&2
+    return 1
+  }
   canonical_record="$(
     jq -S -c \
       --arg image_digest "$IMAGE_DIGEST" \
       --arg source_digest "$SOURCE_INVENTORY_DIGEST" \
+      --arg environment_digest "$EXPECTED_ENVIRONMENT_DIGEST" \
       --arg validation_execution "$VALIDATE_EXECUTION" \
       --arg validation_digest "$VALIDATION_RECORD_DIGEST" \
+      --arg validation_producer_digest "$VALIDATION_PRODUCER_DIGEST" \
       --arg execution "$VERIFY_EXECUTION" \
       --arg subscription "$SUBSCRIPTION_ID" \
       --arg resource_group "$RG" \
@@ -904,9 +1021,11 @@ write_verification_evidence() {
           producer_record: .,
           wrapper: {
             image_digest: $image_digest,
+            environment_digest: $environment_digest,
             source_inventory_digest: $source_digest,
             validation_execution_id: $validation_execution,
             validation_record_digest: $validation_digest,
+            validation_producer_digest: $validation_producer_digest,
             verification_execution_id: $execution,
             subscription_id: $subscription,
             resource_group: $resource_group,
@@ -924,9 +1043,15 @@ write_verification_evidence() {
     '.wrapper.verification_record_digest = $digest | .' \
     <(printf '%s\n' "$canonical_record") >"$VERIFY_EVIDENCE_FILE"
   jq -e \
+    --arg environment_digest "$EXPECTED_ENVIRONMENT_DIGEST" \
+    --arg source_digest "$SOURCE_INVENTORY_DIGEST" \
+    --arg validation_digest "$VALIDATION_PRODUCER_DIGEST" \
     '
       .producer_record.search_index == "directive-chunks-v2" and
-      .producer_record.processing_version == "directive-v2-czech-layout"
+      .producer_record.processing_version == "directive-v2-czech-layout" and
+      .producer_record.validation_digest == $validation_digest and
+      .wrapper.environment_digest == $environment_digest and
+      .wrapper.source_inventory_digest == $source_digest
     ' "$VERIFY_EVIDENCE_FILE" >/dev/null || {
     echo "ERROR: verification evidence environment or v2 configuration mismatch" >&2
     return 1
@@ -1108,12 +1233,13 @@ assert_v2_search_schema
 refresh_source_inventory
 [[ "$SOURCE_INVENTORY_DIGEST" == "$(jq -r '.producer_record.source_inventory_digest' "$VALIDATION_EVIDENCE_FILE")" ]] || \
   die "Source inventory changed immediately before publication"
+[[ "$SOURCE_INVENTORY_DIGEST" == "$APPROVED_SOURCE_INVENTORY_DIGEST" ]] || \
+  die "Source inventory changed since approval evidence was issued"
 
 echo "==> Starting approved publication through a per-execution override"
 reserve_publication_approval
 start_job_execution run-daily
 EXECUTION_NAME="$STARTED_EXECUTION_NAME"
-PUBLICATION_STARTED=true
 echo "==> Ingestion execution: $EXECUTION_NAME"
 wait_for_execution "$EXECUTION_NAME" "Directive ingestion" 240 30
 
