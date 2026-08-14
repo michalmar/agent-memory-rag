@@ -385,8 +385,9 @@ export class AGUIClient {
   }
 
   deleteDirectiveSource(filename: string): Promise<unknown> {
+    const query = new URLSearchParams({ confirm: 'true' });
     return this.req(
-      `/directive-sources/${encodeURIComponent(filename)}`,
+      `/directive-sources/${encodeURIComponent(filename)}?${query.toString()}`,
       { method: 'DELETE' },
     );
   }

@@ -119,7 +119,7 @@ describe('directive source client', () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      '/api/directive-sources/%C4%8Desk%C3%BD%20n%C3%A1zev.v2.PDF',
+      '/api/directive-sources/%C4%8Desk%C3%BD%20n%C3%A1zev.v2.PDF?confirm=true',
       expect.objectContaining({
         method: 'DELETE',
         headers: { 'X-Mock-User-ID': 'user-alice' },
