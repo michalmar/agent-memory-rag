@@ -435,11 +435,13 @@ class DirectiveIngestionRunner:
             bundle.directive_version_id for bundle in bundles
         )
         artifact_identities = sorted(
-            (
-                name,
-                await self.blobs.content_hash(name),
-            )
-            for name in required_artifacts
+            [
+                (
+                    name,
+                    await self.blobs.content_hash(name),
+                )
+                for name in required_artifacts
+            ]
         )
         cross_store = {
             "catalog": {
