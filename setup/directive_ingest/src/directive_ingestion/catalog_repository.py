@@ -20,6 +20,8 @@ from directive_contracts import (
     serialized_json_size,
 )
 
+from .integrity import IntegrityValidationError
+
 def version_item_id(directive_id: str, version_label: str) -> str:
     return published_directive_version_item_id(directive_id, version_label)
 
@@ -221,12 +223,12 @@ class DirectiveCatalogRepository:
             expected.directive_id, expected.directive_version_id
         )
         if stored is None:
-            raise RuntimeError(
+            raise IntegrityValidationError(
                 f"Catalog version is not published: "
                 f"{expected.directive_version_id}"
             )
         if canonical_json_hash(stored) != canonical_json_hash(expected):
-            raise RuntimeError(
+            raise IntegrityValidationError(
                 f"Catalog bundle mismatch: {expected.directive_version_id}"
             )
 
@@ -471,18 +473,22 @@ class DirectiveCatalogRepository:
 def _validate_published_bundle(
     value: dict[str, Any],
 ) -> PublishedDirectiveVersion:
+    if not isinstance(value, dict):
+        raise IntegrityValidationError(
+            "Published directive version has an invalid artifact schema"
+        )
     application_fields = {
         key: item for key, item in value.items() if not key.startswith("_")
     }
     try:
         bundle = PublishedDirectiveVersion.model_validate(application_fields)
     except ValueError as exc:
-        raise RuntimeError(
+        raise IntegrityValidationError(
             "Published directive version has an invalid artifact schema"
         ) from exc
     size = serialized_json_size(bundle)
     if size > PUBLISHED_BUNDLE_MAX_BYTES:
-        raise RuntimeError(
+        raise IntegrityValidationError(
             f"Published directive bundle exceeds "
             f"{PUBLISHED_BUNDLE_MAX_BYTES} bytes: "
             f"{bundle.directive_version_id} ({size} bytes)"

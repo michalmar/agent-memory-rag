@@ -15,6 +15,8 @@ from directive_contracts import (
 
 from directive_ingestion.chunking import TextChunk
 from directive_ingestion.blob_repository import BlobArtifactRepository
+from directive_ingestion.catalog_repository import _validate_published_bundle
+from directive_ingestion.integrity import IntegrityValidationError
 from directive_ingestion.reconcile import (
     DirectiveIngestionRunner,
     SourceMetadata,
@@ -52,6 +54,41 @@ def _metadata(source: SourceDocument, identifier: str = "Č/12") -> DirectiveMet
         source_filename=source.source_name,
         source_hash=source.source_hash,
         processing_hash="a" * 64,
+    )
+
+
+def _live_bundle(
+    source: SourceDocument, metadata: DirectiveMetadata, markdown: str
+) -> SimpleNamespace:
+    canonical_hash = hashlib.sha256(
+        f"{source.source_name}\0{markdown}".encode("utf-8")
+    ).hexdigest()
+    generation_id = calculate_artifact_generation_id(
+        metadata.processing_hash,
+        canonical_hash,
+        canonical_json_hash({}),
+    )
+    return SimpleNamespace(
+        **metadata.model_dump(mode="python"),
+        artifact_generation_id=generation_id,
+        summary={},
+        artifacts=_build_artifact_locators(
+            SimpleNamespace(metadata=metadata), generation_id
+        ),
+    )
+
+
+def _published_state(
+    source: SourceDocument, metadata: DirectiveMetadata, generation_id: str
+) -> PublishedSourceState:
+    return PublishedSourceState(
+        source_filename=source.source_name,
+        source_hash=source.source_hash,
+        source_fingerprint="b" * 64,
+        processing_hash=metadata.processing_hash,
+        directive_metadata=metadata,
+        artifact_generation_id=generation_id,
+        publication_state="published",
     )
 
 
@@ -95,6 +132,28 @@ async def test_state_rollback_uses_only_the_candidate_write_etag() -> None:
 
     assert blob.upload_blob.await_args.kwargs["etag"] == "candidate-etag"
     assert container.delete_blob.await_args.kwargs["etag"] == "candidate-etag"
+
+
+@pytest.mark.asyncio
+async def test_blob_payload_hash_mismatch_is_an_integrity_failure() -> None:
+    stream = SimpleNamespace(readall=AsyncMock(return_value=b"corrupt"))
+    blob = SimpleNamespace(
+        get_blob_properties=AsyncMock(
+            return_value=SimpleNamespace(
+                metadata={
+                    "content_sha256": hashlib.sha256(b"expected").hexdigest()
+                }
+            )
+        ),
+        download_blob=AsyncMock(return_value=stream),
+    )
+    repository = object.__new__(BlobArtifactRepository)
+    repository._container = SimpleNamespace(get_blob_client=lambda _: blob)
+
+    with pytest.raises(
+        IntegrityValidationError, match="payload hash does not match metadata"
+    ):
+        await repository.content_hash("directives/corrupt/source.pdf")
 
 
 @pytest.mark.asyncio
@@ -149,6 +208,111 @@ async def test_inconsistent_state_reextracts_metadata() -> None:
 
     assert result[0].changed is True
     runner.extractor.extract.assert_awaited_once_with(source.content)
+
+
+@pytest.mark.asyncio
+async def test_corrupt_blob_payload_reextracts_instead_of_trusting_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    metadata = _metadata(source)
+    bundle = _live_bundle(source, metadata, "# Directive\n")
+    state = _published_state(
+        source, metadata, bundle.artifact_generation_id
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.config = SimpleNamespace(processing_hash=metadata.processing_hash)
+    runner.source_states = SimpleNamespace(load=AsyncMock(return_value=state))
+    runner.catalog = SimpleNamespace(
+        get_published_version=AsyncMock(return_value=bundle),
+        get_current=AsyncMock(
+            return_value={
+                "directive_version_id": metadata.directive_version_id,
+                "source_hash": source.source_hash,
+                "processing_hash": metadata.processing_hash,
+                "artifact_generation_id": bundle.artifact_generation_id,
+            }
+        ),
+    )
+    runner.blobs = SimpleNamespace(
+        exists=AsyncMock(return_value=True),
+        validate_hash=AsyncMock(
+            side_effect=IntegrityValidationError(
+                "Artifact payload hash does not match metadata"
+            )
+        ),
+        quarantine=AsyncMock(),
+    )
+    runner.content = SimpleNamespace(validate_bundle=AsyncMock())
+    runner.search = SimpleNamespace(validate_current_generation=AsyncMock())
+    runner.extractor = SimpleNamespace(extract=AsyncMock(return_value=object()))
+    import directive_ingestion.metadata as metadata_module
+
+    monkeypatch.setattr(
+        metadata_module,
+        "extract_metadata",
+        lambda *_args: SimpleNamespace(metadata=metadata),
+    )
+
+    result = await runner.extract_or_load_metadata([source], "run")
+
+    assert result[0].changed is True
+    runner.extractor.extract.assert_awaited_once_with(source.content)
+
+
+@pytest.mark.asyncio
+async def test_search_outage_propagates_instead_of_triggering_repair() -> None:
+    source = _source()
+    metadata = _metadata(source)
+    markdown = "# Directive\n"
+    bundle = _live_bundle(source, metadata, markdown)
+    state = _published_state(
+        source, metadata, bundle.artifact_generation_id
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.catalog = SimpleNamespace(
+        get_published_version=AsyncMock(return_value=bundle),
+        get_current=AsyncMock(
+            return_value={
+                "directive_version_id": metadata.directive_version_id,
+                "source_hash": source.source_hash,
+                "processing_hash": metadata.processing_hash,
+                "artifact_generation_id": bundle.artifact_generation_id,
+            }
+        ),
+    )
+    runner.blobs = SimpleNamespace(
+        exists=AsyncMock(return_value=True),
+        validate_hash=AsyncMock(),
+        read_text=AsyncMock(return_value=markdown),
+    )
+    runner.content = SimpleNamespace(validate_bundle=AsyncMock())
+    runner.search = SimpleNamespace(
+        validate_current_generation=AsyncMock(
+            side_effect=RuntimeError("Search service unavailable")
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="Search service unavailable"):
+        await runner._state_has_live_publication(source, state)
+
+
+def test_catalog_schema_and_unsafe_locator_are_integrity_failures() -> None:
+    source = _source()
+    metadata = _metadata(source)
+    bundle = _live_bundle(source, metadata, "# Directive\n")
+
+    with pytest.raises(IntegrityValidationError, match="invalid artifact schema"):
+        _validate_published_bundle({"type": "version"})
+
+    bundle.artifacts = SimpleNamespace(
+        source_blob_name="../source.pdf",
+        canonical_blob_name="../document.md",
+    )
+    from directive_ingestion.reconcile import _validate_safe_artifact_paths
+
+    with pytest.raises(IntegrityValidationError, match="locator is unsafe"):
+        _validate_safe_artifact_paths(bundle)
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,7 @@ from directive_contracts import DirectiveChunk, DirectiveMetadata
 from .canonical import CanonicalDirective
 from .chunking import TextChunk
 from .config import IngestionConfig
+from .integrity import IntegrityValidationError
 
 
 class DirectiveSearchRepository:
@@ -290,7 +291,7 @@ class DirectiveSearchRepository:
         )
         missing = expected - published
         if missing:
-            raise RuntimeError(
+            raise IntegrityValidationError(
                 "Published Search generation is missing manifest chunk IDs"
             )
 
@@ -310,7 +311,7 @@ class DirectiveSearchRepository:
         )
         actual_ids = set(await self._find_keys(filter_expression))
         if actual_ids != expected_ids:
-            raise RuntimeError(
+            raise IntegrityValidationError(
                 "Current Search generation IDs do not match manifest chunks"
             )
 
@@ -325,7 +326,7 @@ class DirectiveSearchRepository:
         }
         actual_ids = set(await self._find_keys(""))
         if actual_ids != expected_ids:
-            raise RuntimeError(
+            raise IntegrityValidationError(
                 "Search documents do not exactly match manifests"
             )
 
@@ -473,7 +474,7 @@ class DirectiveSearchRepository:
             if actual == expected_count:
                 return
             await asyncio.sleep(min(2**attempt, 10))
-        raise RuntimeError(
+        raise IntegrityValidationError(
             f"Search visibility validation failed for {detail}: expected "
             f"{expected_count} chunks, found {actual}"
         )

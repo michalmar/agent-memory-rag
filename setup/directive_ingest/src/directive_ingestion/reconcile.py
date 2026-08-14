@@ -46,6 +46,7 @@ from .clients import IngestionClients
 from .config import IngestionConfig
 from .content_repository import DirectiveContentRepository
 from .document_intelligence import DocumentIntelligenceExtractor
+from .integrity import IntegrityValidationError
 from .mandate_projection import MandateRepository, parse_mandates
 from .publication_commit_repository import PublicationCommitRepository
 from .search_repository import DirectiveSearchRepository
@@ -1418,50 +1419,62 @@ class DirectiveIngestionRunner:
         state: PublishedSourceState,
     ) -> bool:
         """A state record is insufficient unless its published bundle is live."""
-        metadata = state.directive_metadata
-        bundle = await self.catalog.get_published_version(
-            metadata.directive_id, metadata.directive_version_id
-        )
-        if bundle is None:
-            return False
-        if (
-            bundle.directive_id != metadata.directive_id
-            or bundle.directive_version_id != metadata.directive_version_id
-            or bundle.source_filename != source.source_name
-            or bundle.source_hash != source.source_hash
-            or bundle.processing_hash != metadata.processing_hash
-            or bundle.artifact_generation_id != state.artifact_generation_id
-        ):
-            return False
         try:
+            metadata = state.directive_metadata
+            bundle = await self.catalog.get_published_version(
+                metadata.directive_id, metadata.directive_version_id
+            )
+            if bundle is None:
+                raise IntegrityValidationError(
+                    "Expected catalog version is missing: "
+                    f"{metadata.directive_version_id}"
+                )
+            if (
+                bundle.directive_id != metadata.directive_id
+                or bundle.directive_version_id != metadata.directive_version_id
+                or bundle.source_filename != source.source_name
+                or bundle.source_hash != source.source_hash
+                or bundle.processing_hash != metadata.processing_hash
+                or bundle.artifact_generation_id != state.artifact_generation_id
+            ):
+                raise IntegrityValidationError(
+                    "Catalog version does not match its source state: "
+                    f"{metadata.directive_version_id}"
+                )
             bundle_metadata = DirectiveMetadata.model_validate(
                 {
                     name: getattr(bundle, name)
                     for name in DirectiveMetadata.model_fields
                 }
             )
-        except (AttributeError, ValueError):
-            return False
-        if bundle_metadata != metadata:
-            return False
-        _validate_safe_artifact_paths(bundle)
-        current = await self.catalog.get_current(metadata.directive_id)
-        if not (
-            current
-            and current.get("directive_version_id")
-            == metadata.directive_version_id
-            and current.get("source_hash") == source.source_hash
-            and current.get("processing_hash") == metadata.processing_hash
-            and current.get("artifact_generation_id")
-            == state.artifact_generation_id
-        ):
-            return False
-        try:
+            if bundle_metadata != metadata:
+                raise IntegrityValidationError(
+                    "Catalog metadata does not match its source state: "
+                    f"{metadata.directive_version_id}"
+                )
+            _validate_safe_artifact_paths(bundle)
+            current = await self.catalog.get_current(metadata.directive_id)
+            if not (
+                current
+                and current.get("directive_version_id")
+                == metadata.directive_version_id
+                and current.get("source_hash") == source.source_hash
+                and current.get("processing_hash") == metadata.processing_hash
+                and current.get("artifact_generation_id")
+                == state.artifact_generation_id
+            ):
+                raise IntegrityValidationError(
+                    "Current catalog pointer does not match its source state: "
+                    f"{metadata.directive_version_id}"
+                )
             if not (
                 await self.blobs.exists(bundle.artifacts.source_blob_name)
                 and await self.blobs.exists(bundle.artifacts.canonical_blob_name)
             ):
-                return False
+                raise IntegrityValidationError(
+                    "Expected published artifacts are missing: "
+                    f"{metadata.directive_version_id}"
+                )
             await self.blobs.validate_hash(
                 bundle.artifacts.source_blob_name, source.source_hash
             )
@@ -1480,13 +1493,16 @@ class DirectiveIngestionRunner:
                 bundle, base_generation_id, canonical_hash
             )
             if expected_generation_id != bundle.artifact_generation_id:
-                return False
+                raise IntegrityValidationError(
+                    "Published artifact generation does not match its content: "
+                    f"{metadata.directive_version_id}"
+                )
             await self.content.validate_bundle(bundle)
             await self.search.validate_current_generation(bundle)
-        except RuntimeError as exc:
-            if _is_integrity_mismatch(exc):
-                return False
-            raise
+        except (AttributeError, ValueError) as exc:
+            return False
+        except IntegrityValidationError:
+            return False
         return True
 
     async def _prepare(
@@ -1854,11 +1870,13 @@ def _validate_safe_artifact_paths(bundle: PublishedDirectiveVersion) -> None:
         f"{metadata.source_hash}"
     )
     if bundle.artifacts.source_blob_name != f"{source_base}/source.pdf":
-        raise RuntimeError("Published source artifact locator is unsafe")
+        raise IntegrityValidationError("Published source artifact locator is unsafe")
     if bundle.artifacts.canonical_blob_name != (
         f"{source_base}/generations/{bundle.artifact_generation_id}/document.md"
     ):
-        raise RuntimeError("Published canonical artifact locator is unsafe")
+        raise IntegrityValidationError(
+            "Published canonical artifact locator is unsafe"
+        )
 
 
 def _safe_environment(config: IngestionConfig) -> dict[str, str]:
@@ -1889,22 +1907,6 @@ def _safe_failure_code(exc: BaseException) -> str:
     if isinstance(exc, ValueError):
         return "metadata_invalid"
     return "metadata_processing_error"
-
-
-def _is_integrity_mismatch(exc: RuntimeError) -> bool:
-    """Only validated record mismatches are repairable; outages must propagate."""
-    return str(exc).startswith(
-        (
-            "Artifact hash mismatch",
-            "Missing directive section-content item",
-            "Directive section-content identity or hash mismatch",
-            "Reconstructed section content hash mismatch",
-            "Current Search generation IDs do not match",
-            "Published Search generation is missing",
-            "Catalog version is not published",
-            "Catalog bundle mismatch",
-        )
-    )
 
 
 def _source_inventory(sources: list[SourceDocument]) -> list[dict[str, str]]:

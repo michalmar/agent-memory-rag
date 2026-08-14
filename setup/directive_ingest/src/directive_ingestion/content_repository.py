@@ -13,6 +13,8 @@ from directive_contracts import (
     section_content_item_id,
 )
 
+from .integrity import IntegrityValidationError
+
 
 class DirectiveContentRepository:
     def __init__(
@@ -66,7 +68,7 @@ class DirectiveContentRepository:
                 partition_key=directive_version_id,
             )
         except exceptions.CosmosResourceNotFoundError as exc:
-            raise RuntimeError(
+            raise IntegrityValidationError(
                 f"Missing directive section-content item: {item_id}"
             ) from exc
         return _validate_content_record(value)
@@ -81,7 +83,13 @@ class DirectiveContentRepository:
         part_total = 0
         split_sections = 0
         for section_id, descriptor in bundle.section_content.items():
-            section = sections_by_id[section_id]
+            try:
+                section = sections_by_id[section_id]
+            except KeyError as exc:
+                raise IntegrityValidationError(
+                    "Published section-content descriptor is missing a "
+                    f"manifest section: {section_id}"
+                ) from exc
             parts: list[str] = []
             if descriptor.part_count > 1:
                 split_sections += 1
@@ -110,7 +118,7 @@ class DirectiveContentRepository:
                 content.encode("utf-8")
             ).hexdigest()
             if content_hash != section.content_hash:
-                raise RuntimeError(
+                raise IntegrityValidationError(
                     "Reconstructed section content hash mismatch for "
                     f"{bundle.directive_version_id}/{section_id}"
                 )
@@ -165,13 +173,17 @@ class DirectiveContentRepository:
 def _validate_content_record(
     value: dict[str, Any],
 ) -> DirectiveSectionContent:
+    if not isinstance(value, dict):
+        raise IntegrityValidationError("Invalid directive section-content item")
     application_fields = {
         key: item for key, item in value.items() if not key.startswith("_")
     }
     try:
         return DirectiveSectionContent.model_validate(application_fields)
     except ValueError as exc:
-        raise RuntimeError("Invalid directive section-content item") from exc
+        raise IntegrityValidationError(
+            "Invalid directive section-content item"
+        ) from exc
 
 
 def _validate_expected_part(
@@ -201,7 +213,7 @@ def _validate_expected_part(
         or item.part_hash
         != hashlib.sha256(item.content.encode("utf-8")).hexdigest()
     ):
-        raise RuntimeError(
+        raise IntegrityValidationError(
             "Directive section-content identity or hash mismatch for "
             f"{bundle.directive_version_id}/{section_id}/{part_ordinal}"
         )

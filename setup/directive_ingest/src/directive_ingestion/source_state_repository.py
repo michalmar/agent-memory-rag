@@ -12,6 +12,7 @@ from directive_contracts import (
 )
 
 from .blob_repository import BlobArtifactRepository
+from .integrity import IntegrityValidationError
 from .source import SourceDocument
 
 
@@ -54,12 +55,8 @@ class SourceStateRepository:
             value = await self._blobs.get_json(
                 self.blob_name(source, processing_hash)
             )
-        except RuntimeError as exc:
-            if str(exc).startswith(
-                ("Invalid JSON artifact", "JSON artifact must be an object")
-            ):
-                return None
-            raise
+        except IntegrityValidationError:
+            return None
         if value is None:
             return None
         try:

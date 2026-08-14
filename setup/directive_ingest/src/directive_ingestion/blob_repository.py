@@ -11,6 +11,8 @@ from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.storage.blob import ContentSettings
 from azure.storage.blob.aio import BlobServiceClient
 
+from .integrity import IntegrityValidationError
+
 
 class BlobArtifactRepository:
     def __init__(
@@ -121,9 +123,13 @@ class BlobArtifactRepository:
         except ResourceNotFoundError:
             return None
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"Invalid JSON artifact: {blob_name}") from exc
+            raise IntegrityValidationError(
+                f"Invalid JSON artifact: {blob_name}"
+            ) from exc
         if not isinstance(value, dict):
-            raise RuntimeError(f"JSON artifact must be an object: {blob_name}")
+            raise IntegrityValidationError(
+                f"JSON artifact must be an object: {blob_name}"
+            )
         return value
 
     async def read_bytes_with_etag(
@@ -161,22 +167,45 @@ class BlobArtifactRepository:
         )
 
     async def content_hash(self, blob_name: str) -> str:
-        properties = await self._container.get_blob_client(
-            blob_name
-        ).get_blob_properties()
-        value = properties.metadata.get("content_sha256")
-        if not isinstance(value, str) or len(value) != 64:
-            raise RuntimeError(
+        blob = self._container.get_blob_client(blob_name)
+        try:
+            properties = await blob.get_blob_properties()
+            content = await (await blob.download_blob()).readall()
+        except ResourceNotFoundError as exc:
+            raise IntegrityValidationError(
+                f"Expected artifact is missing: {blob_name}"
+            ) from exc
+        metadata = getattr(properties, "metadata", None)
+        value = metadata.get("content_sha256") if isinstance(metadata, dict) else None
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise IntegrityValidationError(
                 f"Artifact is missing a valid content hash: {blob_name}"
             )
-        return value
+        actual_hash = hashlib.sha256(content).hexdigest()
+        if actual_hash != value:
+            raise IntegrityValidationError(
+                f"Artifact payload hash does not match metadata: {blob_name}"
+            )
+        return actual_hash
 
     async def read_text(self, blob_name: str) -> str:
-        stream = await self._container.get_blob_client(blob_name).download_blob()
         try:
-            return (await stream.readall()).decode("utf-8")
+            stream = await self._container.get_blob_client(
+                blob_name
+            ).download_blob()
+            content = await stream.readall()
+        except ResourceNotFoundError as exc:
+            raise IntegrityValidationError(
+                f"Expected artifact is missing: {blob_name}"
+            ) from exc
+        try:
+            return content.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise RuntimeError(
+            raise IntegrityValidationError(
                 f"Artifact is not valid UTF-8 text: {blob_name}"
             ) from exc
 
@@ -185,7 +214,7 @@ class BlobArtifactRepository:
     ) -> None:
         actual_hash = await self.content_hash(blob_name)
         if actual_hash != expected_hash:
-            raise RuntimeError(
+            raise IntegrityValidationError(
                 f"Artifact hash mismatch at {blob_name}"
             )
 
