@@ -392,6 +392,21 @@ class DirectiveIngestionRunner:
         bundles = await self.catalog.list_published_versions()
         current = await self.catalog.list_current_pointers()
         relations = await self.catalog.list_published_relations()
+        canonical_relation_ids = {
+            relation.relation_id for relation, _, _ in relations
+        }
+        if canonical_relation_ids:
+            raise RuntimeError("Canonical directive relation set is not empty")
+        relation_record_ids = await self.catalog.list_relation_record_ids()
+        if relation_record_ids:
+            raise RuntimeError(
+                "Stale directive relation records are present in the catalog"
+            )
+        content_relation_ids = await self.content.list_relation_record_ids()
+        if content_relation_ids:
+            raise RuntimeError(
+                "Stale directive relation records are present in section content"
+            )
         if expected_mandates is None:
             expected_mandates = parse_mandates(
                 self.config.mandate_csv,
@@ -414,9 +429,6 @@ class DirectiveIngestionRunner:
                     "Source-state records do not match the approved validation "
                     "or mandate checksum"
                 )
-        canonical_relation_ids = {
-            relation.relation_id for relation, _, _ in relations
-        }
         source_directive_ids = {
             state.directive_metadata.directive_id for state in source_states
         }
@@ -568,8 +580,8 @@ class DirectiveIngestionRunner:
                 "Section-content records do not exactly match published bundles"
             )
 
-        await self.search.validate_exact_published(bundles)
         search = await self.search.verification_summary()
+        await self.search.validate_exact_published(bundles)
         if (
             search["published_chunks"] != expected_chunks
             or search["published_directives"] != len(directive_ids)
@@ -628,11 +640,19 @@ class DirectiveIngestionRunner:
                 ),
             },
             "content": {
-                "item_count": len(expected_content_identities),
+                "item_count": (
+                    len(expected_content_identities)
+                    + len(canonical_relation_ids)
+                ),
                 "section_count": content_sections,
                 "part_count": content_parts,
                 "identity_digest": _public_record_digest(
-                    sorted(expected_content_identities)
+                    {
+                        "section_identities": sorted(
+                            expected_content_identities
+                        ),
+                        "relation_ids": sorted(canonical_relation_ids),
+                    }
                 ),
             },
             "artifacts": {
@@ -2313,50 +2333,13 @@ class DirectiveIngestionRunner:
         metadata: list[DirectiveMetadata],
         known_ids: set[str],
     ) -> None:
-        known_versions = {
-            (item.directive_id, item.version_label) for item in metadata
-        } | await self.catalog.list_published_version_labels()
-        prepared_relations = [
-            relation
-            for item in prepared
-            for relation in item.canonical.relations
-            if relation.status == "accepted"
-        ]
-        _validate_relation_records(
-            prepared_relations, known_ids, known_versions
-        )
-
-        current = {
-            directive_id: pointer[:3]
-            for directive_id, pointer in (
-                await self.catalog.list_current_pointers()
-            ).items()
-        }
-        for item in metadata:
-            if item.is_current:
-                current[item.directive_id] = (
-                    item.directive_version_id,
-                    item.source_hash,
-                    item.processing_hash,
-                )
-        prepared_current: dict[str, list[DirectiveRelation]] = {
-            item.canonical.metadata.directive_id: [
-                relation
-                for relation in item.canonical.relations
-                if relation.status == "accepted"
-            ]
-            for item in prepared
-            if item.canonical.metadata.is_current
-        }
-        graph_relations = _select_current_relations(
-            prepared_current,
-            await self.catalog.list_published_relations(),
-            current,
-        )
-        _validate_relation_records(
-            graph_relations, known_ids, known_versions
-        )
-        _validate_relation_graph(graph_relations)
+        del metadata, known_ids
+        if any(item.canonical.relations for item in prepared):
+            raise ValueError("Directive relations are not supported by v2")
+        if await self.catalog.list_relation_record_ids():
+            raise IntegrityValidationError(
+                "Stale directive relation records must be removed before publication"
+            )
 
     async def _validate_source_set(
         self, metadata: list[DirectiveMetadata]

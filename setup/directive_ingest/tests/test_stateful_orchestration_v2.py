@@ -12,6 +12,7 @@ import pytest
 from directive_contracts import (
     DirectiveChunk,
     DirectiveMetadata,
+    DirectiveRelation,
     ReviewFinding,
     DirectiveSummary,
     MandateSnapshot,
@@ -142,6 +143,8 @@ class MemoryCatalog:
     def __init__(self) -> None:
         self.bundles: dict[tuple[str, str], object] = {}
         self.current: dict[str, dict[str, str]] = {}
+        self.relation_record_ids: set[str] = set()
+        self.published_relations: list[tuple[object, str, str]] = []
         self.recorded_runs: list[dict[str, object]] = []
         self.write_count = 0
 
@@ -219,7 +222,10 @@ class MemoryCatalog:
         }
 
     async def list_published_relations(self):
-        return []
+        return list(self.published_relations)
+
+    async def list_relation_record_ids(self) -> set[str]:
+        return set(self.relation_record_ids)
 
     async def delete_versions(self, bundles) -> None:
         for bundle in bundles:
@@ -282,6 +288,7 @@ class CorruptSlotMemoryCatalog(MemoryCatalog):
 class MemoryContent:
     def __init__(self) -> None:
         self.items: dict[tuple[str, str], object] = {}
+        self.relation_record_ids: set[str] = set()
         self.write_count = 0
 
     async def create_or_compare(self, item) -> None:
@@ -348,6 +355,9 @@ class MemoryContent:
             )
             for (version_id, item_id), item in self.items.items()
         }
+
+    async def list_relation_record_ids(self) -> set[str]:
+        return set(self.relation_record_ids)
 
 
 class MemorySearch:
@@ -939,6 +949,110 @@ async def test_verify_exposes_and_binds_the_mandate_checksum(
             )
         }
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("store", "message"),
+    [
+        ("catalog", "catalog"),
+        ("content", "section content"),
+    ],
+)
+async def test_verify_rejects_stale_relation_records(
+    monkeypatch: pytest.MonkeyPatch, store: str, message: str
+) -> None:
+    harness = Harness(monkeypatch)
+    await harness.runner.run_daily()
+    getattr(harness, store).relation_record_ids.add("relation:stale")
+
+    with pytest.raises(RuntimeError, match=message):
+        await harness.runner.verify()
+
+
+@pytest.mark.asyncio
+async def test_verify_rejects_nonempty_canonical_relation_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    await harness.runner.run_daily()
+    metadata = _metadata(harness.sources[0])
+    harness.catalog.published_relations.append(
+        (
+            DirectiveRelation(
+                relation_id="relation-1",
+                source_directive_id=metadata.directive_id,
+                source_version_id=metadata.directive_version_id,
+                target_directive_id=metadata.directive_id,
+                relation_type="reference",
+                status="accepted",
+                evidence="legacy relation",
+            ),
+            metadata.source_hash,
+            metadata.processing_hash,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="Canonical directive relation"):
+        await harness.runner.verify()
+
+
+@pytest.mark.asyncio
+async def test_content_digest_binds_the_empty_relation_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    await harness.runner.run_daily()
+
+    verification = await harness.runner.verify()
+    content = verification["cross_store"]["content"]
+    identities = await harness.content.list_identities()
+    assert content["item_count"] == len(identities)
+    assert content["identity_digest"] == _public_record_digest(
+        {
+            "section_identities": sorted(identities),
+            "relation_ids": [],
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_publication_rejects_stale_relation_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    harness.catalog.relation_record_ids.add("relation:stale")
+
+    with pytest.raises(IntegrityValidationError, match="Stale directive relation"):
+        await harness.runner.run_daily()
+
+    assert harness.catalog.bundles == {}
+
+
+@pytest.mark.asyncio
+async def test_publication_rejects_nonempty_canonical_relations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    canonical = _canonical(harness.sources[0])
+    relation = DirectiveRelation(
+        relation_id="relation-1",
+        source_directive_id=canonical.metadata.directive_id,
+        source_version_id=canonical.metadata.directive_version_id,
+        target_directive_id=canonical.metadata.directive_id,
+        relation_type="reference",
+        status="needs_review",
+        evidence="legacy relation",
+    )
+    monkeypatch.setattr(
+        "directive_ingestion.reconcile.parse_canonical",
+        lambda *_args: replace(canonical, relations=(relation,)),
+    )
+
+    with pytest.raises(ValueError, match="not supported by v2"):
+        await harness.runner.run_daily()
+
+    assert harness.catalog.bundles == {}
 
 
 @pytest.mark.asyncio

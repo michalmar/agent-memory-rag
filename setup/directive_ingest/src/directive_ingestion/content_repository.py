@@ -169,6 +169,18 @@ class DirectiveContentRepository:
             )
         return values
 
+    async def list_relation_record_ids(self) -> set[str]:
+        """Reject legacy relation payloads in the section-content container."""
+        values: set[str] = set()
+        query = "SELECT VALUE c.id FROM c WHERE c.type = 'relation'"
+        async for value in self._container.query_items(query=query):
+            if not isinstance(value, str) or not value:
+                raise IntegrityValidationError(
+                    "Directive relation content record has an invalid identity"
+                )
+            values.add(value)
+        return values
+
 
 def _validate_content_record(
     value: dict[str, Any],

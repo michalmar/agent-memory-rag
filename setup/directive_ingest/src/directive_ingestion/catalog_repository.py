@@ -113,6 +113,7 @@ class DirectiveCatalogRepository:
         relations: tuple[DirectiveRelation, ...],
         findings: tuple[ReviewFinding, ...],
     ) -> None:
+        _validate_empty_relations(relations)
         now = datetime.now(UTC).isoformat()
         await self._container.upsert_item(
             {
@@ -155,26 +156,6 @@ class DirectiveCatalogRepository:
                 "updated_at": now,
             }
         )
-        for relation in relations:
-            await self._container.upsert_item(
-                {
-                    "id": (
-                        f"relation:{relation.relation_id}:"
-                        f"{bundle.source_hash}:"
-                        f"{bundle.processing_hash}"
-                    ),
-                    "type": "relation",
-                    "directive_id": bundle.directive_id,
-                    **relation.model_dump(mode="json"),
-                    "source_hash": bundle.source_hash,
-                    "processing_hash": bundle.processing_hash,
-                    "artifact_generation_id": bundle.artifact_generation_id,
-                    "publication_state": "staged",
-                    "run_id": bundle.run_id,
-                    "updated_at": now,
-                }
-            )
-
     async def publish_version(
         self,
         bundle: PublishedDirectiveVersion,
@@ -182,31 +163,12 @@ class DirectiveCatalogRepository:
         *,
         expected_snapshot: CatalogSlotSnapshot | None | object = _SNAPSHOT_UNSET,
     ) -> str:
+        _validate_empty_relations(relations)
         if serialized_json_size(bundle) > PUBLISHED_BUNDLE_MAX_BYTES:
             raise RuntimeError(
                 "Published directive bundle exceeds "
                 f"{PUBLISHED_BUNDLE_MAX_BYTES} bytes: "
                 f"{bundle.directive_version_id}"
-            )
-        now = datetime.now(UTC).isoformat()
-        for relation in relations:
-            await self._container.upsert_item(
-                {
-                    "id": (
-                        f"relation:{relation.relation_id}:"
-                        f"{bundle.source_hash}:"
-                        f"{bundle.processing_hash}"
-                    ),
-                    "type": "relation",
-                    "directive_id": bundle.directive_id,
-                    **relation.model_dump(mode="json"),
-                    "source_hash": bundle.source_hash,
-                    "processing_hash": bundle.processing_hash,
-                    "artifact_generation_id": bundle.artifact_generation_id,
-                    "publication_state": "published",
-                    "run_id": bundle.run_id,
-                    "published_at": now,
-                }
             )
         return await self._replace_published_bundle(bundle, expected_snapshot)
 
@@ -501,6 +463,18 @@ class DirectiveCatalogRepository:
             )
         return values
 
+    async def list_relation_record_ids(self) -> set[str]:
+        """Enumerate every legacy relation record, regardless of its state."""
+        values: set[str] = set()
+        query = "SELECT VALUE c.id FROM c WHERE c.type = 'relation'"
+        async for value in self._container.query_items(query=query):
+            if not isinstance(value, str) or not value:
+                raise IntegrityValidationError(
+                    "Directive relation record has an invalid identity"
+                )
+            values.add(value)
+        return values
+
     async def record_run(
         self,
         run_id: str,
@@ -529,6 +503,13 @@ class DirectiveCatalogRepository:
                 "recorded_at": datetime.now(UTC).isoformat(),
             }
         )
+
+
+def _validate_empty_relations(
+    relations: tuple[DirectiveRelation, ...],
+) -> None:
+    if relations:
+        raise ValueError("Directive relations are not supported by v2")
 
 
 def _validate_published_bundle(

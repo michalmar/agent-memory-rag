@@ -242,6 +242,30 @@ async def test_repaired_active_snapshot_has_a_write_free_subsequent_noop() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("id", "snapshot:wrong"),
+        ("type", "snapshot"),
+    ],
+)
+async def test_corrupt_active_pointer_envelope_is_rejected(
+    field: str, value: str
+) -> None:
+    container = MemoryMandateContainer()
+    repository = _repository(container)
+    parsed = _parsed()
+    await repository.publish(parsed, "run-1")
+    container.items[("active-snapshot", "_control")][field] = value
+
+    assert await repository.is_current(parsed) is False
+    with pytest.raises(RuntimeError, match="invalid metadata"):
+        await repository.verification_summary()
+    with pytest.raises(RuntimeError, match="invalid envelope"):
+        await repository.stage(parsed, "run-2")
+
+
+@pytest.mark.asyncio
 async def test_active_pointer_rollback_does_not_overwrite_concurrent_activation() -> None:
     container = MemoryMandateContainer()
     repository = _repository(container)

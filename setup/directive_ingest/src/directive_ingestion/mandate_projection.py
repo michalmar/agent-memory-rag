@@ -131,6 +131,8 @@ class MandateRepository:
     ) -> tuple[MandateSnapshot, dict[str, Any] | None, bool]:
         """Write candidate assignments without switching the active pointer."""
         active = await self._read_active()
+        if active is not None and self._snapshot_from_active(active) is None:
+            raise RuntimeError("Active mandate pointer has an invalid envelope")
         active_snapshot_id = (
             active.get("snapshot_id") if active is not None else None
         )
@@ -597,7 +599,7 @@ class MandateRepository:
         active: dict[str, Any]
     ) -> MandateSnapshot | None:
         try:
-            return MandateSnapshot.model_validate(
+            snapshot = MandateSnapshot.model_validate(
                 {
                     field: active.get(field)
                     for field in MandateSnapshot.model_fields
@@ -606,6 +608,9 @@ class MandateRepository:
             )
         except ValueError:
             return None
+        if not _active_record_matches(active, snapshot):
+            return None
+        return snapshot
 
     async def _read_active(self) -> dict[str, Any] | None:
         try:
@@ -654,6 +659,30 @@ def _active_etag(active: dict[str, Any]) -> str:
     if not isinstance(etag, str) or not etag:
         raise RuntimeError("Active mandate pointer is missing an ETag")
     return etag
+
+
+def _active_record_matches(
+    active: dict[str, Any], snapshot: MandateSnapshot
+) -> bool:
+    """Validate the active-pointer envelope before using its snapshot fields."""
+    required_fields = {
+        "id",
+        "type",
+        "user_id",
+        *MandateSnapshot.model_fields,
+    }
+    return required_fields <= active.keys() and (
+        active.get("id") == _ACTIVE_ID
+        and active.get("type") == "active_snapshot"
+        and active.get("user_id") == _CONTROL_PARTITION
+        and active.get("schema_version") == snapshot.schema_version
+        and active.get("snapshot_id") == snapshot.snapshot_id
+        and active.get("checksum") == snapshot.checksum
+        and active.get("assignment_count") == snapshot.assignment_count
+        and active.get("user_count") == snapshot.user_count
+        and active.get("complete") is snapshot.complete
+        and active.get("previous_snapshot_id") == snapshot.previous_snapshot_id
+    )
 
 
 def _active_response_etag(response: object) -> str:
