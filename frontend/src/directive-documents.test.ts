@@ -117,6 +117,51 @@ describe('directive document helpers', () => {
     );
   });
 
+  it('preserves distinct long decimal versions without numeric rounding', () => {
+    const directiveId = 'číslo/7';
+    const firstVersion = '1234567890123456789012345678901234';
+    const secondVersion = '1234567890123456789012345678901235';
+
+    expect(normalizeDirectiveVersion(firstVersion)).toBe(firstVersion);
+    expect(normalizeDirectiveVersion(secondVersion)).toBe(secondVersion);
+
+    expect(
+      toDirectiveDocumentReference({
+        ref_id: 'long-version-a',
+        source_name: 'Long version directive',
+        directive_id: directiveId,
+        directive_version_id: `${directiveId}:v${firstVersion}`,
+        version_label: firstVersion,
+      }),
+    ).toMatchObject({
+      directiveId,
+      directiveVersionId: `${directiveId}:v${firstVersion}`,
+      versionLabel: firstVersion,
+    });
+    expect(
+      toDirectiveDocumentReference({
+        ref_id: 'long-version-b',
+        source_name: 'Long version directive',
+        directive_id: directiveId,
+        directive_version_id: `${directiveId}:v${secondVersion}`,
+        version_label: secondVersion,
+      }),
+    ).toMatchObject({
+      directiveId,
+      directiveVersionId: `${directiveId}:v${secondVersion}`,
+      versionLabel: secondVersion,
+    });
+    expect(
+      toDirectiveDocumentReference({
+        ref_id: 'long-version-mismatch',
+        source_name: 'Long version directive',
+        directive_id: directiveId,
+        directive_version_id: `${directiveId}:v${secondVersion}`,
+        version_label: firstVersion,
+      }),
+    ).toBeNull();
+  });
+
   it('rejects invalid, mismatched, and non-canonical identities', () => {
     const base = {
       ref_id: 'invalid',
