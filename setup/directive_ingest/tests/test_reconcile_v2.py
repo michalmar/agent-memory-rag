@@ -19,11 +19,13 @@ from directive_ingestion.catalog_repository import _validate_published_bundle
 from directive_ingestion.integrity import IntegrityValidationError
 from directive_ingestion.reconcile import (
     DirectiveIngestionRunner,
+    MAX_PUBLIC_DIRECTIVES,
     SourceMetadata,
     _generation_scoped_chunks,
     _generation_canonical_hash,
     _public_record_digest,
     _build_artifact_locators,
+    _validate_public_corpus_limit,
     format_result,
 )
 from directive_ingestion.source import SourceDocument, SourceProvenance
@@ -463,6 +465,47 @@ def test_public_result_is_limited_to_64_kib() -> None:
         format_result({"safe": "x" * 65_536})
 
 
+def test_public_source_limit_rejects_before_metadata_processing() -> None:
+    with pytest.raises(ValueError, match="limit"):
+        _validate_public_corpus_limit(
+            [_source(f"{index}.pdf") for index in range(MAX_PUBLIC_DIRECTIVES + 1)]
+        )
+
+
+def test_worst_case_public_id_arrays_remain_below_64_kib() -> None:
+    identifier = "\U0010ffff" * 128
+    payload = {
+        "record_schema": "directive.validate.v2",
+        "success": True,
+        "run_id": "a" * 36,
+        "environment": {name: "x" for name in (
+            "source_kind", "source_storage_account", "source_container",
+            "source_prefix", "artifact_storage_account", "artifact_container",
+            "cosmos_account", "cosmos_database", "catalog_container",
+            "content_container", "mandate_container", "search_service",
+            "search_index",
+        )},
+        "processing_version": "x",
+        "processing_hash": "a" * 64,
+        "search_index": "directive-chunks-v2",
+        "source_count": MAX_PUBLIC_DIRECTIVES,
+        "directive_count": MAX_PUBLIC_DIRECTIVES,
+        "normalized_directive_ids": [identifier + str(index) for index in range(MAX_PUBLIC_DIRECTIVES)],
+        "directive_version_ids": [
+            identifier + f"{index}:v" for index in range(MAX_PUBLIC_DIRECTIVES)
+        ],
+        "mandate_count": 0,
+        "mandate_user_count": 0,
+        "warnings": [],
+        "warning_count": 0,
+        "failures": [],
+        "source_inventory_digest": "a" * 64,
+    }
+    payload["validation_digest"] = _public_record_digest(payload)
+
+    assert len(format_result(payload).encode("utf-8")) <= 65_536
+
+
 @pytest.mark.asyncio
 async def test_validate_output_has_finalize_guard_shape() -> None:
     source = _source()
@@ -769,9 +812,7 @@ async def test_mandate_only_activation_is_reported_as_a_change() -> None:
     runner._reconcile_after_publication = AsyncMock()
     runner.verify = AsyncMock()
     runner.catalog = SimpleNamespace(record_run=AsyncMock())
-    runner.commits = SimpleNamespace(
-        load=AsyncMock(return_value=None), clear=AsyncMock()
-    )
+    runner.commits = SimpleNamespace(load=AsyncMock(return_value=None), clear=AsyncMock())
     import directive_ingestion.reconcile as reconcile_module
 
     original_mandates = reconcile_module.parse_mandates

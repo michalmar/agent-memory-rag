@@ -63,7 +63,9 @@ from .source import (
 )
 from .summaries import SummaryGenerator
 
-MAX_PUBLIC_DIRECTIVES = 100
+# This keeps worst-case four-byte UTF-8 directive/version ID arrays below the
+# 64 KiB producer-record ceiling while leaving room for the fixed schema.
+MAX_PUBLIC_DIRECTIVES = 32
 MAX_PUBLIC_RECORD_BYTES = 65_536
 
 
@@ -245,6 +247,7 @@ class DirectiveIngestionRunner:
     async def verify(self) -> dict[str, object]:
         run_id = _run_id()
         sources = await self.discover_sources()
+        _validate_public_corpus_limit(sources)
         source_states: list[PublishedSourceState] = []
         for source in sources:
             state = await self.source_states.load(
@@ -577,6 +580,7 @@ class DirectiveIngestionRunner:
             }
         )
         payload["verify_digest"] = _public_record_digest(payload)
+        format_result(payload)
         return payload
 
     async def _preflight_response_model(
@@ -600,6 +604,7 @@ class DirectiveIngestionRunner:
     ) -> dict[str, object]:
         run_id = _run_id()
         sources = await self.discover_sources(source_directory)
+        _validate_public_corpus_limit(sources)
         metadata = await self.extract_or_load_metadata(sources, run_id)
         await self._validate_and_quarantine(metadata, run_id)
         known_ids = {item.metadata.directive_id for item in metadata}
@@ -632,6 +637,7 @@ class DirectiveIngestionRunner:
             "source_inventory_digest": _public_record_digest(source_inventory),
         }
         payload["validation_digest"] = _public_record_digest(payload)
+        format_result(payload)
         return payload
 
     async def run_daily(
@@ -641,6 +647,7 @@ class DirectiveIngestionRunner:
     ) -> ReconcileResult:
         run_id = _run_id()
         sources = await self.discover_sources(source_directory)
+        _validate_public_corpus_limit(sources)
         metadata = await self.extract_or_load_metadata(sources, run_id)
         await self._validate_and_quarantine(metadata, run_id)
         known_ids = {item.metadata.directive_id for item in metadata}
@@ -1919,6 +1926,14 @@ def _source_inventory(sources: list[SourceDocument]) -> list[dict[str, str]]:
     ]
 
 
+def _validate_public_corpus_limit(sources: list[SourceDocument]) -> None:
+    if len(sources) > MAX_PUBLIC_DIRECTIVES:
+        raise ValueError(
+            "Directive source corpus exceeds the public producer limit of "
+            f"{MAX_PUBLIC_DIRECTIVES} sources"
+        )
+
+
 def _validation_warnings(
     metadata: list[SourceMetadata], processing_hash: str
 ) -> list[dict[str, str]]:
@@ -2100,7 +2115,7 @@ def format_result(value: object) -> str:
     if hasattr(value, "as_dict"):
         value = value.as_dict()
     _reject_floats(value)
-    encoded = json.dumps(value, sort_keys=True, default=str)
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
     if len(encoded.encode("utf-8")) > MAX_PUBLIC_RECORD_BYTES:
         raise ValueError(
             f"Public directive record exceeds {MAX_PUBLIC_RECORD_BYTES} bytes"
