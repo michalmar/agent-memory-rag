@@ -14,6 +14,7 @@ from directive_contracts import (
 )
 
 from directive_ingestion.chunking import TextChunk
+from directive_ingestion.blob_repository import BlobArtifactRepository
 from directive_ingestion.reconcile import (
     DirectiveIngestionRunner,
     SourceMetadata,
@@ -52,6 +53,48 @@ def _metadata(source: SourceDocument, identifier: str = "Č/12") -> DirectiveMet
         source_hash=source.source_hash,
         processing_hash="a" * 64,
     )
+
+
+@pytest.mark.asyncio
+async def test_state_snapshot_reads_bytes_and_etag_from_one_download_response() -> None:
+    stream = SimpleNamespace(
+        properties=SimpleNamespace(etag="snapshot-etag"),
+        readall=AsyncMock(return_value=b"snapshot"),
+    )
+    blob = SimpleNamespace(
+        download_blob=AsyncMock(return_value=stream),
+        get_blob_properties=AsyncMock(
+            side_effect=AssertionError("snapshot must not preflight properties")
+        ),
+    )
+    repository = object.__new__(BlobArtifactRepository)
+    repository._container = SimpleNamespace(get_blob_client=lambda _: blob)
+
+    assert await repository.read_bytes_with_etag("source-state/test.json") == (
+        b"snapshot",
+        "snapshot-etag",
+    )
+    blob.download_blob.assert_awaited_once()
+    blob.get_blob_properties.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_state_rollback_uses_only_the_candidate_write_etag() -> None:
+    blob = SimpleNamespace(upload_blob=AsyncMock())
+    container = SimpleNamespace(
+        get_blob_client=lambda _: blob,
+        delete_blob=AsyncMock(),
+    )
+    repository = object.__new__(BlobArtifactRepository)
+    repository._container = container
+
+    await repository.restore_bytes(
+        "source-state/test.json", b"previous", "candidate-etag"
+    )
+    await repository.delete_if_etag("source-state/test.json", "candidate-etag")
+
+    assert blob.upload_blob.await_args.kwargs["etag"] == "candidate-etag"
+    assert container.delete_blob.await_args.kwargs["etag"] == "candidate-etag"
 
 
 @pytest.mark.asyncio

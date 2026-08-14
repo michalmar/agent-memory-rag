@@ -69,7 +69,7 @@ class BlobArtifactRepository:
         ).encode()
         await self.put_immutable(blob_name, content, "application/json")
 
-    async def replace_json(self, blob_name: str, value: object) -> None:
+    async def replace_json(self, blob_name: str, value: object) -> str:
         """Replace mutable internal state with an optimistic-concurrency guard."""
         content = json.dumps(
             value,
@@ -82,13 +82,23 @@ class BlobArtifactRepository:
         try:
             properties = await blob.get_blob_properties()
         except ResourceNotFoundError:
-            await self.put_immutable(blob_name, content, "application/json")
-            return
+            try:
+                response = await blob.upload_blob(
+                    content,
+                    overwrite=False,
+                    metadata={"content_sha256": hashlib.sha256(content).hexdigest()},
+                    content_settings=ContentSettings(content_type="application/json"),
+                )
+            except ResourceExistsError as exc:
+                raise RuntimeError(
+                    f"Concurrent source-state replacement prevented at {blob_name}"
+                ) from exc
+            return _response_etag(response, blob_name)
         etag = getattr(properties, "etag", None)
         if not isinstance(etag, str) or not etag:
             raise RuntimeError(f"State artifact is missing an ETag: {blob_name}")
         try:
-            await blob.upload_blob(
+            response = await blob.upload_blob(
                 content,
                 overwrite=True,
                 etag=etag,
@@ -100,6 +110,7 @@ class BlobArtifactRepository:
             raise RuntimeError(
                 f"Concurrent source-state replacement prevented at {blob_name}"
             ) from exc
+        return _response_etag(response, blob_name)
 
     async def get_json(self, blob_name: str) -> dict[str, Any] | None:
         """Point-read an internal JSON artifact without enumerating its prefix."""
@@ -120,30 +131,33 @@ class BlobArtifactRepository:
     ) -> tuple[bytes, str] | None:
         blob = self._container.get_blob_client(blob_name)
         try:
-            properties = await blob.get_blob_properties()
-            etag = getattr(properties, "etag", None)
+            stream = await blob.download_blob()
+            etag = getattr(getattr(stream, "properties", None), "etag", None)
             if not isinstance(etag, str) or not etag:
                 raise RuntimeError(f"State artifact is missing an ETag: {blob_name}")
-            stream = await blob.download_blob()
             return await stream.readall(), etag
         except ResourceNotFoundError:
             return None
 
     async def restore_bytes(
-        self, blob_name: str, content: bytes, etag: str
+        self, blob_name: str, content: bytes, candidate_etag: str
     ) -> None:
         blob = self._container.get_blob_client(blob_name)
-        properties = await blob.get_blob_properties()
-        current_etag = getattr(properties, "etag", None)
-        if not isinstance(current_etag, str) or not current_etag:
-            raise RuntimeError(f"State artifact is missing an ETag: {blob_name}")
         await blob.upload_blob(
             content,
             overwrite=True,
-            etag=current_etag,
+            etag=candidate_etag,
             match_condition=MatchConditions.IfNotModified,
             metadata={"content_sha256": hashlib.sha256(content).hexdigest()},
             content_settings=ContentSettings(content_type="application/json"),
+        )
+
+    async def delete_if_etag(self, blob_name: str, candidate_etag: str) -> None:
+        await self._container.delete_blob(
+            blob_name,
+            delete_snapshots="include",
+            etag=candidate_etag,
+            match_condition=MatchConditions.IfNotModified,
         )
 
     async def content_hash(self, blob_name: str) -> str:
@@ -204,3 +218,14 @@ class BlobArtifactRepository:
                 )
             except ResourceNotFoundError:
                 continue
+
+
+def _response_etag(response: object, blob_name: str) -> str:
+    etag = (
+        response.get("etag")
+        if isinstance(response, dict)
+        else getattr(response, "etag", None)
+    )
+    if not isinstance(etag, str) or not etag:
+        raise RuntimeError(f"State artifact is missing an ETag: {blob_name}")
+    return etag

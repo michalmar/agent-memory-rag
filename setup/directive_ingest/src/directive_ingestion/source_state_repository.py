@@ -103,8 +103,8 @@ class SourceStateRepository:
         metadata: DirectiveMetadata,
         artifact_generation_id: str,
         pending_cleanup: tuple[PublishedDirectiveVersion, ...] = (),
-    ) -> None:
-        await self._blobs.replace_json(
+    ) -> str:
+        return await self._blobs.replace_json(
             self.blob_name(source, metadata.processing_hash),
             {
                 "type": "source_state",
@@ -162,10 +162,13 @@ class SourceStateRepository:
         self, snapshot: SourceStateSnapshot | None,
         source: SourceDocument,
         processing_hash: str,
+        candidate_etag: str,
     ) -> None:
         if snapshot is None:
-            await self.delete(source, processing_hash)
+            await self._blobs.delete_if_etag(
+                self.blob_name(source, processing_hash), candidate_etag
+            )
             return
         await self._blobs.restore_bytes(
-            snapshot.blob_name, snapshot.content, snapshot.etag
+            snapshot.blob_name, snapshot.content, candidate_etag
         )

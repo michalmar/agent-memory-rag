@@ -32,7 +32,17 @@ class MemoryBlobs:
     def __init__(self) -> None:
         self.bytes: dict[str, bytes] = {}
         self.json: dict[str, dict[str, object]] = {}
+        self.etags: dict[str, str] = {}
         self.write_count = 0
+        self._etag_version = 0
+
+    def _write_state(self, name: str, value: dict[str, object]) -> str:
+        self.json[name] = deepcopy(value)
+        self.write_count += 1
+        self._etag_version += 1
+        etag = f"etag-{self._etag_version}"
+        self.etags[name] = etag
+        return etag
 
     async def put_immutable(
         self, name: str, content: bytes, _content_type: str
@@ -72,18 +82,18 @@ class MemoryBlobs:
             return None
         return (
             json.dumps(value, sort_keys=True, separators=(",", ":")).encode(),
-            "etag",
+            self.etags.get(name, "etag-0"),
         )
 
     async def restore_bytes(
-        self, name: str, content: bytes, _etag: str
+        self, name: str, content: bytes, candidate_etag: str
     ) -> None:
-        self.json[name] = json.loads(content)
-        self.write_count += 1
+        if self.etags.get(name) != candidate_etag:
+            raise RuntimeError("Source state changed concurrently")
+        self._write_state(name, json.loads(content))
 
-    async def replace_json(self, name: str, value: dict[str, object]) -> None:
-        self.json[name] = deepcopy(value)
-        self.write_count += 1
+    async def replace_json(self, name: str, value: dict[str, object]) -> str:
+        return self._write_state(name, value)
 
     async def list_names(self, prefix: str) -> set[str]:
         return {
@@ -98,6 +108,12 @@ class MemoryBlobs:
                 self.write_count += 1
             self.bytes.pop(name, None)
             self.json.pop(name, None)
+            self.etags.pop(name, None)
+
+    async def delete_if_etag(self, name: str, candidate_etag: str) -> None:
+        if self.etags.get(name) != candidate_etag:
+            raise RuntimeError("Source state changed concurrently")
+        await self.delete_names({name})
 
     async def quarantine(self, *_args: object) -> None:
         raise AssertionError("the valid fake corpus must not be quarantined")
@@ -458,13 +474,18 @@ class StatefulSourceStates(SourceStateRepository):
     def __init__(self, blobs: MemoryBlobs) -> None:
         super().__init__(blobs)
         self.break_candidate_once = False
+        self.concurrent_candidate_once = False
         self._hide_next_load = False
 
-    async def record(self, *args, **kwargs) -> None:
-        await super().record(*args, **kwargs)
+    async def record(self, *args, **kwargs) -> str:
+        candidate_etag = await super().record(*args, **kwargs)
+        if self.concurrent_candidate_once:
+            self.concurrent_candidate_once = False
+            await super().record(*args, **kwargs)
         if self.break_candidate_once:
             self.break_candidate_once = False
             self._hide_next_load = True
+        return candidate_etag
 
     async def load(self, *args, **kwargs):
         if self._hide_next_load:
@@ -717,6 +738,51 @@ async def test_pre_marker_rollback_then_post_marker_retry_preserves_candidate(
     assert harness.catalog.current["72403881"]["artifact_generation_id"] == (
         committed.artifact_generation_id
     )
+
+
+@pytest.mark.asyncio
+async def test_source_state_restore_uses_the_candidate_write_etag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    source = harness.sources[0]
+    metadata = _metadata(source)
+
+    await harness.states.record(source, metadata, "old-generation")
+    snapshot = await harness.states.snapshot(source, PROCESSING_HASH)
+    candidate_etag = await harness.states.record(
+        source, metadata, "candidate-generation"
+    )
+
+    await harness.states.restore(
+        snapshot, source, PROCESSING_HASH, candidate_etag
+    )
+
+    restored = await harness.states.load(source, PROCESSING_HASH)
+    assert restored is not None
+    assert restored.artifact_generation_id == "old-generation"
+
+
+@pytest.mark.asyncio
+async def test_pre_marker_rollback_propagates_concurrent_source_state_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    harness.runner.mandates.active = MandateSnapshot(
+        snapshot_id="mandates-" + "b" * 64,
+        checksum="b" * 64,
+        assignment_count=0,
+        user_count=0,
+        complete=True,
+    )
+    harness.states.break_candidate_once = True
+    harness.states.concurrent_candidate_once = True
+
+    with pytest.raises(RuntimeError, match="Source state changed concurrently"):
+        await harness.runner.reconcile_documents()
+
+    state_name = harness.states.blob_name(harness.sources[0], PROCESSING_HASH)
+    assert state_name in await harness.states.list_names()
 
 
 @pytest.mark.asyncio

@@ -121,6 +121,7 @@ class PublicationSnapshot:
     previous_current: dict[str, Any] | None
     previous_current_bundle: PublishedDirectiveVersion | None
     previous_source_state: SourceStateSnapshot | None
+    candidate_source_state_etag: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1195,16 +1196,17 @@ class DirectiveIngestionRunner:
             await self.catalog.restore_version(
                 item.bundle, snapshot.previous_version
             )
-            restore_method = getattr(self.source_states, "restore", None)
-            if restore_method is not None:
+            if snapshot.candidate_source_state_etag is not None:
+                restore_method = getattr(self.source_states, "restore", None)
+                if restore_method is None:
+                    raise RuntimeError(
+                        "Source-state rollback requires ETag-safe restoration"
+                    )
                 await restore_method(
                     snapshot.previous_source_state,
                     item.source,
                     item.canonical.metadata.processing_hash,
-                )
-            else:
-                await self.source_states.delete(
-                    item.source, item.canonical.metadata.processing_hash
+                    snapshot.candidate_source_state_etag,
                 )
             if (
                 snapshot.previous_version is not None
@@ -1252,7 +1254,7 @@ class DirectiveIngestionRunner:
                 item.canonical,
                 (chunk.id for chunk in item.search_chunks),
             )
-            await self.source_states.record(
+            candidate_etag = await self.source_states.record(
                 item.source,
                 item.canonical.metadata,
                 item.bundle.artifact_generation_id,
@@ -1269,6 +1271,14 @@ class DirectiveIngestionRunner:
                     != item.bundle.artifact_generation_id
                 ),
             )
+            if snapshots is not None:
+                for index, snapshot in enumerate(snapshots):
+                    if snapshot.item is item:
+                        snapshots[index] = replace(
+                            snapshot,
+                            candidate_source_state_etag=candidate_etag,
+                        )
+                        break
 
     async def reconcile_exact_corpus(
         self,
