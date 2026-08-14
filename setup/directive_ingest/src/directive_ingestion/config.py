@@ -7,6 +7,7 @@ import json
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 def _required(name: str) -> str:
@@ -206,3 +207,36 @@ class IngestionConfig:
         values["mandate_csv"] = str(self.mandate_csv)
         values["processing_hash"] = self.processing_hash
         return values
+
+    @property
+    def source_storage_account(self) -> str:
+        return _endpoint_name(
+            os.getenv("DIRECTIVE_SOURCE_STORAGE_ACCOUNT", self.blob_account_url)
+        )
+
+    @property
+    def artifact_storage_account(self) -> str:
+        return _endpoint_name(
+            os.getenv("DIRECTIVE_ARTIFACT_STORAGE_ACCOUNT", self.blob_account_url)
+        )
+
+    @property
+    def cosmos_account(self) -> str:
+        return _endpoint_name(
+            os.getenv("DIRECTIVE_COSMOS_ACCOUNT", self.cosmos_endpoint)
+        )
+
+    @property
+    def search_service(self) -> str:
+        return _endpoint_name(
+            os.getenv("DIRECTIVE_SEARCH_SERVICE", self.search_endpoint)
+        )
+
+
+def _endpoint_name(value: str) -> str:
+    parsed = urlparse(value)
+    host = parsed.hostname or value.strip()
+    name = host.split(".", 1)[0]
+    if not name:
+        raise ValueError("Deployment environment identity must not be empty")
+    return name

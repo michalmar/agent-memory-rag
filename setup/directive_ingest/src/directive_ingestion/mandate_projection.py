@@ -124,9 +124,10 @@ class MandateRepository:
     async def check_access(self) -> None:
         await self._container.read()
 
-    async def publish(
+    async def stage(
         self, parsed: ParsedMandates, run_id: str
-    ) -> tuple[MandateSnapshot, bool]:
+    ) -> tuple[MandateSnapshot, dict[str, Any] | None, bool]:
+        """Write candidate assignments without switching the active pointer."""
         active = await self._read_active()
         snapshot_id = f"mandates-{parsed.checksum}"
         snapshot = MandateSnapshot(
@@ -144,8 +145,7 @@ class MandateRepository:
             and active.get("complete") is True
             and active.get("checksum") == parsed.checksum
         ):
-            changed = await self._prune_inactive(snapshot_id)
-            return snapshot, changed
+            return snapshot, active, False
 
         published_at = datetime.now(UTC).isoformat()
         for assignment in parsed.assignments:
@@ -192,6 +192,11 @@ class MandateRepository:
                 "published_at": published_at,
             }
         )
+        return snapshot, active, True
+
+    async def activate(
+        self, snapshot: MandateSnapshot, run_id: str
+    ) -> None:
         await self._container.upsert_item(
             {
                 "id": _ACTIVE_ID,
@@ -202,7 +207,54 @@ class MandateRepository:
                 "activated_at": datetime.now(UTC).isoformat(),
             }
         )
-        await self._prune_inactive(snapshot_id)
+
+    async def restore_active(self, previous: dict[str, Any] | None) -> None:
+        if previous is None:
+            try:
+                await self._container.delete_item(
+                    item=_ACTIVE_ID, partition_key=_CONTROL_PARTITION
+                )
+            except exceptions.CosmosResourceNotFoundError:
+                pass
+            return
+        await self._container.upsert_item(
+            {key: value for key, value in previous.items() if not key.startswith("_")}
+        )
+
+    async def discard_staged(self, snapshot: MandateSnapshot) -> None:
+        """Idempotently delete a candidate snapshot that was never committed."""
+        query = (
+            "SELECT c.id, c.user_id FROM c WHERE "
+            "(c.type = 'assignment' OR c.type = 'snapshot') AND "
+            "c.snapshot_id = @snapshot"
+        )
+        stale: list[tuple[str, str]] = []
+        async for value in self._container.query_items(
+            query=query,
+            parameters=[{"name": "@snapshot", "value": snapshot.snapshot_id}],
+        ):
+            item_id = value.get("id")
+            user_id = value.get("user_id")
+            if isinstance(item_id, str) and isinstance(user_id, str):
+                stale.append((item_id, user_id))
+        for item_id, user_id in stale:
+            try:
+                await self._container.delete_item(item=item_id, partition_key=user_id)
+            except exceptions.CosmosResourceNotFoundError:
+                continue
+
+    async def cleanup(self, active_snapshot_id: str) -> bool:
+        return await self._prune_inactive(active_snapshot_id)
+
+    async def publish(
+        self, parsed: ParsedMandates, run_id: str
+    ) -> tuple[MandateSnapshot, bool]:
+        """Compatibility API performing stage, activation, then cleanup."""
+        snapshot, _, changed = await self.stage(parsed, run_id)
+        if not changed:
+            return snapshot, await self.cleanup(snapshot.snapshot_id)
+        await self.activate(snapshot, run_id)
+        await self.cleanup(snapshot.snapshot_id)
         return snapshot, True
 
     async def is_current(self, parsed: ParsedMandates) -> bool:

@@ -48,7 +48,9 @@ class SourceStateRepository:
                 self.blob_name(source, processing_hash)
             )
         except RuntimeError as exc:
-            if str(exc).startswith("Invalid JSON artifact"):
+            if str(exc).startswith(
+                ("Invalid JSON artifact", "JSON artifact must be an object")
+            ):
                 return None
             raise
         if value is None:
@@ -122,27 +124,10 @@ class SourceStateRepository:
     ) -> None:
         await self.record(source, metadata, artifact_generation_id)
 
-    async def prune(
-        self, expected: set[tuple[str, str]]
-    ) -> None:
-        """Remove state records whose filename/hash identity left the corpus."""
+    async def prune(self, expected_names: set[str]) -> None:
+        """Remove every state record outside exact source+processing identities."""
         names = await self._blobs.list_names("source-state/")
-        stale: set[str] = set()
-        for name in names:
-            try:
-                value = await self._blobs.get_json(name)
-            except RuntimeError:
-                stale.add(name)
-                continue
-            if value is None:
-                continue
-            filename = value.get("source_filename")
-            source_hash = value.get("source_hash")
-            if not isinstance(filename, str) or not isinstance(source_hash, str):
-                stale.add(name)
-                continue
-            if (filename, source_hash) not in expected:
-                stale.add(name)
+        stale = names - expected_names
         if stale:
             await self._blobs.delete_names(stale)
 

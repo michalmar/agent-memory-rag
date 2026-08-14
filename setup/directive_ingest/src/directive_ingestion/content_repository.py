@@ -143,6 +143,15 @@ class DirectiveContentRepository:
                 values.add(value)
         return values
 
+    async def list_identities(self) -> set[tuple[str, str, str]]:
+        """Return partitioned identities and validated content hashes."""
+        values: set[tuple[str, str, str]] = set()
+        query = "SELECT * FROM c"
+        async for value in self._container.query_items(query=query):
+            item = _validate_content_record(value)
+            values.add((item.directive_version_id, item.id, item.part_hash))
+        return values
+
 
 def _validate_content_record(
     value: dict[str, Any],

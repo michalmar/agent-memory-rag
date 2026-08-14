@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 from azure.cosmos import exceptions
 
+from directive_ingestion.mandate_projection import MandateRepository
 from directive_ingestion.reconcile import DirectiveIngestionRunner
 
 
@@ -191,3 +192,71 @@ async def test_activation_rollback_restores_prior_current_version_search() -> No
     runner.search.restore_current_generation.assert_awaited_once_with(
         old_current_bundle
     )
+
+
+@pytest.mark.asyncio
+async def test_pre_marker_reconcile_failure_restores_candidate_publication() -> None:
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.reconcile_exact_corpus = AsyncMock(
+        side_effect=RuntimeError("candidate verification failed")
+    )
+    runner.commits = SimpleNamespace(load=AsyncMock(return_value=None))
+    snapshots = [SimpleNamespace()]
+    runner._publication_snapshots = snapshots
+    runner._rollback_publication = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="candidate verification failed"):
+        await runner._reconcile_after_publication(
+            [], [], "run", None, marker_before=None
+        )
+
+    runner._rollback_publication.assert_awaited_once_with(snapshots, None)
+
+
+@pytest.mark.asyncio
+async def test_post_marker_reconcile_failure_preserves_committed_candidate() -> None:
+    marker = SimpleNamespace()
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.reconcile_exact_corpus = AsyncMock(
+        side_effect=RuntimeError("cleanup failed")
+    )
+    runner.commits = SimpleNamespace(load=AsyncMock(return_value=marker))
+    runner._publication_snapshots = [SimpleNamespace()]
+    runner._rollback_publication = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        await runner._reconcile_after_publication(
+            [], [], "run", None, marker_before=None
+        )
+
+    runner._rollback_publication.assert_not_awaited()
+
+
+def test_pending_marker_rejects_a_different_source_corpus() -> None:
+    source = SimpleNamespace(source_name="new.pdf", source_hash="a" * 64)
+    metadata = SimpleNamespace(source=source)
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.config = SimpleNamespace(processing_hash="b" * 64)
+    runner.source_states = SimpleNamespace(
+        blob_name=lambda value, _: f"source-state/{value.source_name}"
+    )
+    marker = SimpleNamespace(expected_state_names={"source-state/old.pdf"})
+
+    with pytest.raises(RuntimeError, match="does not match the source corpus"):
+        runner._validate_pending_marker_corpus([metadata], marker)
+
+
+@pytest.mark.asyncio
+async def test_standalone_mandate_retry_resumes_inactive_snapshot_cleanup() -> None:
+    snapshot = SimpleNamespace(snapshot_id="mandates-checksum")
+    repository = object.__new__(MandateRepository)
+    repository.stage = AsyncMock(return_value=(snapshot, {}, False))
+    repository.cleanup = AsyncMock(return_value=True)
+    repository.activate = AsyncMock()
+
+    result, changed = await repository.publish(object(), "run")
+
+    assert result is snapshot
+    assert changed is True
+    repository.activate.assert_not_awaited()
+    repository.cleanup.assert_awaited_once_with(snapshot.snapshot_id)
