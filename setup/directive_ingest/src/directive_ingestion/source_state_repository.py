@@ -30,6 +30,7 @@ class PublishedSourceState:
     directive_metadata: DirectiveMetadata
     artifact_generation_id: str
     publication_state: str
+    published_bundle: PublishedDirectiveVersion | None = None
     repair_generation_salt: str | None = None
     pending_cleanup: tuple[PublishedDirectiveVersion, ...] = ()
     validation_warnings: tuple[tuple[str, str], ...] = ()
@@ -77,6 +78,13 @@ class SourceStateRepository:
                 ),
                 artifact_generation_id=value["artifact_generation_id"],
                 publication_state=value["publication_state"],
+                published_bundle=(
+                    PublishedDirectiveVersion.model_validate(
+                        value["published_bundle"]
+                    )
+                    if value.get("published_bundle") is not None
+                    else None
+                ),
                 repair_generation_salt=value.get("repair_generation_salt"),
                 pending_cleanup=tuple(
                     PublishedDirectiveVersion.model_validate(bundle)
@@ -100,6 +108,10 @@ class SourceStateRepository:
             or state.source_fingerprint != expected_fingerprint
             or state.processing_hash != processing_hash
             or state.publication_state != "published"
+            or (
+                state.published_bundle is not None
+                and not _bundle_matches_state(state.published_bundle, state)
+            )
             or (
                 state.repair_generation_salt is not None
                 and not _is_checksum(state.repair_generation_salt)
@@ -130,6 +142,7 @@ class SourceStateRepository:
         artifact_generation_id: str,
         pending_cleanup: tuple[PublishedDirectiveVersion, ...] = (),
         *,
+        published_bundle: PublishedDirectiveVersion | None = None,
         repair_generation_salt: str | None = None,
         validation_warnings: tuple[tuple[str, str], ...] = (),
         validation_digest: str | None = None,
@@ -151,6 +164,15 @@ class SourceStateRepository:
             raise ValueError(
                 "Repair generation salt must be a lowercase SHA-256 digest"
             )
+        if published_bundle is not None and not _bundle_matches(
+            published_bundle,
+            source,
+            metadata,
+            artifact_generation_id,
+        ):
+            raise ValueError(
+                "Published bundle does not match the source-state identity"
+            )
         canonical_warnings = _canonical_validation_warnings(validation_warnings)
         payload: dict[str, Any] = {
             "type": "source_state",
@@ -163,6 +185,11 @@ class SourceStateRepository:
             "directive_metadata": metadata.model_dump(mode="json"),
             "artifact_generation_id": artifact_generation_id,
             "publication_state": "published",
+            "published_bundle": (
+                published_bundle.model_dump(mode="json")
+                if published_bundle is not None
+                else None
+            ),
             "pending_cleanup": [
                 bundle.model_dump(mode="json") for bundle in pending_cleanup
             ],
@@ -188,6 +215,7 @@ class SourceStateRepository:
         source: SourceDocument,
         metadata: DirectiveMetadata,
         artifact_generation_id: str,
+        published_bundle: PublishedDirectiveVersion | None = None,
         validation_digest: str | None = None,
         mandate_checksum: str | None = None,
         repair_generation_salt: str | None = None,
@@ -197,6 +225,7 @@ class SourceStateRepository:
             source,
             metadata,
             artifact_generation_id,
+            published_bundle=published_bundle,
             repair_generation_salt=repair_generation_salt,
             validation_warnings=validation_warnings,
             validation_digest=validation_digest,
@@ -251,6 +280,42 @@ def _is_checksum(value: object) -> bool:
         isinstance(value, str)
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _bundle_matches_state(
+    bundle: PublishedDirectiveVersion, state: PublishedSourceState
+) -> bool:
+    return (
+        bundle.source_filename == state.source_filename
+        and bundle.source_hash == state.source_hash
+        and bundle.processing_hash == state.processing_hash
+        and bundle.artifact_generation_id == state.artifact_generation_id
+        and _bundle_metadata(bundle) == state.directive_metadata
+    )
+
+
+def _bundle_matches(
+    bundle: PublishedDirectiveVersion,
+    source: SourceDocument,
+    metadata: DirectiveMetadata,
+    artifact_generation_id: str,
+) -> bool:
+    return (
+        bundle.source_filename == source.source_name
+        and bundle.source_hash == source.source_hash
+        and bundle.processing_hash == metadata.processing_hash
+        and bundle.artifact_generation_id == artifact_generation_id
+        and _bundle_metadata(bundle) == metadata
+    )
+
+
+def _bundle_metadata(bundle: PublishedDirectiveVersion) -> DirectiveMetadata:
+    return DirectiveMetadata.model_validate(
+        {
+            name: getattr(bundle, name)
+            for name in DirectiveMetadata.model_fields
+        }
     )
 
 

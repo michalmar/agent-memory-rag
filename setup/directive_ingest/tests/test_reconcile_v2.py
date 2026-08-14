@@ -499,9 +499,7 @@ async def test_corrupt_blob_payload_reextracts_instead_of_trusting_state(
     source = _source()
     metadata = _metadata(source)
     bundle = _live_bundle(source, metadata, "# Directive\n")
-    state = _published_state(
-        source, metadata, bundle.artifact_generation_id
-    )
+    state = _published_state(source, metadata, bundle.artifact_generation_id)
     runner = object.__new__(DirectiveIngestionRunner)
     runner.config = SimpleNamespace(processing_hash=metadata.processing_hash)
     runner.source_states = SimpleNamespace(load=AsyncMock(return_value=state))
@@ -885,6 +883,7 @@ async def test_malformed_state_repairs_without_restaging_live_generation() -> No
         source,
         metadata,
         bundle.artifact_generation_id,
+        published_bundle=bundle,
         validation_warnings=(),
     )
     runner.summaries.summarize.assert_not_awaited()
@@ -950,7 +949,7 @@ async def test_corrupt_live_generation_gets_isolated_repair_generation() -> None
 
 
 @pytest.mark.asyncio
-async def test_corrupt_catalog_slot_repair_uses_raw_slot_hash_salt() -> None:
+async def test_corrupt_catalog_slot_without_prior_cleanup_bundle_requires_reset() -> None:
     source = _source()
     metadata = _metadata(source)
     canonical = SimpleNamespace(
@@ -985,53 +984,41 @@ async def test_corrupt_catalog_slot_repair_uses_raw_slot_hash_salt() -> None:
     runner.source_states = SimpleNamespace(record=AsyncMock())
     import directive_ingestion.reconcile as reconcile_module
 
-    captured: list[object] = []
     original_parse = reconcile_module.parse_canonical
     original_chunks = reconcile_module.chunk_sections
-    original_manifest = reconcile_module._build_manifest
-    original_bundle = reconcile_module._build_published_bundle
     reconcile_module.parse_canonical = lambda *_args: canonical
     reconcile_module.chunk_sections = lambda *_args, **_kwargs: ([], ())
-    reconcile_module._build_manifest = lambda _value, *_args: captured.append(
-        _args[-1]
-    ) or object()
-    reconcile_module._build_published_bundle = lambda *_args: (object(), ())
     try:
-        await runner.prepare_changed_documents(
-            [SourceMetadata(source, metadata, object(), None)], "run"
-        )
+        with pytest.raises(CatalogResetRequiredError, match="before staging"):
+            await runner.prepare_changed_documents(
+                [SourceMetadata(source, metadata, object(), None)], "run"
+            )
     finally:
         reconcile_module.parse_canonical = original_parse
         reconcile_module.chunk_sections = original_chunks
-        reconcile_module._build_manifest = original_manifest
-        reconcile_module._build_published_bundle = original_bundle
 
-    assert len(captured) == 1
-    assert isinstance(captured[0], str)
-    assert captured[0]
+    runner.search.build_chunks.assert_not_awaited()
     runner.catalog.snapshot_version.assert_awaited_once_with(
         metadata.directive_id, metadata.directive_version_id
     )
 
 
-def test_corrupt_catalog_slot_repair_uses_trusted_source_state_generation() -> None:
+def test_corrupt_catalog_slot_without_exact_prior_bundle_requires_reset() -> None:
     source = _source()
     metadata = _metadata(source)
     generation_id = "c" * 64
-    salt = _corrupt_catalog_repair_salt(
-        metadata,
-        "d" * 64,
-        _published_state(source, metadata, generation_id),
-        CatalogSlotSnapshot(
-            metadata.directive_id,
-            metadata.directive_version_id,
-            {"malformed": object()},
-            "before",
-        ),
-    )
-
-    assert len(salt) == 64
-    assert salt != generation_id
+    with pytest.raises(CatalogResetRequiredError, match="prior cleanup bundle"):
+        _corrupt_catalog_repair_salt(
+            metadata,
+            "d" * 64,
+            _published_state(source, metadata, generation_id),
+            CatalogSlotSnapshot(
+                metadata.directive_id,
+                metadata.directive_version_id,
+                {"malformed": object()},
+                "before",
+            ),
+        )
 
 
 @pytest.mark.asyncio
@@ -1122,7 +1109,7 @@ async def test_unrestorable_corrupt_current_catalog_aborts_before_writes() -> No
     )
     runner.stage_documents = AsyncMock()
 
-    with pytest.raises(CatalogResetRequiredError, match="operator reset"):
+    with pytest.raises(CatalogResetRequiredError, match="prior cleanup bundle"):
         await runner._publish_transaction([item])
 
     runner.stage_documents.assert_not_awaited()

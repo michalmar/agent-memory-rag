@@ -85,6 +85,7 @@ class PreparedDirective:
     content_items: tuple[DirectiveSectionContent, ...]
     findings: tuple[ReviewFinding, ...]
     repair_generation_salt: str | None = None
+    trusted_prior_bundle: PublishedDirectiveVersion | None = None
 
 
 @dataclass(frozen=True)
@@ -1155,6 +1156,9 @@ class DirectiveIngestionRunner:
             )
             if repair_generation_salt is not None:
                 record_kwargs["repair_generation_salt"] = repair_generation_salt
+            published_bundle = getattr(state, "published_bundle", None)
+            if published_bundle is not None:
+                record_kwargs["published_bundle"] = published_bundle
             await self.source_states.record(
                 item.source,
                 state.directive_metadata,
@@ -1410,6 +1414,7 @@ class DirectiveIngestionRunner:
                 summary = await self.summaries.summarize(canonical)
                 generation_id = _generation_id(canonical, summary)
                 repair_salt: str | None = None
+                trusted_prior_bundle: PublishedDirectiveVersion | None = None
                 if (
                     existing_bundle is not None
                     and existing_bundle.artifact_generation_id == generation_id
@@ -1421,6 +1426,9 @@ class DirectiveIngestionRunner:
                         canonical, summary, repair_salt
                     )
                 elif corrupt_catalog_slot is not None:
+                    trusted_prior_bundle = _trusted_source_state_bundle(
+                        canonical.metadata, item.repair_source_state
+                    )
                     repair_salt = _corrupt_catalog_repair_salt(
                         canonical.metadata,
                         generation_id,
@@ -1455,6 +1463,7 @@ class DirectiveIngestionRunner:
                         content_items=content_items,
                         findings=tuple(findings),
                         repair_generation_salt=repair_salt,
+                        trusted_prior_bundle=trusted_prior_bundle,
                     )
                 )
                 if canonical.metadata != item.metadata:
@@ -1493,20 +1502,25 @@ class DirectiveIngestionRunner:
             directive_metadata=item.metadata,
             artifact_generation_id=bundle.artifact_generation_id,
             publication_state="published",
+            published_bundle=bundle,
         )
         if not await self._state_has_live_publication(item.source, state):
             return False
         if item.extraction is None:
             raise RuntimeError("Source-state repair requires the fresh extraction")
+        findings = (
+            parse_canonical(
+                item.source, item.extraction, self.config.processing_hash
+            ).findings
+            if hasattr(self, "config")
+            else ()
+        )
         await self.source_states.record(
             item.source,
             item.metadata,
             bundle.artifact_generation_id,
-            validation_warnings=_canonical_warning_tuples(
-                parse_canonical(
-                    item.source, item.extraction, self.config.processing_hash
-                ).findings
-            ),
+            published_bundle=bundle,
+            validation_warnings=_canonical_warning_tuples(findings),
         )
         return True
 
@@ -1621,7 +1635,13 @@ class DirectiveIngestionRunner:
                         "Catalog repair requires a raw ETag snapshot: "
                         f"{item.bundle.directive_version_id}"
                     ) from None
-                previous_version = None
+                previous_version = getattr(item, "trusted_prior_bundle", None)
+                if previous_version is None:
+                    raise CatalogResetRequiredError(
+                        "Catalog reset required before staging: corrupt stable "
+                        "slot has no trusted prior cleanup bundle for "
+                        f"{item.bundle.directive_version_id}"
+                    ) from None
             previous_current = await self.catalog.get_current(
                 item.bundle.directive_id
             )
@@ -1893,8 +1913,9 @@ class DirectiveIngestionRunner:
                     and snapshot.previous_source_state is None
                 ),
                 "validation_warnings": _canonical_warning_tuples(
-                    item.canonical.findings
+                    getattr(item.canonical, "findings", ())
                 ),
+                "published_bundle": item.bundle,
             }
             if validation_digest is not None:
                 record_kwargs["validation_digest"] = validation_digest
@@ -2041,6 +2062,7 @@ class DirectiveIngestionRunner:
                     item.source,
                     state.directive_metadata,
                     state.artifact_generation_id,
+                    published_bundle=state.published_bundle,
                     repair_generation_salt=getattr(
                         state, "repair_generation_salt", None
                     ),
@@ -2100,6 +2122,7 @@ class DirectiveIngestionRunner:
         """A state record is insufficient unless its published bundle is live."""
         try:
             metadata = state.directive_metadata
+            published_bundle = getattr(state, "published_bundle", None)
             bundle = await self.catalog.get_published_version(
                 metadata.directive_id, metadata.directive_version_id
             )
@@ -2109,12 +2132,26 @@ class DirectiveIngestionRunner:
                     f"{metadata.directive_version_id}"
                 )
             if (
+                isinstance(state, PublishedSourceState)
+                and isinstance(bundle, PublishedDirectiveVersion)
+                and published_bundle is None
+            ):
+                raise IntegrityValidationError(
+                    "Source-state lacks its exact published cleanup bundle: "
+                    f"{metadata.directive_version_id}"
+                )
+            if (
                 bundle.directive_id != metadata.directive_id
                 or bundle.directive_version_id != metadata.directive_version_id
                 or bundle.source_filename != source.source_name
                 or bundle.source_hash != source.source_hash
                 or bundle.processing_hash != metadata.processing_hash
                 or bundle.artifact_generation_id != state.artifact_generation_id
+                or (
+                    published_bundle is not None
+                    and canonical_json_hash(bundle)
+                    != canonical_json_hash(published_bundle)
+                )
             ):
                 raise IntegrityValidationError(
                     "Catalog version does not match its source state: "
@@ -2436,18 +2473,18 @@ def _corrupt_catalog_repair_salt(
     source_state: PublishedSourceState | None,
     corrupt_slot: CatalogSlotSnapshot,
 ) -> str:
-    """Create an isolated generation without trusting corrupt catalog fields."""
-    trusted = _trusted_source_state_generation(metadata, source_state)
+    """Create an isolated generation from the trusted prior cleanup bundle."""
+    trusted = _trusted_source_state_bundle(metadata, source_state)
     raw_slot_hash = _raw_catalog_slot_hash(corrupt_slot)
-    if trusted is None and raw_slot_hash is None:
+    if trusted is None:
         raise CatalogResetRequiredError(
             "Catalog reset required before staging: corrupt stable slot has no "
-            f"trusted repair descriptor for {metadata.directive_version_id}"
+            f"trusted prior cleanup bundle for {metadata.directive_version_id}"
         )
     descriptors = [
         value
         for value in (
-            f"source-state:{trusted}" if trusted is not None else None,
+            f"source-state:{canonical_json_hash(trusted)}",
             f"raw-slot:{raw_slot_hash}" if raw_slot_hash is not None else None,
         )
         if value is not None
@@ -2466,13 +2503,14 @@ def _corrupt_catalog_repair_salt(
     ).hexdigest()
 
 
-def _trusted_source_state_generation(
+def _trusted_source_state_bundle(
     metadata: DirectiveMetadata, source_state: PublishedSourceState | None
-) -> str | None:
+) -> PublishedDirectiveVersion | None:
     if source_state is None:
         return None
     state_metadata = getattr(source_state, "directive_metadata", None)
     generation_id = getattr(source_state, "artifact_generation_id", None)
+    bundle = getattr(source_state, "published_bundle", None)
     if (
         getattr(source_state, "publication_state", None) != "published"
         or getattr(state_metadata, "directive_id", None) != metadata.directive_id
@@ -2484,9 +2522,20 @@ def _trusted_source_state_generation(
         or getattr(state_metadata, "processing_hash", None)
         != metadata.processing_hash
         or not _is_sha256(generation_id)
+        or not isinstance(bundle, PublishedDirectiveVersion)
+        or bundle.directive_id != metadata.directive_id
+        or bundle.directive_version_id != metadata.directive_version_id
+        or bundle.source_filename != metadata.source_filename
+        or bundle.source_hash != metadata.source_hash
+        or bundle.processing_hash != metadata.processing_hash
+        or bundle.artifact_generation_id != generation_id
     ):
         return None
-    return generation_id
+    try:
+        _validate_safe_artifact_paths(bundle)
+    except IntegrityValidationError:
+        return None
+    return bundle
 
 
 def _raw_catalog_slot_hash(corrupt_slot: CatalogSlotSnapshot) -> str | None:
@@ -2844,7 +2893,9 @@ def _validation_warnings(
     warnings: set[tuple[str, str]] = set()
     for item in metadata:
         if item.extraction is None and item.source_state is not None:
-            warnings.update(item.source_state.validation_warnings)
+            warnings.update(
+                getattr(item.source_state, "validation_warnings", ())
+            )
             continue
         if item.extraction is not None:
             canonical = parse_canonical(

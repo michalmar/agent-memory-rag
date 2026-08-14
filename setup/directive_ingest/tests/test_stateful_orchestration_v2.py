@@ -782,51 +782,57 @@ async def test_initial_publication_then_noop_daily_run_only_cycles_global_lock(
 
 
 @pytest.mark.asyncio
-async def test_corrupt_catalog_slot_repair_survives_candidate_cleanup_and_noop(
+async def test_corrupt_catalog_repair_retires_trusted_prior_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     harness = Harness(monkeypatch, CorruptSlotMemoryCatalog)
     source = harness.sources[0]
     metadata = _metadata(source)
-    previous_generation = "c" * 64
-    await harness.states.record(source, metadata, previous_generation)
-    harness.catalog.add_corrupt_slot(metadata)
-    validation = await harness.runner.validate_inputs()
 
+    await harness.runner.run_daily()
+    old_bundle = next(iter(harness.catalog.bundles.values()))
+    old_chunk_ids = {
+        chunk_id
+        for section in old_bundle.manifest.sections
+        for chunk_id in section.chunk_ids
+    }
+    old_content_keys = {
+        key
+        for key in harness.content.items
+        if key[0] == old_bundle.directive_version_id
+    }
+    old_state = await harness.states.load(source, PROCESSING_HASH)
+    assert old_state is not None
+    assert old_state.published_bundle == old_bundle
+
+    harness.catalog.add_corrupt_slot(metadata)
+    harness.catalog.current.pop(metadata.directive_id)
+
+    with pytest.raises(PublicationResetRequiredError, match="reset-required"):
+        await harness.runner.run_daily()
+    await harness.runner.reset_publication_guards()
     repaired = await harness.runner.run_daily()
 
     assert repaired.changed_count == 1
     bundle = next(iter(harness.catalog.bundles.values()))
-    assert bundle.artifact_generation_id != previous_generation
+    assert bundle.artifact_generation_id != old_bundle.artifact_generation_id
     assert harness.catalog.corrupt_slots == {}
     state = await harness.states.load(source, PROCESSING_HASH)
     assert state is not None
     assert state.artifact_generation_id == bundle.artifact_generation_id
+    assert state.published_bundle == bundle
     assert state.repair_generation_salt is not None
     assert state.pending_cleanup == ()
+    assert old_chunk_ids.isdisjoint(harness.search.chunks)
+    assert old_content_keys.isdisjoint(harness.content.items)
+    assert old_bundle.artifacts.canonical_blob_name not in harness.blobs.bytes
+    assert set(harness.blobs.bytes) == {
+        bundle.artifacts.source_blob_name,
+        bundle.artifacts.canonical_blob_name,
+    }
     assert await harness.runner.commits.load() is None
     assert await harness.blobs.list_names("publication-lock/") == set()
-    assert await harness.blobs.list_names("publication-claims/") == {
-        f"publication-claims/{validation['validation_digest']}.json"
-    }
-
-    writes_before_noop = (
-        harness.blobs.write_count,
-        harness.catalog.write_count,
-        harness.content.write_count,
-        harness.search.write_count,
-    )
-    noop = await harness.runner.run_daily()
-
-    assert noop.changed_count == 0
-    assert noop.skipped_count == 1
-    assert harness.blobs.write_count == writes_before_noop[0] + 2
-    assert (
-        harness.catalog.write_count,
-        harness.content.write_count,
-        harness.search.write_count,
-    ) == writes_before_noop[1:]
-    assert await harness.blobs.list_names("publication-lock/") == set()
+    assert len(await harness.blobs.list_names("publication-claims/")) == 1
     await harness.runner.verify()
 
 
