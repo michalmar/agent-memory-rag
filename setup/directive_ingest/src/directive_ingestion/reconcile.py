@@ -460,6 +460,9 @@ class DirectiveIngestionRunner:
                 )
         for bundle in bundles:
             manifest = bundle.manifest
+            source_state = source_index[
+                (bundle.directive_id, bundle.directive_version_id)
+            ]
             required_artifacts.update(
                 {
                     bundle.artifacts.source_blob_name,
@@ -485,7 +488,10 @@ class DirectiveIngestionRunner:
                 canonical_json_hash(bundle.summary),
             )
             expected_generation_id = _expected_live_generation_id(
-                bundle, base_generation_id, canonical_hash
+                bundle,
+                base_generation_id,
+                canonical_hash,
+                getattr(source_state, "repair_generation_salt", None),
             )
             if (
                 source_hash != bundle.source_hash
@@ -1137,14 +1143,22 @@ class DirectiveIngestionRunner:
                 raise RuntimeError(
                     "Source-state changed while binding validation approval"
                 )
+            record_kwargs: dict[str, object] = {
+                "pending_cleanup": state.pending_cleanup,
+                "validation_digest": validation_digest,
+                "mandate_checksum": mandate_checksum,
+                "expected_etag": snapshot.etag,
+            }
+            repair_generation_salt = getattr(
+                state, "repair_generation_salt", None
+            )
+            if repair_generation_salt is not None:
+                record_kwargs["repair_generation_salt"] = repair_generation_salt
             await self.source_states.record(
                 item.source,
                 state.directive_metadata,
                 state.artifact_generation_id,
-                pending_cleanup=state.pending_cleanup,
-                validation_digest=validation_digest,
-                mandate_checksum=mandate_checksum,
-                expected_etag=snapshot.etag,
+                **record_kwargs,
             )
 
     async def publish_mandates(
@@ -1872,6 +1886,12 @@ class DirectiveIngestionRunner:
             if validation_digest is not None:
                 record_kwargs["validation_digest"] = validation_digest
                 record_kwargs["mandate_checksum"] = mandate_checksum
+            if (
+                repair_generation_salt := getattr(
+                    item, "repair_generation_salt", None
+                )
+            ) is not None:
+                record_kwargs["repair_generation_salt"] = repair_generation_salt
             candidate_etag = await self.source_states.record(
                 item.source,
                 item.canonical.metadata,
@@ -2008,6 +2028,9 @@ class DirectiveIngestionRunner:
                     item.source,
                     state.directive_metadata,
                     state.artifact_generation_id,
+                    repair_generation_salt=getattr(
+                        state, "repair_generation_salt", None
+                    ),
                     validation_digest=(
                         validation_digest
                         if validation_digest is not None
@@ -2132,7 +2155,10 @@ class DirectiveIngestionRunner:
                 canonical_json_hash(bundle.summary),
             )
             expected_generation_id = _expected_live_generation_id(
-                bundle, base_generation_id, canonical_hash
+                bundle,
+                base_generation_id,
+                canonical_hash,
+                getattr(state, "repair_generation_salt", None),
             )
             if expected_generation_id != bundle.artifact_generation_id:
                 raise IntegrityValidationError(
@@ -2478,10 +2504,12 @@ def _expected_live_generation_id(
     bundle: PublishedDirectiveVersion,
     base_generation_id: str,
     canonical_hash: str,
+    repair_salt: str | None = None,
 ) -> str:
-    if bundle.artifact_generation_id == base_generation_id:
-        return base_generation_id
-    repair_salt = _repair_generation_salt(bundle, base_generation_id)
+    if repair_salt is None:
+        if bundle.artifact_generation_id == base_generation_id:
+            return base_generation_id
+        repair_salt = _repair_generation_salt(bundle, base_generation_id)
     canonical_hash = hashlib.sha256(
         (
             canonical_hash

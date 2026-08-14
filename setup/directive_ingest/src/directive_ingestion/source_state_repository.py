@@ -27,6 +27,7 @@ class PublishedSourceState:
     directive_metadata: DirectiveMetadata
     artifact_generation_id: str
     publication_state: str
+    repair_generation_salt: str | None = None
     pending_cleanup: tuple[PublishedDirectiveVersion, ...] = ()
     validation_digest: str | None = None
     mandate_checksum: str | None = None
@@ -72,6 +73,7 @@ class SourceStateRepository:
                 ),
                 artifact_generation_id=value["artifact_generation_id"],
                 publication_state=value["publication_state"],
+                repair_generation_salt=value.get("repair_generation_salt"),
                 pending_cleanup=tuple(
                     PublishedDirectiveVersion.model_validate(bundle)
                     for bundle in value.get("pending_cleanup", [])
@@ -91,6 +93,10 @@ class SourceStateRepository:
             or state.source_fingerprint != expected_fingerprint
             or state.processing_hash != processing_hash
             or state.publication_state != "published"
+            or (
+                state.repair_generation_salt is not None
+                and not _is_checksum(state.repair_generation_salt)
+            )
             or metadata.source_filename != source.source_name
             or metadata.source_hash != source.source_hash
             or metadata.processing_hash != processing_hash
@@ -117,6 +123,7 @@ class SourceStateRepository:
         artifact_generation_id: str,
         pending_cleanup: tuple[PublishedDirectiveVersion, ...] = (),
         *,
+        repair_generation_salt: str | None = None,
         validation_digest: str | None = None,
         mandate_checksum: str | None = None,
         expected_etag: str | None = None,
@@ -130,6 +137,12 @@ class SourceStateRepository:
             )
         if mandate_checksum is not None and not _is_checksum(mandate_checksum):
             raise ValueError("Mandate checksum must be a lowercase SHA-256 digest")
+        if repair_generation_salt is not None and not _is_checksum(
+            repair_generation_salt
+        ):
+            raise ValueError(
+                "Repair generation salt must be a lowercase SHA-256 digest"
+            )
         payload: dict[str, Any] = {
             "type": "source_state",
             "source_filename": source.source_name,
@@ -145,6 +158,8 @@ class SourceStateRepository:
                 bundle.model_dump(mode="json") for bundle in pending_cleanup
             ],
         }
+        if repair_generation_salt is not None:
+            payload["repair_generation_salt"] = repair_generation_salt
         if validation_digest is not None:
             payload["validation_digest"] = validation_digest
             payload["mandate_checksum"] = mandate_checksum
@@ -162,11 +177,13 @@ class SourceStateRepository:
         artifact_generation_id: str,
         validation_digest: str | None = None,
         mandate_checksum: str | None = None,
+        repair_generation_salt: str | None = None,
     ) -> None:
         await self.record(
             source,
             metadata,
             artifact_generation_id,
+            repair_generation_salt=repair_generation_salt,
             validation_digest=validation_digest,
             mandate_checksum=mandate_checksum,
         )

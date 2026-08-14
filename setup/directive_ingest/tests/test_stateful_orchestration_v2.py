@@ -21,6 +21,8 @@ from directive_ingestion.publication_commit_repository import (
     PublicationCommitRepository,
     PublicationResetRequiredError,
 )
+from directive_ingestion.catalog_repository import CatalogSlotSnapshot
+from directive_ingestion.integrity import IntegrityValidationError
 from directive_ingestion.reconcile import (
     DirectiveIngestionRunner,
     _public_record_digest,
@@ -227,6 +229,52 @@ class MemoryCatalog:
     async def record_run(self, run_id: str, **details: object) -> None:
         self.recorded_runs.append({"run_id": run_id, **details})
         self.write_count += 1
+
+
+class CorruptSlotMemoryCatalog(MemoryCatalog):
+    """Catalog fake that preserves a raw malformed slot for ETag replacement."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.corrupt_slots: dict[tuple[str, str], CatalogSlotSnapshot] = {}
+        self._candidate_version = 0
+
+    def add_corrupt_slot(self, metadata: DirectiveMetadata) -> None:
+        key = (metadata.directive_id, metadata.directive_version_id)
+        self.corrupt_slots[key] = CatalogSlotSnapshot(
+            metadata.directive_id,
+            metadata.directive_version_id,
+            {"id": "corrupt-version", "type": "version", "malformed": True},
+            "corrupt-etag",
+        )
+
+    async def get_published_version(self, directive_id: str, version_id: str):
+        if (directive_id, version_id) in self.corrupt_slots:
+            raise IntegrityValidationError("malformed catalog descriptor")
+        return await super().get_published_version(directive_id, version_id)
+
+    async def snapshot_version(self, directive_id: str, version_id: str):
+        return self.corrupt_slots.get((directive_id, version_id))
+
+    async def publish_version(
+        self, bundle, _relations: object, *, expected_snapshot=None
+    ) -> str:
+        key = (bundle.directive_id, bundle.directive_version_id)
+        corrupt_slot = self.corrupt_slots.get(key)
+        if corrupt_slot is not None:
+            assert expected_snapshot == corrupt_slot
+            del self.corrupt_slots[key]
+        elif expected_snapshot is not None:
+            raise RuntimeError("unexpected catalog snapshot")
+        self.bundles[key] = bundle
+        self.write_count += 1
+        self._candidate_version += 1
+        return f"candidate-etag-{self._candidate_version}"
+
+    async def restore_version(
+        self, bundle, previous, _candidate_etag: str | None = None
+    ) -> None:
+        await super().restore_version(bundle, previous)
 
 
 class MemoryContent:
@@ -580,10 +628,14 @@ def _canonical(source: SourceDocument) -> CanonicalDirective:
 
 
 class Harness:
-    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        catalog_type: type[MemoryCatalog] = MemoryCatalog,
+    ) -> None:
         self.sources = [_source()]
         self.blobs = MemoryBlobs()
-        self.catalog = MemoryCatalog()
+        self.catalog = catalog_type()
         self.content = MemoryContent()
         self.search = MemorySearch()
         self.states = StatefulSourceStates(self.blobs)
@@ -688,6 +740,55 @@ async def test_initial_publication_then_noop_daily_run_only_cycles_global_lock(
         harness.content.write_count,
         harness.search.write_count,
     ) == writes_before_noop[1:]
+
+
+@pytest.mark.asyncio
+async def test_corrupt_catalog_slot_repair_survives_candidate_cleanup_and_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch, CorruptSlotMemoryCatalog)
+    source = harness.sources[0]
+    metadata = _metadata(source)
+    previous_generation = "c" * 64
+    await harness.states.record(source, metadata, previous_generation)
+    harness.catalog.add_corrupt_slot(metadata)
+    validation = await harness.runner.validate_inputs()
+
+    repaired = await harness.runner.run_daily()
+
+    assert repaired.changed_count == 1
+    bundle = next(iter(harness.catalog.bundles.values()))
+    assert bundle.artifact_generation_id != previous_generation
+    assert harness.catalog.corrupt_slots == {}
+    state = await harness.states.load(source, PROCESSING_HASH)
+    assert state is not None
+    assert state.artifact_generation_id == bundle.artifact_generation_id
+    assert state.repair_generation_salt is not None
+    assert state.pending_cleanup == ()
+    assert await harness.runner.commits.load() is None
+    assert await harness.blobs.list_names("publication-lock/") == set()
+    assert await harness.blobs.list_names("publication-claims/") == {
+        f"publication-claims/{validation['validation_digest']}.json"
+    }
+
+    writes_before_noop = (
+        harness.blobs.write_count,
+        harness.catalog.write_count,
+        harness.content.write_count,
+        harness.search.write_count,
+    )
+    noop = await harness.runner.run_daily()
+
+    assert noop.changed_count == 0
+    assert noop.skipped_count == 1
+    assert harness.blobs.write_count == writes_before_noop[0] + 2
+    assert (
+        harness.catalog.write_count,
+        harness.content.write_count,
+        harness.search.write_count,
+    ) == writes_before_noop[1:]
+    assert await harness.blobs.list_names("publication-lock/") == set()
+    await harness.runner.verify()
 
 
 @pytest.mark.asyncio
