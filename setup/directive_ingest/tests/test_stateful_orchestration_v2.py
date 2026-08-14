@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from copy import deepcopy
 from datetime import date
 from pathlib import Path
@@ -57,6 +58,23 @@ class MemoryBlobs:
     async def get_json(self, name: str) -> dict[str, object] | None:
         value = self.json.get(name)
         return deepcopy(value) if value is not None else None
+
+    async def read_bytes_with_etag(
+        self, name: str
+    ) -> tuple[bytes, str] | None:
+        value = self.json.get(name)
+        if value is None:
+            return None
+        return (
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode(),
+            "etag",
+        )
+
+    async def restore_bytes(
+        self, name: str, content: bytes, _etag: str
+    ) -> None:
+        self.json[name] = json.loads(content)
+        self.write_count += 1
 
     async def replace_json(self, name: str, value: dict[str, object]) -> None:
         self.json[name] = deepcopy(value)

@@ -115,6 +115,37 @@ class BlobArtifactRepository:
             raise RuntimeError(f"JSON artifact must be an object: {blob_name}")
         return value
 
+    async def read_bytes_with_etag(
+        self, blob_name: str
+    ) -> tuple[bytes, str] | None:
+        blob = self._container.get_blob_client(blob_name)
+        try:
+            properties = await blob.get_blob_properties()
+            etag = getattr(properties, "etag", None)
+            if not isinstance(etag, str) or not etag:
+                raise RuntimeError(f"State artifact is missing an ETag: {blob_name}")
+            stream = await blob.download_blob()
+            return await stream.readall(), etag
+        except ResourceNotFoundError:
+            return None
+
+    async def restore_bytes(
+        self, blob_name: str, content: bytes, etag: str
+    ) -> None:
+        blob = self._container.get_blob_client(blob_name)
+        properties = await blob.get_blob_properties()
+        current_etag = getattr(properties, "etag", None)
+        if not isinstance(current_etag, str) or not current_etag:
+            raise RuntimeError(f"State artifact is missing an ETag: {blob_name}")
+        await blob.upload_blob(
+            content,
+            overwrite=True,
+            etag=current_etag,
+            match_condition=MatchConditions.IfNotModified,
+            metadata={"content_sha256": hashlib.sha256(content).hexdigest()},
+            content_settings=ContentSettings(content_type="application/json"),
+        )
+
     async def content_hash(self, blob_name: str) -> str:
         properties = await self._container.get_blob_client(
             blob_name

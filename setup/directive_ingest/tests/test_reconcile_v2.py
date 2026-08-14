@@ -21,6 +21,7 @@ from directive_ingestion.reconcile import (
     _generation_canonical_hash,
     _public_record_digest,
     _build_artifact_locators,
+    format_result,
 )
 from directive_ingestion.source import SourceDocument, SourceProvenance
 from directive_ingestion.source_state_repository import PublishedSourceState
@@ -248,6 +249,11 @@ def test_public_digest_uses_compact_utf8_canonical_json() -> None:
 def test_public_digest_rejects_floats() -> None:
     with pytest.raises(ValueError, match="must not contain floats"):
         _public_record_digest({"unsupported": 1.25})
+
+
+def test_public_result_is_limited_to_64_kib() -> None:
+    with pytest.raises(ValueError, match="exceeds"):
+        format_result({"safe": "x" * 65_536})
 
 
 @pytest.mark.asyncio

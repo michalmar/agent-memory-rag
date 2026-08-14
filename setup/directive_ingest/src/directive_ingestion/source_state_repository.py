@@ -29,6 +29,13 @@ class PublishedSourceState:
     pending_cleanup: tuple[PublishedDirectiveVersion, ...] = ()
 
 
+@dataclass(frozen=True)
+class SourceStateSnapshot:
+    blob_name: str
+    content: bytes
+    etag: str
+
+
 class SourceStateRepository:
     def __init__(self, blobs: BlobArtifactRepository) -> None:
         self._blobs = blobs
@@ -139,4 +146,26 @@ class SourceStateRepository:
     ) -> None:
         await self._blobs.delete_names(
             {self.blob_name(source, processing_hash)}
+        )
+
+    async def snapshot(
+        self, source: SourceDocument, processing_hash: str
+    ) -> SourceStateSnapshot | None:
+        name = self.blob_name(source, processing_hash)
+        value = await self._blobs.read_bytes_with_etag(name)
+        if value is None:
+            return None
+        content, etag = value
+        return SourceStateSnapshot(name, content, etag)
+
+    async def restore(
+        self, snapshot: SourceStateSnapshot | None,
+        source: SourceDocument,
+        processing_hash: str,
+    ) -> None:
+        if snapshot is None:
+            await self.delete(source, processing_hash)
+            return
+        await self._blobs.restore_bytes(
+            snapshot.blob_name, snapshot.content, snapshot.etag
         )

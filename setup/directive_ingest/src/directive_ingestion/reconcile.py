@@ -49,7 +49,11 @@ from .document_intelligence import DocumentIntelligenceExtractor
 from .mandate_projection import MandateRepository, parse_mandates
 from .publication_commit_repository import PublicationCommitRepository
 from .search_repository import DirectiveSearchRepository
-from .source_state_repository import PublishedSourceState, SourceStateRepository
+from .source_state_repository import (
+    PublishedSourceState,
+    SourceStateRepository,
+    SourceStateSnapshot,
+)
 from .source import (
     BlobDirectiveSource,
     DirectiveSource,
@@ -116,6 +120,7 @@ class PublicationSnapshot:
     previous_version: PublishedDirectiveVersion | None
     previous_current: dict[str, Any] | None
     previous_current_bundle: PublishedDirectiveVersion | None
+    previous_source_state: SourceStateSnapshot | None
 
 
 @dataclass(frozen=True)
@@ -1120,12 +1125,21 @@ class DirectiveIngestionRunner:
                         item.bundle.directive_id, version_id
                     )
                 )
+            snapshot_method = getattr(self.source_states, "snapshot", None)
+            previous_source_state = (
+                await snapshot_method(
+                    item.source, item.canonical.metadata.processing_hash
+                )
+                if snapshot_method is not None
+                else None
+            )
             snapshots.append(
                 PublicationSnapshot(
                     item,
                     previous_version,
                     previous_current,
                     previous_current_bundle,
+                    previous_source_state,
                 )
             )
         mandate_snapshot: MandatePublicationSnapshot | None = None
@@ -1181,9 +1195,17 @@ class DirectiveIngestionRunner:
             await self.catalog.restore_version(
                 item.bundle, snapshot.previous_version
             )
-            await self.source_states.delete(
-                item.source, item.canonical.metadata.processing_hash
-            )
+            restore_method = getattr(self.source_states, "restore", None)
+            if restore_method is not None:
+                await restore_method(
+                    snapshot.previous_source_state,
+                    item.source,
+                    item.canonical.metadata.processing_hash,
+                )
+            else:
+                await self.source_states.delete(
+                    item.source, item.canonical.metadata.processing_hash
+                )
             if (
                 snapshot.previous_version is not None
                 and snapshot.previous_version.artifact_generation_id
