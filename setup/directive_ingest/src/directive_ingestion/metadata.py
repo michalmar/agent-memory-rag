@@ -166,6 +166,8 @@ class _ValueMatch:
     value: str
     source_text: str
     page_number: int
+    authority_rank: int
+    offset: int
 
 
 def _find_labelled_values(
@@ -173,20 +175,22 @@ def _find_labelled_values(
 ) -> list[_ValueMatch]:
     aliases = CORE_LABELS.aliases[field]
     matches: list[_ValueMatch] = []
-    for table in extraction.tables:
-        if any(cell.page_number in {1, 2} for cell in table.cells):
-            matches.extend(_table_matches(table, aliases))
     for page_number in (1, 2):
         lines = [
             line for line in extraction.lines if line.page_number == page_number
         ]
-        matches.extend(_line_matches(lines, aliases))
-    matches.sort(key=lambda item: item.page_number)
+        matches.extend(_line_matches(lines, aliases, extraction))
+    for table in extraction.tables:
+        if any(cell.page_number in {1, 2} for cell in table.cells):
+            matches.extend(_table_matches(table, aliases, extraction))
+    matches.sort(key=lambda item: (item.authority_rank, item.offset))
     return _deduplicate_matches(matches)
 
 
 def _table_matches(
-    table: ExtractedTable, aliases: frozenset[str]
+    table: ExtractedTable,
+    aliases: frozenset[str],
+    extraction: ExtractedDocument,
 ) -> list[_ValueMatch]:
     values: list[_ValueMatch] = []
     cells = {
@@ -201,7 +205,7 @@ def _table_matches(
         normalized = normalize_label(text)
         inline = _inline_value(text, aliases)
         if inline:
-            values.append(_ValueMatch(inline, text, cell.page_number))
+            values.append(_match(inline, text, cell.page_number, cell.polygon, cell.spans, extraction))
             continue
         if normalized not in aliases:
             continue
@@ -210,33 +214,48 @@ def _table_matches(
         )
         if next_cell is not None:
             values.append(
-                _ValueMatch(
+                _match(
                     next_cell.text.strip(),
                     f"{text} {next_cell.text}",
                     cell.page_number,
+                    cell.polygon,
+                    cell.spans,
+                    extraction,
                 )
             )
     return values
 
 
 def _line_matches(
-    lines: list[ExtractedLine], aliases: frozenset[str]
+    lines: list[ExtractedLine], aliases: frozenset[str], extraction: ExtractedDocument
 ) -> list[_ValueMatch]:
     values: list[_ValueMatch] = []
     for index, line in enumerate(lines):
         inline = _inline_value(line.text, aliases)
         if inline:
-            values.append(_ValueMatch(inline, line.text, line.page_number))
+            values.append(
+                _match(
+                    inline,
+                    line.text,
+                    line.page_number,
+                    line.polygon,
+                    line.spans,
+                    extraction,
+                )
+            )
             continue
         if normalize_label(line.text) not in aliases:
             continue
         if index + 1 < len(lines):
             next_line = lines[index + 1]
             values.append(
-                _ValueMatch(
+                _match(
                     next_line.text.strip(),
                     f"{line.text} {next_line.text}",
                     line.page_number,
+                    line.polygon,
+                    line.spans,
+                    extraction,
                 )
             )
     return values
@@ -252,11 +271,30 @@ def _inline_value(text: str, aliases: frozenset[str]) -> str | None:
     return None
 
 
+def _match(
+    value: str,
+    source_text: str,
+    page_number: int,
+    polygon: tuple[float, ...],
+    spans: tuple,
+    extraction: ExtractedDocument,
+) -> _ValueMatch:
+    vertical = polygon[1] / extraction.page(page_number).height
+    authority_rank = 2 if page_number == 2 else 1 if vertical >= 0.80 else 0
+    return _ValueMatch(
+        value=value,
+        source_text=source_text,
+        page_number=page_number,
+        authority_rank=authority_rank,
+        offset=spans[0].offset,
+    )
+
+
 def _deduplicate_matches(values: list[_ValueMatch]) -> list[_ValueMatch]:
-    seen: set[tuple[int, str]] = set()
+    seen: set[tuple[int, str, int]] = set()
     result: list[_ValueMatch] = []
     for item in values:
-        key = (item.page_number, item.value)
+        key = (item.page_number, item.value, item.offset)
         if key not in seen:
             seen.add(key)
             result.append(item)
@@ -289,7 +327,7 @@ def _extract_title(extraction: ExtractedDocument) -> _ValueMatch:
     title_paragraphs = extraction.page_role_paragraphs(1, "title")
     if title_paragraphs:
         title = max(title_paragraphs, key=lambda item: len(item.text.strip()))
-        return _ValueMatch(title.text.strip(), title.text, 1)
+        return _ValueMatch(title.text.strip(), title.text, 1, 0, title.spans[0].offset)
     candidates = [
         line
         for line in extraction.lines
@@ -319,7 +357,13 @@ def _extract_title(extraction: ExtractedDocument) -> _ValueMatch:
         central or candidates,
         key=lambda item: (len(item.text.strip()), -item.polygon[1]),
     )
-    return _ValueMatch(selected.text.strip(), selected.text, 1)
+    return _ValueMatch(
+        selected.text.strip(),
+        selected.text,
+        1,
+        0,
+        selected.spans[0].offset,
+    )
 
 
 def _normalized_title(value: str) -> str:
@@ -338,28 +382,66 @@ def render_first_two_pages(
             for table in extraction.tables
             if any(cell.page_number == page_number for cell in table.cells)
         ]
-        table_texts = {
-            _comparison_text(cell.text)
+        table_ranges = [
+            (
+                min(
+                    cell.spans[0].offset
+                    for cell in table.cells
+                    if cell.page_number == page_number
+                ),
+                max(
+                    cell.spans[-1].offset + cell.spans[-1].length
+                    for cell in table.cells
+                    if cell.page_number == page_number
+                ),
+                _render_table(table, page_number),
+            )
             for table in tables
-            for cell in table.cells
-            if cell.page_number == page_number
-        }
-        page_blocks = [_render_table(table, page_number) for table in tables]
-        residual = [
-            line.text.strip()
-            for line in extraction.lines
-            if line.page_number == page_number
-            and not _is_decorative(line.text)
-            and _comparison_text(line.text) not in table_texts
         ]
-        if residual:
-            page_blocks.append("\n".join(residual))
-        elif not page_blocks:
+        items: list[tuple[int, str, bool]] = [
+            (start, rendered, True) for start, _, rendered in table_ranges
+        ]
+        for line in extraction.lines:
+            if line.page_number != page_number or _is_decorative(line.text):
+                continue
+            overlaps = [
+                rendered
+                for start, end, rendered in table_ranges
+                if line.spans[0].offset < end
+                and line.spans[-1].offset + line.spans[-1].length > start
+            ]
+            if overlaps and any(
+                _comparison_text(line.text)
+                in {
+                    _comparison_text(cell.text)
+                    for table in tables
+                    for cell in table.cells
+                    if cell.page_number == page_number
+                }
+                for _ in overlaps
+            ):
+                continue
+            items.append((line.spans[0].offset, line.text.strip(), False))
+        page_blocks: list[str] = []
+        line_block: list[str] = []
+        for _, rendered, is_table in sorted(items, key=lambda item: item[0]):
+            if is_table:
+                if line_block:
+                    page_blocks.append("\n".join(line_block))
+                    line_block = []
+                page_blocks.append(rendered)
+            else:
+                line_block.append(rendered)
+        if line_block:
+            page_blocks.append("\n".join(line_block))
+        if not page_blocks:
             raise DirectiveMetadataError(
                 f"Page {page_number} has no preservable metadata-region content"
             )
         blocks.append(f"### Page {page_number}\n\n" + "\n\n".join(page_blocks))
-        if tables and residual:
+        if tables and any(
+            line.page_number == page_number for line in extraction.lines
+        ):
             findings.append(
                 ReviewFinding(
                     code="metadata_region_mixed_layout",

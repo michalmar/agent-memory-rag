@@ -3,11 +3,66 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from azure.cosmos import exceptions
 
+from directive_ingestion.document_intelligence import DocumentIntelligenceExtractor
 from directive_ingestion.mandate_projection import MandateRepository
 from directive_ingestion.reconcile import DirectiveIngestionRunner
+
+
+class _Credential:
+    async def get_token(self, scope: str) -> SimpleNamespace:
+        assert scope
+        return SimpleNamespace(token="test-token")
+
+
+@pytest.mark.asyncio
+async def test_document_intelligence_uses_acquired_bearer_token() -> None:
+    class RecordingExtractor(DocumentIntelligenceExtractor):
+        async def _request_with_retry(self, method, url, **kwargs):
+            assert method == "POST"
+            authorization = kwargs["headers"]["Authorization"]
+            assert authorization.startswith("Bearer ")
+            assert authorization.endswith("test-token")
+            kwargs["headers"]["Authorization"] = "Bearer " + "test-token"
+            assert kwargs["headers"]["Authorization"] == "Bearer test-token"
+            kwargs["headers"]["Authorization"] = "******"
+            assert kwargs["headers"]["Authorization"] == (
+                "Bearer test-token"
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "analyzeResult": {
+                        "content": "Test",
+                        "pages": [
+                            {
+                                "pageNumber": 1,
+                                "width": 10,
+                                "height": 10,
+                                "spans": [{"offset": 0, "length": 4}],
+                                "lines": [],
+                            }
+                        ],
+                        "paragraphs": [],
+                        "tables": [],
+                    }
+                },
+            )
+
+    extractor = RecordingExtractor(
+        "https://document.example.com",
+        "2024-11-30",
+        _Credential(),
+    )
+    try:
+        result = await extractor.extract(b"%PDF-test")
+    finally:
+        await extractor.close()
+
+    assert result.total_pages == 1
 
 
 @pytest.mark.asyncio
