@@ -292,6 +292,30 @@ class DirectiveCatalogRepository:
             for bundle in await self.list_published_versions()
         ]
 
+    async def remove_absent_versions(
+        self, expected: set[tuple[str, str]]
+    ) -> list[PublishedDirectiveVersion]:
+        """Delete retired versions and current pointers absent from this corpus."""
+        retired = [
+            bundle
+            for bundle in await self.list_published_versions()
+            if (bundle.directive_id, bundle.directive_version_id) not in expected
+        ]
+        for bundle in retired:
+            current = await self.get_current(bundle.directive_id)
+            if (
+                current
+                and current.get("directive_version_id")
+                == bundle.directive_version_id
+            ):
+                await self._container.delete_item(
+                    item="current", partition_key=bundle.directive_id
+                )
+            await self._container.delete_item(
+                item=bundle.id, partition_key=bundle.directive_id
+            )
+        return retired
+
     async def list_published_version_labels(self) -> set[tuple[str, str]]:
         values: set[tuple[str, str]] = set()
         query = (

@@ -45,3 +45,36 @@ async def test_catalog_publication_failure_retires_staged_search_chunks() -> Non
         await runner._publish_documents([item], [], "run")
 
     runner.search.retire_chunks.assert_awaited_once_with(item.search_chunks)
+
+
+@pytest.mark.asyncio
+async def test_activation_failure_retires_every_new_generation() -> None:
+    first = SimpleNamespace(
+        bundle=SimpleNamespace(run_id="run"),
+        canonical=SimpleNamespace(relations=(), metadata=SimpleNamespace()),
+        search_chunks=["first"],
+    )
+    second = SimpleNamespace(
+        bundle=SimpleNamespace(run_id="run"),
+        canonical=SimpleNamespace(relations=(), metadata=SimpleNamespace()),
+        search_chunks=["second"],
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.search = SimpleNamespace(
+        publish_chunks=AsyncMock(),
+        validate_published=AsyncMock(),
+        reconcile_current=AsyncMock(side_effect=RuntimeError("activation failed")),
+        reconcile_generation=AsyncMock(),
+        retire_chunks=AsyncMock(),
+    )
+    runner.catalog = SimpleNamespace(
+        publish_version=AsyncMock(),
+        validate_published=AsyncMock(),
+        activate_current=AsyncMock(),
+    )
+
+    with pytest.raises(RuntimeError, match="activation failed"):
+        await runner.publish_documents([first, second])
+
+    assert runner.search.retire_chunks.await_args_list[0].args == (["first"],)
+    assert runner.search.retire_chunks.await_args_list[1].args == (["second"],)

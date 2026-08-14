@@ -85,7 +85,7 @@ class SourceStateRepository:
         metadata: DirectiveMetadata,
         artifact_generation_id: str,
     ) -> None:
-        await self._blobs.put_json(
+        await self._blobs.replace_json(
             self.blob_name(source, metadata.processing_hash),
             {
                 "type": "source_state",
@@ -100,3 +100,27 @@ class SourceStateRepository:
                 "publication_state": "published",
             },
         )
+
+    async def prune(
+        self, expected: set[tuple[str, str]]
+    ) -> None:
+        """Remove state records whose filename/hash identity left the corpus."""
+        names = await self._blobs.list_names("source-state/")
+        stale: set[str] = set()
+        for name in names:
+            try:
+                value = await self._blobs.get_json(name)
+            except RuntimeError:
+                stale.add(name)
+                continue
+            if value is None:
+                continue
+            filename = value.get("source_filename")
+            source_hash = value.get("source_hash")
+            if not isinstance(filename, str) or not isinstance(source_hash, str):
+                stale.add(name)
+                continue
+            if (filename, source_hash) not in expected:
+                stale.add(name)
+        if stale:
+            await self._blobs.delete_names(stale)

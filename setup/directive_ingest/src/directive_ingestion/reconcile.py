@@ -276,9 +276,9 @@ class DirectiveIngestionRunner:
             raise RuntimeError(
                 "Duplicate published directive versions were found"
             )
-        if not set(source_index).issubset(bundle_index):
+        if set(source_index) != set(bundle_index):
             raise RuntimeError(
-                "The source corpus contains unpublished directive versions"
+                "Source-state versions do not exactly match published versions"
             )
         for identity, state in source_index.items():
             if (
@@ -343,6 +343,12 @@ class DirectiveIngestionRunner:
                 "Published manifests reference missing artifacts: "
                 + ", ".join(missing)
             )
+        extras = sorted(existing_artifacts - required_artifacts)
+        if extras:
+            raise RuntimeError(
+                "Artifacts exist outside the validated source corpus: "
+                + ", ".join(extras)
+            )
 
         search = await self.search.verification_summary()
         if (
@@ -368,11 +374,14 @@ class DirectiveIngestionRunner:
 
         return {
             "success": True,
-            "execution_id": run_id,
+            "verify_execution_id": run_id,
             "environment": _safe_environment(self.config),
             "processing_version": self.config.processing_version,
             "processing_hash": self.config.processing_hash,
             "search_index": self.config.search_index,
+            "source_inventory_digest": _public_record_digest(
+                _source_inventory(sources)
+            ),
             "source_versions": len(sources),
             "directive_ids": len(directive_ids),
             "current_versions": len(current),
@@ -417,38 +426,30 @@ class DirectiveIngestionRunner:
             self.config.azure_tenant_id,
             known_ids,
         )
-        warning_codes = sorted(
-            {
-                finding.code
-                for item in metadata
-                if item.extraction is not None
-                for finding in parse_canonical(
-                    item.source,
-                    item.extraction,
-                    self.config.processing_hash,
-                ).findings
-                if finding.severity == "warning"
-            }
-        )
+        warnings = _validation_warnings(metadata, self.config.processing_hash)
+        source_inventory = _source_inventory(sources)
         payload = {
-            "execution_id": execution_id,
+            "validation_execution_id": execution_id,
             "environment": _safe_environment(self.config),
             "processing_version": self.config.processing_version,
             "processing_hash": self.config.processing_hash,
             "search_index": self.config.search_index,
             "source_count": len(sources),
             "directive_count": len(known_ids),
-            "directive_ids": sorted(known_ids),
+            "normalized_directive_ids": sorted(known_ids),
             "directive_version_ids": sorted(
                 item.metadata.directive_version_id for item in metadata
             ),
             "mandate_count": len(mandates.assignments),
             "mandate_user_count": mandates.user_count,
-            "warning_codes": warning_codes,
-            "warning_count": len(warning_codes),
+            "warnings": warnings,
+            "warning_count": len(warnings),
             "failures": [],
+            "source_inventory_digest": _public_record_digest(source_inventory),
         }
-        payload["validation_digest"] = _public_record_digest(payload)
+        payload["validation_digest"] = _public_record_digest(
+            {"payload": payload, "source_inventory": source_inventory}
+        )
         return payload
 
     async def run_daily(
@@ -476,11 +477,12 @@ class DirectiveIngestionRunner:
             await self.search.ensure_resources()
             await self.stage_documents(prepared)
             await self.publish_documents(prepared)
+        if prepared:
+            await self.record_source_states(prepared)
+        await self.reconcile_exact_corpus(metadata)
         snapshot, mandate_changed = await self.mandates.publish(
             parsed_mandates, run_id
         )
-        if prepared:
-            await self.record_source_states(prepared)
         result = ReconcileResult(
             run_id=run_id,
             source_count=len(sources),
@@ -522,6 +524,7 @@ class DirectiveIngestionRunner:
             await self.stage_documents(prepared)
             await self.publish_documents(prepared)
             await self.record_source_states(prepared)
+        await self.reconcile_exact_corpus(metadata)
         result = ReconcileResult(
             run_id=run_id,
             source_count=len(sources),
@@ -612,8 +615,10 @@ class DirectiveIngestionRunner:
                         source_state=None,
                     )
                 )
-            except (httpx.HTTPError, RuntimeError, TimeoutError, ValueError) as exc:
+            except ValueError as exc:
                 failures.append((source, _safe_failure_code(exc)))
+            except (APIError, httpx.HTTPError, RuntimeError, TimeoutError):
+                raise
         if failures:
             for source, error in failures:
                 await self.blobs.quarantine(
@@ -680,6 +685,7 @@ class DirectiveIngestionRunner:
     ) -> list[PreparedDirective]:
         """Pass two: model work is permitted only after corpus validation."""
         prepared: list[PreparedDirective] = []
+        failures: list[tuple[SourceDocument, str]] = []
         for item in metadata:
             if not item.changed:
                 continue
@@ -718,7 +724,7 @@ class DirectiveIngestionRunner:
                 )
                 prepared.append(
                     PreparedDirective(
-                        source=source,
+                        source=item.source,
                         canonical=canonical,
                         text_chunks=text_chunks,
                         search_chunks=search_chunks,
@@ -729,14 +735,10 @@ class DirectiveIngestionRunner:
                 )
                 if canonical.metadata != item.metadata:
                     raise RuntimeError("Canonical metadata changed after validation")
-            except (
-                APIError,
-                httpx.HTTPError,
-                RuntimeError,
-                TimeoutError,
-                ValueError,
-            ) as exc:
+            except ValueError as exc:
                 failures.append((item.source, _safe_failure_code(exc)))
+            except (APIError, httpx.HTTPError, RuntimeError, TimeoutError):
+                raise
         if failures:
             for source, error in failures:
                 await self.blobs.quarantine(
@@ -761,8 +763,8 @@ class DirectiveIngestionRunner:
             )
 
     async def publish_documents(self, prepared: list[PreparedDirective]) -> None:
-        for item in prepared:
-            try:
+        try:
+            for item in prepared:
                 await self.search.publish_chunks(item.search_chunks)
                 await self.search.validate_published(
                     item.canonical, len(item.search_chunks)
@@ -771,21 +773,17 @@ class DirectiveIngestionRunner:
                     item.bundle,
                     item.canonical.relations,
                 )
-            except (
-                RuntimeError,
-                cosmos_exceptions.CosmosHttpResponseError,
-            ):
-                await self.search.retire_chunks(item.search_chunks)
-                raise
-            try:
                 await self.catalog.validate_published(item.bundle)
-            except RuntimeError:
+            for item in prepared:
+                await self.catalog.activate_current(
+                    item.canonical.metadata, item.bundle.run_id
+                )
+                await self.search.reconcile_current(item.canonical.metadata)
+                await self.search.reconcile_generation(item.canonical.metadata)
+        except (RuntimeError, cosmos_exceptions.CosmosHttpResponseError):
+            for item in prepared:
                 await self.search.retire_chunks(item.search_chunks)
-                raise
-        for item in prepared:
-            await self.catalog.activate_current(item.canonical.metadata, item.bundle.run_id)
-            await self.search.reconcile_current(item.canonical.metadata)
-            await self.search.reconcile_generation(item.canonical.metadata)
+            raise
 
     async def record_source_states(
         self, prepared: list[PreparedDirective]
@@ -802,6 +800,28 @@ class DirectiveIngestionRunner:
                 item.canonical.metadata,
                 item.bundle.artifact_generation_id,
             )
+
+    async def reconcile_exact_corpus(
+        self, metadata: list[SourceMetadata]
+    ) -> None:
+        """Retire every store record not represented by validated sources."""
+        expected_versions = {
+            (item.metadata.directive_id, item.metadata.directive_version_id)
+            for item in metadata
+        }
+        retired = await self.catalog.remove_absent_versions(expected_versions)
+        for bundle in retired:
+            await self.search.retire_generation(bundle)
+            await self.content.delete_bundle(bundle)
+            await self.blobs.delete_names(
+                {
+                    bundle.artifacts.source_blob_name,
+                    bundle.artifacts.canonical_blob_name,
+                }
+            )
+        await self.source_states.prune(
+            {(item.source.source_name, item.source.source_hash) for item in metadata}
+        )
 
     async def _state_has_live_publication(
         self,
@@ -1143,6 +1163,35 @@ def _safe_failure_code(exc: BaseException) -> str:
     if isinstance(exc, ValueError):
         return "metadata_invalid"
     return "metadata_processing_error"
+
+
+def _source_inventory(sources: list[SourceDocument]) -> list[dict[str, str]]:
+    """Deterministic, content-safe source identity used by validation guards."""
+    return [
+        {"source_name": source.source_name, "source_hash": source.source_hash}
+        for source in sorted(sources, key=lambda item: item.source_name)
+    ]
+
+
+def _validation_warnings(
+    metadata: list[SourceMetadata], processing_hash: str
+) -> list[dict[str, str]]:
+    warnings: set[tuple[str, str]] = set()
+    for item in metadata:
+        if item.extraction is None:
+            continue
+        canonical = parse_canonical(
+            item.source, item.extraction, processing_hash
+        )
+        warnings.update(
+            (finding.code, finding.severity)
+            for finding in canonical.findings
+            if finding.severity == "warning"
+        )
+    return [
+        {"code": code, "severity": severity}
+        for code, severity in sorted(warnings)[:100]
+    ]
 
 
 def _public_record_digest(value: dict[str, object]) -> str:

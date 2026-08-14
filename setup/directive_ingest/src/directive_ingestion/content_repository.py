@@ -119,6 +119,16 @@ class DirectiveContentRepository:
             "split_sections": split_sections,
         }
 
+    async def delete_bundle(self, bundle: PublishedDirectiveVersion) -> None:
+        for section_id, descriptor in bundle.section_content.items():
+            for part_ordinal in range(descriptor.part_count):
+                await self._container.delete_item(
+                    item=section_content_item_id(
+                        bundle.artifact_generation_id, section_id, part_ordinal
+                    ),
+                    partition_key=bundle.directive_version_id,
+                )
+
 
 def _validate_content_record(
     value: dict[str, Any],

@@ -6,6 +6,7 @@ import hashlib
 import json
 from typing import Any
 
+from azure.core import MatchConditions
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.storage.blob import ContentSettings
 from azure.storage.blob.aio import BlobServiceClient
@@ -68,6 +69,38 @@ class BlobArtifactRepository:
         ).encode()
         await self.put_immutable(blob_name, content, "application/json")
 
+    async def replace_json(self, blob_name: str, value: object) -> None:
+        """Replace mutable internal state with an optimistic-concurrency guard."""
+        content = json.dumps(
+            value,
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        ).encode()
+        blob = self._container.get_blob_client(blob_name)
+        try:
+            properties = await blob.get_blob_properties()
+        except ResourceNotFoundError:
+            await self.put_immutable(blob_name, content, "application/json")
+            return
+        etag = getattr(properties, "etag", None)
+        if not isinstance(etag, str) or not etag:
+            raise RuntimeError(f"State artifact is missing an ETag: {blob_name}")
+        try:
+            await blob.upload_blob(
+                content,
+                overwrite=True,
+                etag=etag,
+                match_condition=MatchConditions.IfNotModified,
+                metadata={"content_sha256": hashlib.sha256(content).hexdigest()},
+                content_settings=ContentSettings(content_type="application/json"),
+            )
+        except ResourceExistsError as exc:
+            raise RuntimeError(
+                f"Concurrent source-state replacement prevented at {blob_name}"
+            ) from exc
+
     async def get_json(self, blob_name: str) -> dict[str, Any] | None:
         """Point-read an internal JSON artifact without enumerating its prefix."""
         blob = self._container.get_blob_client(blob_name)
@@ -122,3 +155,7 @@ class BlobArtifactRepository:
 
     async def exists(self, blob_name: str) -> bool:
         return await self._container.get_blob_client(blob_name).exists()
+
+    async def delete_names(self, names: set[str]) -> None:
+        for name in sorted(names):
+            await self._container.delete_blob(name, delete_snapshots="include")

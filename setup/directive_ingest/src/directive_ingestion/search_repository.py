@@ -229,6 +229,14 @@ class DirectiveSearchRepository:
             is_current=False,
         )
 
+    async def retire_generation(self, metadata: DirectiveMetadata) -> None:
+        keys = await self._find_keys(
+            _generation_filter(metadata, publication_state="published")
+        )
+        await self._merge_chunk_state(
+            keys, publication_state="retired", is_current=False
+        )
+
     async def validate_published(
         self, directive: CanonicalDirective, expected_count: int
     ) -> None:
@@ -759,6 +767,17 @@ def _published_current_valid_filter() -> str:
     return (
         "publication_state eq 'published' and is_current eq true "
         "and is_valid eq true"
+    )
+
+
+def _generation_filter(
+    metadata: DirectiveMetadata, *, publication_state: str
+) -> str:
+    return (
+        f"directive_version_id eq '{_odata_string(metadata.directive_version_id)}' "
+        f"and source_hash eq '{_odata_string(metadata.source_hash)}' "
+        f"and processing_hash eq '{_odata_string(metadata.processing_hash)}' "
+        f"and publication_state eq '{publication_state}'"
     )
 
 
