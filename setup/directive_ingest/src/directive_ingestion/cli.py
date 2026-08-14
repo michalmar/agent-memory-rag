@@ -22,6 +22,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers.add_parser("verify")
     subparsers.add_parser("bootstrap")
     subparsers.add_parser("maintenance")
+    subparsers.add_parser("reset-publication-guards")
     validate = subparsers.add_parser("validate")
     validate.add_argument("--source", type=Path)
     validate.add_argument("--mandates", type=Path)
@@ -69,6 +70,9 @@ async def _run(args: argparse.Namespace) -> None:
             print('{"status":"ready"}')
         elif args.command == "maintenance":
             return
+        elif args.command == "reset-publication-guards":
+            await runner.reset_publication_guards()
+            print('{"status":"publication_guards_reset"}')
         elif args.command == "validate":
             result = await runner.validate_inputs(
                 args.source, args.mandates

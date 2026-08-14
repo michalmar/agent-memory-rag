@@ -51,7 +51,10 @@ from .content_repository import DirectiveContentRepository
 from .document_intelligence import DocumentIntelligenceExtractor
 from .integrity import CatalogResetRequiredError, IntegrityValidationError
 from .mandate_projection import MandateRepository, parse_mandates
-from .publication_commit_repository import PublicationCommitRepository
+from .publication_commit_repository import (
+    PublicationCommitRepository,
+    PublicationLock,
+)
 from .search_repository import DirectiveSearchRepository
 from .source_state_repository import (
     PublishedSourceState,
@@ -174,6 +177,16 @@ class ValidationSnapshot:
     @property
     def validation_digest(self) -> str:
         return str(self.payload["validation_digest"])
+
+
+@dataclass
+class PublicationGuard:
+    """Tracks a conditional lock release and an immutable dispatch claim."""
+
+    lock: PublicationLock
+    validation_digest: str
+    claim_etag: str | None = None
+    dispatched: bool = False
 
 
 def _publication_snapshot(
@@ -775,86 +788,106 @@ class DirectiveIngestionRunner:
             approval.validation_digest if approval is not None else None,
             parsed_mandates.checksum if approval is not None else None,
         )
-        prepared = await self.prepare_changed_documents(metadata, run_id)
-        await self._validate_relations(
-            prepared,
-            [item.metadata for item in metadata],
-            known_ids,
+        guard = await self._acquire_publication_guard(
+            run_id, snapshot.validation_digest
         )
-        mandates_current = await self.mandates.is_current(parsed_mandates)
-        replaced: list[PublishedDirectiveVersion] = []
-        mandate_transaction: MandatePublicationSnapshot | None = None
-        if prepared or not mandates_current:
-            await self.search.ensure_resources()
-            replaced, mandate_transaction = await self._publish_transaction(
+        completed = False
+        rollback_handled = False
+        try:
+            prepared = await self.prepare_changed_documents(metadata, run_id)
+            await self._validate_relations(
                 prepared,
-                parsed_mandates if not mandates_current else None,
+                [item.metadata for item in metadata],
+                known_ids,
+            )
+            mandates_current = await self.mandates.is_current(parsed_mandates)
+            replaced: list[PublishedDirectiveVersion] = []
+            mandate_transaction: MandatePublicationSnapshot | None = None
+            cleanup_pending = marker_before is not None
+            if prepared or not mandates_current or cleanup_pending:
+                await self._claim_publication_dispatch(guard)
+                guard.dispatched = True
+            if prepared or not mandates_current:
+                await self.search.ensure_resources()
+                replaced, mandate_transaction = await self._publish_transaction(
+                    prepared,
+                    parsed_mandates if not mandates_current else None,
+                    run_id,
+                    validation_digest=(
+                        approval.validation_digest if approval is not None else None
+                    ),
+                    mandate_checksum=(
+                        parsed_mandates.checksum if approval is not None else None
+                    ),
+                )
+            await self._reconcile_after_publication(
+                metadata,
+                replaced,
                 run_id,
-                validation_digest=(
+                mandate_transaction,
+                marker_before,
+                approval.validation_digest if approval is not None else None,
+                parsed_mandates.checksum if approval is not None else None,
+            )
+            if mandate_transaction is not None:
+                snapshot = mandate_transaction.snapshot
+                cleanup_changed = await self.mandates.cleanup(snapshot.snapshot_id)
+                mandate_changed = mandate_transaction.changed or cleanup_changed
+            elif mandates_current:
+                summary = await self.mandates.validate_exact(parsed_mandates)
+                snapshot = MandateSnapshot(
+                    snapshot_id=str(summary["snapshot_id"]),
+                    checksum=str(summary["checksum"]),
+                    assignment_count=int(summary["assignment_count"]),
+                    user_count=int(summary["user_count"]),
+                    complete=True,
+                )
+                mandate_changed = False
+            elif getattr(self.catalog, "snapshot_version", None) is None:
+                raise RuntimeError("Mandate publication transaction did not complete")
+            if approval is not None:
+                await self._bind_source_state_validation_digest(
+                    metadata, approval.validation_digest, parsed_mandates.checksum
+                )
+            result = ReconcileResult(
+                run_id=run_id,
+                source_count=len(sources),
+                changed_count=len(prepared),
+                skipped_count=len(sources) - len(prepared),
+                chunk_count=sum(
+                    len(item.search_chunks) for item in prepared
+                ),
+                mandate_snapshot_id=snapshot.snapshot_id,
+                mandate_changed=mandate_changed,
+            )
+            await self.verify(
+                expected_validation_digest=(
                     approval.validation_digest if approval is not None else None
-                ),
-                mandate_checksum=(
-                    parsed_mandates.checksum if approval is not None else None
-                ),
+                )
             )
-        await self._reconcile_after_publication(
-            metadata,
-            replaced,
-            run_id,
-            mandate_transaction,
-            marker_before,
-            approval.validation_digest if approval is not None else None,
-            parsed_mandates.checksum if approval is not None else None,
-        )
-        if mandate_transaction is not None:
-            snapshot = mandate_transaction.snapshot
-            cleanup_changed = await self.mandates.cleanup(snapshot.snapshot_id)
-            mandate_changed = mandate_transaction.changed or cleanup_changed
-        elif mandates_current:
-            summary = await self.mandates.validate_exact(parsed_mandates)
-            snapshot = MandateSnapshot(
-                snapshot_id=str(summary["snapshot_id"]),
-                checksum=str(summary["checksum"]),
-                assignment_count=int(summary["assignment_count"]),
-                user_count=int(summary["user_count"]),
-                complete=True,
+            if await self.commits.load() is not None:
+                await self.commits.clear()
+            if prepared or mandate_changed:
+                await self.catalog.record_run(
+                    run_id,
+                    status="succeeded",
+                    source_count=result.source_count,
+                    changed_count=result.changed_count,
+                    skipped_count=result.skipped_count,
+                    chunk_count=result.chunk_count,
+                    mandate_snapshot_id=result.mandate_snapshot_id,
+                )
+            completed = True
+            return result
+        except Exception:
+            rollback_handled = (
+                not guard.dispatched
+                or getattr(self, "_publication_rollback_completed", False)
             )
-            mandate_changed = False
-        elif getattr(self.catalog, "snapshot_version", None) is None:
-            raise RuntimeError("Mandate publication transaction did not complete")
-        if approval is not None:
-            await self._bind_source_state_validation_digest(
-                metadata, approval.validation_digest, parsed_mandates.checksum
-            )
-        result = ReconcileResult(
-            run_id=run_id,
-            source_count=len(sources),
-            changed_count=len(prepared),
-            skipped_count=len(sources) - len(prepared),
-            chunk_count=sum(
-                len(item.search_chunks) for item in prepared
-            ),
-            mandate_snapshot_id=snapshot.snapshot_id,
-            mandate_changed=mandate_changed,
-        )
-        await self.verify(
-            expected_validation_digest=(
-                approval.validation_digest if approval is not None else None
-            )
-        )
-        if await self.commits.load() is not None:
-            await self.commits.clear()
-        if prepared or mandate_changed:
-            await self.catalog.record_run(
-                run_id,
-                status="succeeded",
-                source_count=result.source_count,
-                changed_count=result.changed_count,
-                skipped_count=result.skipped_count,
-                chunk_count=result.chunk_count,
-                mandate_snapshot_id=result.mandate_snapshot_id,
-            )
-        return result
+            raise
+        finally:
+            if completed or rollback_handled:
+                await self._release_publication_guard(guard)
 
     async def reconcile_documents(
         self, source_directory: Path | None = None
@@ -866,44 +899,63 @@ class DirectiveIngestionRunner:
         await self._validate_and_quarantine(metadata, run_id)
         marker_before = await self.commits.load()
         self._validate_pending_marker_corpus(metadata, marker_before)
-        prepared = await self.prepare_changed_documents(metadata, run_id)
-        await self._validate_relations(
-            prepared,
-            [item.metadata for item in metadata],
-            {item.metadata.directive_id for item in metadata},
+        guard = await self._acquire_publication_guard(
+            run_id, _document_validation_digest(metadata)
         )
-        replaced: list[PublishedDirectiveVersion] = []
-        if prepared:
-            await self.search.ensure_resources()
-            replaced, _ = await self._publish_transaction(prepared, None, run_id)
-        await self._reconcile_after_publication(
-            metadata, replaced, run_id, None, marker_before
-        )
-        await self.verify()
-        if await self.commits.load() is not None:
-            await self.commits.clear()
-        result = ReconcileResult(
-            run_id=run_id,
-            source_count=len(sources),
-            changed_count=len(prepared),
-            skipped_count=len(sources) - len(prepared),
-            chunk_count=sum(
-                len(item.search_chunks) for item in prepared
-            ),
-            mandate_snapshot_id=None,
-            mandate_changed=False,
-        )
-        if prepared:
-            await self.catalog.record_run(
-                run_id,
-                status="succeeded",
-                source_count=result.source_count,
-                changed_count=result.changed_count,
-                skipped_count=result.skipped_count,
-                chunk_count=result.chunk_count,
-                mandate_snapshot_id=None,
+        completed = False
+        rollback_handled = False
+        try:
+            prepared = await self.prepare_changed_documents(metadata, run_id)
+            await self._validate_relations(
+                prepared,
+                [item.metadata for item in metadata],
+                {item.metadata.directive_id for item in metadata},
             )
-        return result
+            replaced: list[PublishedDirectiveVersion] = []
+            if prepared or marker_before is not None:
+                await self._claim_publication_dispatch(guard)
+                guard.dispatched = True
+            if prepared:
+                await self.search.ensure_resources()
+                replaced, _ = await self._publish_transaction(prepared, None, run_id)
+            await self._reconcile_after_publication(
+                metadata, replaced, run_id, None, marker_before
+            )
+            await self.verify()
+            if await self.commits.load() is not None:
+                await self.commits.clear()
+            result = ReconcileResult(
+                run_id=run_id,
+                source_count=len(sources),
+                changed_count=len(prepared),
+                skipped_count=len(sources) - len(prepared),
+                chunk_count=sum(
+                    len(item.search_chunks) for item in prepared
+                ),
+                mandate_snapshot_id=None,
+                mandate_changed=False,
+            )
+            if prepared:
+                await self.catalog.record_run(
+                    run_id,
+                    status="succeeded",
+                    source_count=result.source_count,
+                    changed_count=result.changed_count,
+                    skipped_count=result.skipped_count,
+                    chunk_count=result.chunk_count,
+                    mandate_snapshot_id=None,
+                )
+            completed = True
+            return result
+        except Exception:
+            rollback_handled = (
+                not guard.dispatched
+                or getattr(self, "_publication_rollback_completed", False)
+            )
+            raise
+        finally:
+            if completed or rollback_handled:
+                await self._release_publication_guard(guard)
 
     async def _reconcile_after_publication(
         self,
@@ -933,6 +985,7 @@ class DirectiveIngestionRunner:
                     mandates is not None and mandates.changed
                 ):
                     await self._rollback_publication(snapshots, mandates)
+                    self._publication_rollback_completed = True
             raise
 
     def _validate_pending_marker_corpus(
@@ -1103,9 +1156,57 @@ class DirectiveIngestionRunner:
             raise RuntimeError(
                 "Cannot publish mandates before directives are published"
             )
-        return await self._publish_mandates(
-            mandate_csv or self.config.mandate_csv, known_ids, run_id
+        parsed = parse_mandates(
+            mandate_csv or self.config.mandate_csv,
+            self.config.azure_tenant_id,
+            known_ids,
         )
+        guard = await self._acquire_publication_guard(run_id, parsed.checksum)
+        completed = False
+        rollback_handled = False
+        try:
+            if not await self.mandates.is_current(parsed):
+                await self._claim_publication_dispatch(guard)
+                guard.dispatched = True
+            snapshot, changed = await self.mandates.publish(parsed, run_id)
+            completed = True
+            return snapshot, changed
+        except Exception:
+            # MandateRepository.publish only dispatches after its candidate has
+            # been staged; its standalone compatibility path has no rollback.
+            rollback_handled = not guard.dispatched
+            raise
+        finally:
+            if completed or rollback_handled:
+                await self._release_publication_guard(guard)
+
+    async def reset_publication_guards(self) -> None:
+        """Explicitly clear stale global publication locks and claims."""
+        await self.commits.reset_publication_guards()
+
+    async def _acquire_publication_guard(
+        self, run_id: str, validation_digest: str
+    ) -> PublicationGuard:
+        lock = await self.commits.acquire_publication_lock(
+            run_id, validation_digest
+        )
+        return PublicationGuard(lock, validation_digest)
+
+    async def _claim_publication_dispatch(
+        self, guard: PublicationGuard
+    ) -> None:
+        guard.claim_etag = await self.commits.create_publication_claim(
+            guard.lock.run_id, guard.validation_digest
+        )
+
+    async def _release_publication_guard(
+        self, guard: PublicationGuard
+    ) -> None:
+        if guard.claim_etag is not None and not guard.dispatched:
+            await self.commits.discard_undispatched_claim(
+                guard.validation_digest, guard.claim_etag
+            )
+        await self.commits.release_publication_lock(guard.lock)
 
     async def discover_sources(
         self,
@@ -1475,6 +1576,7 @@ class DirectiveIngestionRunner:
         list[PublishedDirectiveVersion], MandatePublicationSnapshot | None
     ]:
         """Preserve stable catalog slots and current pointers on any late failure."""
+        self._publication_rollback_completed = False
         snapshots: list[PublicationSnapshot] = []
         for item in prepared:
             snapshot_method = getattr(self.catalog, "snapshot_version", None)
@@ -1601,6 +1703,7 @@ class DirectiveIngestionRunner:
             )
         except Exception:
             await self._rollback_publication(snapshots, mandate_snapshot)
+            self._publication_rollback_completed = True
             raise
         self._publication_snapshots = snapshots
         replaced = {
@@ -2712,6 +2815,28 @@ def _validation_warnings(
         {"code": code, "severity": severity}
         for code, severity in sorted(warnings)[:100]
     ]
+
+
+def _document_validation_digest(metadata: list[SourceMetadata]) -> str:
+    """Provide the document-only command a stable claim identity."""
+    return _public_record_digest(
+        [
+            {
+                "directive_id": item.metadata.directive_id,
+                "directive_version_id": item.metadata.directive_version_id,
+                "processing_hash": item.metadata.processing_hash,
+                "source_hash": item.source.source_hash,
+                "source_name": item.source.source_name,
+            }
+            for item in sorted(
+                metadata,
+                key=lambda value: (
+                    value.metadata.directive_id,
+                    value.metadata.directive_version_id,
+                ),
+            )
+        ]
+    )
 
 
 def _public_record_digest(value: object) -> str:

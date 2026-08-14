@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from azure.core.exceptions import ResourceModifiedError, ResourceNotFoundError
 from directive_contracts import PublishedDirectiveVersion
 
 from .blob_repository import BlobArtifactRepository
 
 _MARKER_NAME = "publication-commit/current.json"
+_LOCK_NAME = "publication-lock/current.json"
+_LOCK_PREFIX = "publication-lock/"
+_CLAIM_PREFIX = "publication-claims/"
 
 
 @dataclass(frozen=True)
@@ -18,6 +22,19 @@ class PublicationCommit:
     expected_state_names: frozenset[str]
     validation_digest: str | None = None
     mandate_checksum: str | None = None
+
+
+@dataclass(frozen=True)
+class PublicationLock:
+    """The single-writer lease retained while a publication is in flight."""
+
+    run_id: str
+    validation_digest: str
+    etag: str
+
+
+class PublicationResetRequiredError(RuntimeError):
+    """A durable publication guard requires an explicit operator reset."""
 
 
 class PublicationCommitRepository:
@@ -112,6 +129,74 @@ class PublicationCommitRepository:
 
     async def clear(self) -> None:
         await self._blobs.delete_names({_MARKER_NAME})
+
+    async def acquire_publication_lock(
+        self, run_id: str, validation_digest: str
+    ) -> PublicationLock:
+        """Create the global lock; an existing lock is never assumed safe."""
+        payload = {
+            "type": "publication_lock",
+            "run_id": run_id,
+            "validation_digest": validation_digest,
+        }
+        try:
+            etag = await self._blobs.replace_json(
+                _LOCK_NAME, payload, require_absent=True
+            )
+        except RuntimeError as exc:
+            raise PublicationResetRequiredError(
+                "Publication lock is present; explicit reset-required"
+            ) from exc
+        return PublicationLock(run_id, validation_digest, etag)
+
+    async def create_publication_claim(
+        self, run_id: str, validation_digest: str
+    ) -> str:
+        """Durably reserve a validation identity before dispatching writes."""
+        if not validation_digest:
+            raise ValueError("Publication claim requires a validation digest")
+        name = f"{_CLAIM_PREFIX}{validation_digest}.json"
+        payload = {
+            "type": "publication_claim",
+            "run_id": run_id,
+            "validation_digest": validation_digest,
+        }
+        try:
+            return await self._blobs.replace_json(
+                name, payload, require_absent=True
+            )
+        except RuntimeError as exc:
+            raise PublicationResetRequiredError(
+                "Publication claim already exists; explicit reset-required"
+            ) from exc
+
+    async def release_publication_lock(self, lock: PublicationLock) -> None:
+        """Release only the lock instance owned by this run."""
+        try:
+            await self._blobs.delete_if_etag(_LOCK_NAME, lock.etag)
+        except (RuntimeError, ResourceModifiedError, ResourceNotFoundError) as exc:
+            raise PublicationResetRequiredError(
+                "Publication lock changed; explicit reset-required"
+            ) from exc
+
+    async def discard_undispatched_claim(
+        self, validation_digest: str, claim_etag: str
+    ) -> None:
+        """Remove a claim only when no publication dispatch has begun."""
+        try:
+            await self._blobs.delete_if_etag(
+                f"{_CLAIM_PREFIX}{validation_digest}.json", claim_etag
+            )
+        except (RuntimeError, ResourceModifiedError, ResourceNotFoundError) as exc:
+            raise PublicationResetRequiredError(
+                "Publication claim changed; explicit reset-required"
+            ) from exc
+
+    async def reset_publication_guards(self) -> None:
+        """Explicitly purge stale locks and durable claims."""
+        names = await self._blobs.list_names(_LOCK_PREFIX)
+        names.update(await self._blobs.list_names(_CLAIM_PREFIX))
+        await self._blobs.delete_names(names)
 
 
 def _is_checksum(value: object) -> bool:

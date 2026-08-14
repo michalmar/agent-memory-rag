@@ -19,6 +19,7 @@ from directive_ingestion.canonical import CanonicalDirective, ParsedSection
 from directive_ingestion.metadata import DirectiveMetadataCandidate
 from directive_ingestion.publication_commit_repository import (
     PublicationCommitRepository,
+    PublicationResetRequiredError,
 )
 from directive_ingestion.reconcile import (
     DirectiveIngestionRunner,
@@ -654,7 +655,7 @@ class Harness:
 
 
 @pytest.mark.asyncio
-async def test_initial_publication_then_noop_daily_run_is_write_free(
+async def test_initial_publication_then_noop_daily_run_only_cycles_global_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     harness = Harness(monkeypatch)
@@ -681,12 +682,81 @@ async def test_initial_publication_then_noop_daily_run_is_write_free(
     assert noop.changed_count == 0
     assert noop.skipped_count == 1
     assert harness.search.ensure_count == 1
+    assert harness.blobs.write_count == writes_before_noop[0] + 2
     assert (
-        harness.blobs.write_count,
         harness.catalog.write_count,
         harness.content.write_count,
         harness.search.write_count,
-    ) == writes_before_noop
+    ) == writes_before_noop[1:]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_run_with_any_validation_digest_fails_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    await harness.runner.commits.acquire_publication_lock(
+        "first-run", "a" * 64
+    )
+    writes_before_second_run = (
+        harness.catalog.write_count,
+        harness.content.write_count,
+        harness.search.write_count,
+    )
+
+    with pytest.raises(PublicationResetRequiredError, match="reset-required"):
+        await harness.runner.run_daily()
+
+    assert (
+        harness.catalog.write_count,
+        harness.content.write_count,
+        harness.search.write_count,
+    ) == writes_before_second_run
+    assert await harness.blobs.list_names("publication-claims/") == set()
+
+
+@pytest.mark.asyncio
+async def test_mandate_prune_remains_inside_global_publication_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    validation = await harness.runner.validate_inputs()
+    observed: list[str] = []
+
+    async def cleanup(snapshot_id: str) -> bool:
+        lock = await harness.blobs.get_json("publication-lock/current.json")
+        assert lock is not None
+        assert lock["validation_digest"] == validation["validation_digest"]
+        assert await harness.blobs.list_names("publication-claims/")
+        observed.append(snapshot_id)
+        return False
+
+    harness.runner.mandates.cleanup = cleanup
+    await harness.runner.run_daily()
+
+    assert observed == ["mandates-" + "b" * 64]
+    assert await harness.blobs.list_names("publication-lock/") == set()
+    assert await harness.blobs.list_names("publication-claims/") == {
+        f"publication-claims/{validation['validation_digest']}.json"
+    }
+
+
+@pytest.mark.asyncio
+async def test_crash_stale_lock_requires_explicit_reset_that_purges_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    await harness.runner.commits.acquire_publication_lock("crashed", "c" * 64)
+    await harness.runner.commits.create_publication_claim("crashed", "c" * 64)
+
+    with pytest.raises(PublicationResetRequiredError, match="reset-required"):
+        await harness.runner.run_daily()
+
+    await harness.runner.reset_publication_guards()
+
+    assert await harness.blobs.list_names("publication-lock/") == set()
+    assert await harness.blobs.list_names("publication-claims/") == set()
+    await harness.runner.run_daily()
 
 
 @pytest.mark.asyncio
@@ -805,6 +875,7 @@ async def test_pre_marker_rollback_then_post_marker_retry_preserves_candidate(
     assert await harness.states.list_names() == set()
     assert await harness.runner.commits.load() is None
 
+    await harness.runner.reset_publication_guards()
     await harness.runner.reconcile_documents()
     old_bundle = next(iter(harness.catalog.bundles.values()))
     old_generation = old_bundle.artifact_generation_id
@@ -835,6 +906,7 @@ async def test_pre_marker_rollback_then_post_marker_retry_preserves_candidate(
         for chunk in harness.search.chunks.values()
     )
 
+    await harness.runner.reset_publication_guards()
     await harness.runner.reconcile_documents()
 
     assert await harness.runner.commits.load() is None

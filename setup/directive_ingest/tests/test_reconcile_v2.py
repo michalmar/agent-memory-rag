@@ -1229,7 +1229,14 @@ async def test_run_daily_unchanged_corpus_performs_no_publication_writes() -> No
     runner.reconcile_exact_corpus = AsyncMock()
     runner.verify = AsyncMock()
     runner.catalog = SimpleNamespace(record_run=AsyncMock())
-    runner.commits = SimpleNamespace(load=AsyncMock(return_value=None), clear=AsyncMock())
+    runner.commits = SimpleNamespace(
+        load=AsyncMock(return_value=None),
+        clear=AsyncMock(),
+        acquire_publication_lock=AsyncMock(
+            return_value=SimpleNamespace(run_id="run", etag="lock-etag")
+        ),
+        release_publication_lock=AsyncMock(),
+    )
     import directive_ingestion.reconcile as reconcile_module
 
     original_mandates = reconcile_module.parse_mandates
@@ -1300,7 +1307,15 @@ async def test_mandate_only_activation_is_reported_as_a_change() -> None:
     runner._reconcile_after_publication = AsyncMock()
     runner.verify = AsyncMock()
     runner.catalog = SimpleNamespace(record_run=AsyncMock())
-    runner.commits = SimpleNamespace(load=AsyncMock(return_value=None), clear=AsyncMock())
+    runner.commits = SimpleNamespace(
+        load=AsyncMock(return_value=None),
+        clear=AsyncMock(),
+        acquire_publication_lock=AsyncMock(
+            return_value=SimpleNamespace(run_id="run", etag="lock-etag")
+        ),
+        create_publication_claim=AsyncMock(return_value="claim-etag"),
+        release_publication_lock=AsyncMock(),
+    )
     import directive_ingestion.reconcile as reconcile_module
 
     original_mandates = reconcile_module.parse_mandates
