@@ -27,6 +27,7 @@ SOURCE_COUNT=0
 STARTED_EXECUTIONS=()
 COSMOS_PLAN_FILE=""
 COSMOS_PLAN_JSON_FILE=""
+MAINTENANCE_TOUCHED=false
 
 read -r -a AZ_CMD <<<"$AZ_BIN"
 read -r -a TERRAFORM_CMD <<<"$TERRAFORM_BIN"
@@ -56,10 +57,12 @@ cleanup() {
   local status=$?
   trap - EXIT
   set +e
-  if [[ "$status" -ne 0 && -n "${JOB_NAME:-}" ]]; then
+  if [[ "$status" -ne 0 && -n "${JOB_NAME:-}" &&
+    ( "$MAINTENANCE_TOUCHED" == true || "${#STARTED_EXECUTIONS[@]}" -gt 0 ) ]]; then
     stop_started_executions || true
   fi
-  if [[ -n "${JOB_NAME:-}" ]]; then
+  if [[ -n "${JOB_NAME:-}" &&
+    ( "$MAINTENANCE_TOUCHED" == true || "${#STARTED_EXECUTIONS[@]}" -gt 0 ) ]]; then
     "${AZ_CMD[@]}" containerapp job update \
       --name "$JOB_NAME" \
       --resource-group "$RG" \
@@ -95,6 +98,46 @@ sha256_file() {
   else
     die "shasum or sha256sum is required to bind the confirmation token"
   fi
+}
+
+extract_producer_record() {
+  local raw_file="$1"
+  local output_file="$2"
+  python3 - "$raw_file" "$output_file" <<'PY'
+import json
+import pathlib
+import sys
+
+raw_path = pathlib.Path(sys.argv[1])
+output_path = pathlib.Path(sys.argv[2])
+text = raw_path.read_text(encoding="utf-8", errors="replace")
+decoder = json.JSONDecoder()
+records = []
+offset = 0
+
+while True:
+    start = text.find("{", offset)
+    if start < 0:
+        break
+    try:
+        value, end = decoder.raw_decode(text, start)
+    except json.JSONDecodeError:
+        offset = start + 1
+        continue
+    offset = end
+    if isinstance(value, dict) and value.get("success") is True:
+        records.append(value)
+
+if len(records) != 1:
+    raise SystemExit(1)
+
+serialized = json.dumps(
+    records[0], ensure_ascii=False, separators=(",", ":"), sort_keys=True
+)
+if len(serialized.encode("utf-8")) > 65536:
+    raise SystemExit(1)
+output_path.write_text(serialized + "\n", encoding="utf-8")
+PY
 }
 
 stop_started_executions() {
@@ -512,6 +555,7 @@ refresh_active_executions() {
 
 enter_maintenance_mode() {
   echo "==> Putting directive ingestion job into nonpublishing maintenance mode"
+  MAINTENANCE_TOUCHED=true
   "${AZ_CMD[@]}" containerapp job update \
     --name "$JOB_NAME" \
     --resource-group "$RG" \
@@ -609,9 +653,10 @@ recreate_cosmos_containers() {
     --argjson allowed "$allowed_addresses" \
     '
       (.resource_changes // []) as $changes |
-      ($changes | map(select(.address as $address |
+      ($changes | map(select(.change.actions != ["no-op"]))) as $actionable |
+      ($actionable | map(select(.address as $address |
         any($allowed[]; . == $address)))) as $targets |
-      ($changes | map(select(.address as $address |
+      ($actionable | map(select(.address as $address |
         all($allowed[]; . != $address)))) as $unexpected |
       ($targets | length == 3) and
       ($unexpected | length == 0) and
@@ -758,22 +803,14 @@ delete_v2_index() {
 assert_verify_execution_contract() {
   local execution_name="$1"
   local expected_image="$2"
-  local actual_command actual_args actual_image
-  actual_command="$(
+  local container_json actual_image
+  container_json="$(
     "${AZ_CMD[@]}" containerapp job execution show \
       --name "$JOB_NAME" \
       --resource-group "$RG" \
       --job-execution-name "$execution_name" \
-      --query "join(' ', properties.template.containers[?name=='directive-ingestion'].command)" \
-      --output tsv
-  )"
-  actual_args="$(
-    "${AZ_CMD[@]}" containerapp job execution show \
-      --name "$JOB_NAME" \
-      --resource-group "$RG" \
-      --job-execution-name "$execution_name" \
-      --query "join(' ', properties.template.containers[?name=='directive-ingestion'].args)" \
-      --output tsv
+      --query "properties.template.containers[?name=='directive-ingestion'] | [0]" \
+      --output json
   )"
   actual_image="$(
     "${AZ_CMD[@]}" containerapp job execution show \
@@ -783,7 +820,10 @@ assert_verify_execution_contract() {
       --query "properties.template.containers[?name=='directive-ingestion'].image | [0]" \
       --output tsv
   )"
-  [[ "$actual_command" == "directive-ingest" && "$actual_args" == "verify" ]] || \
+  jq -e '
+    (.command | if type == "array" then . else [.] end) == ["directive-ingest"] and
+    (.args | if type == "array" then . else [.] end) == ["verify"]
+  ' <<<"$container_json" >/dev/null || \
     die "Fresh execution did not use the exact directive-ingest verify command"
   [[ "$actual_image" == "$expected_image" ]] || \
     die "Fresh verification execution image changed from the pinned live image"
@@ -844,16 +884,12 @@ start_fresh_verify() {
     --resource-group "$RG" \
     --container directive-ingestion \
     --execution "$execution_name" \
-    --tail 300 >"$log_file"
-  jq -s -e '
-    map(select(type == "object" and has("success"))) |
-    length == 1
-  ' < <(sed -n '/^[[:space:]]*{.*}[[:space:]]*$/p' "$log_file") >/dev/null || {
+    --tail 300 \
+    --format text >"$log_file"
+  extract_producer_record "$log_file" "$log_file.record" || {
     rm -f "$log_file"
     die "Fresh v2 verify did not emit exactly one complete producer record"
   }
-  sed -n '/^[[:space:]]*{.*}[[:space:]]*$/p' "$log_file" |
-    jq -s 'map(select(type == "object" and has("success"))) | .[0]' >"$log_file.record"
   execution_image="$(
     "${AZ_CMD[@]}" containerapp job execution show \
       --name "$JOB_NAME" \

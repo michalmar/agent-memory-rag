@@ -282,17 +282,55 @@ roles_are_ready() {
 safe_summary_lines() {
   local raw_logs="$1"
   local output_file="$2"
-  local line trimmed sanitized
-  : >"$output_file"
-  while IFS= read -r line; do
-    trimmed="${line#"${line%%[![:space:]]*}"}"
-    [[ "${trimmed:0:1}" == "{" ]] || continue
-    sanitized="$(
-      printf '%s\n' "$trimmed" |
-        jq -ce 'if type == "object" then . else empty end' 2>/dev/null || true
-    )"
-    [[ -n "$sanitized" ]] && printf '%s\n' "$sanitized" >>"$output_file"
-  done <<<"$raw_logs"
+  local raw_file
+  raw_file="$(mktemp)"
+  printf '%s\n' "$raw_logs" >"$raw_file"
+  if ! extract_producer_record "$raw_file" "$output_file"; then
+    rm -f "$raw_file"
+    echo "ERROR: ingestion logs must contain exactly one complete producer record" >&2
+    return 1
+  fi
+  rm -f "$raw_file"
+}
+
+extract_producer_record() {
+  local raw_file="$1"
+  local output_file="$2"
+  python3 - "$raw_file" "$output_file" <<'PY'
+import json
+import pathlib
+import sys
+
+raw_path = pathlib.Path(sys.argv[1])
+output_path = pathlib.Path(sys.argv[2])
+text = raw_path.read_text(encoding="utf-8", errors="replace")
+decoder = json.JSONDecoder()
+records = []
+offset = 0
+
+while True:
+    start = text.find("{", offset)
+    if start < 0:
+        break
+    try:
+        value, end = decoder.raw_decode(text, start)
+    except json.JSONDecodeError:
+        offset = start + 1
+        continue
+    offset = end
+    if isinstance(value, dict) and value.get("success") is True:
+        records.append(value)
+
+if len(records) != 1:
+    raise SystemExit(1)
+
+serialized = json.dumps(
+    records[0], ensure_ascii=False, separators=(",", ":"), sort_keys=True
+)
+if len(serialized.encode("utf-8")) > 65536:
+    raise SystemExit(1)
+output_path.write_text(serialized + "\n", encoding="utf-8")
+PY
 }
 
 show_execution_logs() {
@@ -308,9 +346,9 @@ show_execution_logs() {
       --format text 2>/dev/null || true
   )"
   case "${CURRENT_EXECUTION_LABEL:-}" in
-    "Metadata validation") safe_summary_lines "$raw_logs" "$VALIDATION_SUMMARY_FILE" ;;
-    "Directive verification") safe_summary_lines "$raw_logs" "$VERIFY_SUMMARY_FILE" ;;
-    *) safe_summary_lines "$raw_logs" "$INDEX_SCHEMA_FILE" ;;
+    "Metadata validation") safe_summary_lines "$raw_logs" "$VALIDATION_SUMMARY_FILE" || return 1 ;;
+    "Directive verification") safe_summary_lines "$raw_logs" "$VERIFY_SUMMARY_FILE" || return 1 ;;
+    *) : >"$INDEX_SCHEMA_FILE" ;;
   esac
   if [[ -s "$VALIDATION_SUMMARY_FILE" && "${CURRENT_EXECUTION_LABEL:-}" == "Metadata validation" ]]; then
     jq -c '{success, record_field_names: (keys | sort)}' "$VALIDATION_SUMMARY_FILE"
@@ -904,26 +942,22 @@ wait_for_execution() {
 assert_execution_mode() {
   local execution_name="$1"
   local expected_argument="$2"
-  local attempt actual_command actual_arguments
+  local attempt container_json
   for attempt in {1..30}; do
-    actual_command="$(
+    container_json="$(
       az containerapp job execution show \
         --name "$JOB_NAME" \
         --resource-group "$RG" \
         --job-execution-name "$execution_name" \
-        --query "join(' ', properties.template.containers[0].command)" \
-        --output tsv 2>/dev/null || true
+        --query "properties.template.containers[?name=='$JOB_CONTAINER'] | [0]" \
+        --output json 2>/dev/null || true
     )"
-    actual_arguments="$(
-      az containerapp job execution show \
-        --name "$JOB_NAME" \
-        --resource-group "$RG" \
-        --job-execution-name "$execution_name" \
-        --query "join(' ', properties.template.containers[0].args)" \
-        --output tsv 2>/dev/null || true
-    )"
-    if [[ "$actual_command" == "directive-ingest" ]] \
-      && [[ "$actual_arguments" == "$expected_argument" ]]; then
+    if jq -e \
+      --arg expected_argument "$expected_argument" \
+      '
+        (.command | if type == "array" then . else [.] end) == ["directive-ingest"] and
+        (.args | if type == "array" then . else [.] end) == [$expected_argument]
+      ' <<<"$container_json" >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
