@@ -11,7 +11,7 @@ from typing import Iterable
 import tiktoken
 from directive_contracts import DirectiveMetadata, DirectiveRelation, ReviewFinding
 
-from .document_intelligence import ExtractedDocument
+from .document_intelligence import ExtractedDocument, ExtractedLine
 from .metadata import DirectiveMetadataCandidate, extract_metadata
 from .source import SourceDocument
 
@@ -20,6 +20,9 @@ _MARKDOWN_HEADING = re.compile(
 )
 _NUMBERED_TITLE = re.compile(
     r"^(?P<number>\d+(?:\.\d+)*)(?:[.)])?\s+(?P<title>\S.*?)\s*$"
+)
+_PAGE_COUNTER = re.compile(
+    r"^\s*(?:strana\s*)?\d+\s*(?:/|z)\s*\d+\s*$", re.IGNORECASE
 )
 _TOKENIZER = tiktoken.get_encoding("o200k_base")
 
@@ -121,7 +124,8 @@ def _body_markdown(extraction: ExtractedDocument) -> _BodyMarkdown:
     body, offsets = _source_body(extraction)
     if not body:
         body, offsets = _line_body(extraction)
-    decorative_offsets = _repeated_header_footer_offsets(extraction)
+    repeated_edge_offsets = _repeated_header_footer_offsets(extraction)
+    counter_offsets = _edge_counter_offsets(extraction)
     output: list[str] = []
     output_offsets: list[int] = []
     position = 0
@@ -131,8 +135,9 @@ def _body_markdown(extraction: ExtractedDocument) -> _BodyMarkdown:
         position += len(line)
         if _is_decorative_body_line(
             line_text,
-            line_offsets[0] if line_offsets else -1,
-            decorative_offsets,
+            line_offsets,
+            repeated_edge_offsets,
+            counter_offsets,
         ):
             continue
         rendered = line_text
@@ -196,11 +201,20 @@ def _line_body(extraction: ExtractedDocument) -> tuple[str, tuple[int, ...]]:
 
 
 def _is_decorative_body_line(
-    markdown: str, source_offset: int, repeated_edge_offsets: set[int]
+    markdown: str,
+    line_offsets: tuple[int, ...],
+    repeated_edge_offsets: set[int],
+    counter_offsets: set[int],
 ) -> bool:
-    counter = re.compile(r"^\s*(?:strana\s*)?\d+\s*(?:/|z)\s*\d+\s*$", re.IGNORECASE)
-    return source_offset in repeated_edge_offsets or (
-        bool(counter.fullmatch(markdown)) and source_offset in repeated_edge_offsets
+    if not line_offsets:
+        return False
+    source_start = min(line_offsets)
+    source_end = max(line_offsets) + 1
+    return bool(
+        _PAGE_COUNTER.fullmatch(markdown)
+        and any(source_start <= offset < source_end for offset in counter_offsets)
+    ) or any(
+        source_start <= offset < source_end for offset in repeated_edge_offsets
     )
 
 
@@ -209,9 +223,7 @@ def _repeated_header_footer_offsets(extraction: ExtractedDocument) -> set[int]:
     for line in extraction.lines:
         if line.page_number < 3 or not line.polygon:
             continue
-        page = extraction.page(line.page_number)
-        vertical = line.polygon[1] / page.height
-        if vertical > 0.12 and vertical < 0.88:
+        if not _is_edge_line(line, extraction):
             continue
         value = _comparison_text(line.text)
         if value:
@@ -224,6 +236,23 @@ def _repeated_header_footer_offsets(extraction: ExtractedDocument) -> set[int]:
             if len({page_number for page_number, _ in entries}) >= 2
             for _, offset in entries
     }
+
+
+def _edge_counter_offsets(extraction: ExtractedDocument) -> set[int]:
+    return {
+        line.spans[0].offset
+        for line in extraction.lines
+        if line.page_number >= 3
+        and line.polygon
+        and _PAGE_COUNTER.fullmatch(line.text)
+        and _is_edge_line(line, extraction)
+    }
+
+
+def _is_edge_line(line: ExtractedLine, extraction: ExtractedDocument) -> bool:
+    page = extraction.page(line.page_number)
+    vertical = line.polygon[1] / page.height
+    return vertical <= 0.12 or vertical >= 0.88
 
 
 def _parse_sections(

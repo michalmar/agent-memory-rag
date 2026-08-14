@@ -109,6 +109,55 @@ def _source() -> SourceDocument:
     )
 
 
+def _wrapped_body_payload(fixture: dict) -> dict:
+    header = "Sdílené záhlaví"
+    body_pages = [
+        [header, header, "Strana 3/4", "Obsah třetí stránky"],
+        [header, header, "Strana 4/4", "Obsah čtvrté stránky"],
+    ]
+    payload = _payload(
+        fixture,
+        body=body_pages[0],
+        additional_body_pages=[body_pages[1]],
+        section_headings=False,
+    )
+    result = payload["analyzeResult"]
+    page_offset = result["pages"][2]["spans"][0]["offset"]
+    page_raw = [
+        "\n".join([f"## {lines[0]}", *lines[1:]]) for lines in body_pages
+    ]
+    result["content"] = (
+        result["content"][:page_offset] + "\n".join(page_raw)
+    )
+    paragraph_offset = len(fixture["lines"]) + len(fixture["page_two_lines"])
+    for page_index, lines in enumerate(body_pages, start=2):
+        raw = page_raw[page_index - 2]
+        page = result["pages"][page_index]
+        page["spans"] = [
+            {
+                "offset": page_offset,
+                "length": len(raw) + (page_index == 2),
+            }
+        ]
+        cursor = 0
+        for line_index, text in enumerate(lines):
+            raw_prefix = "## " if line_index == 0 else ""
+            text_offset = page_offset + cursor + len(raw_prefix)
+            polygon_y = 1 if line_index == 0 else 95 if line_index == 2 else 50
+            polygon = [0, polygon_y, 10, polygon_y, 10, polygon_y + 1, 0, polygon_y + 1]
+            page["lines"][line_index]["spans"] = [
+                {"offset": text_offset, "length": len(text)}
+            ]
+            page["lines"][line_index]["polygon"] = polygon
+            paragraph = result["paragraphs"][paragraph_offset]
+            paragraph["spans"] = [{"offset": text_offset, "length": len(text)}]
+            paragraph["boundingRegions"][0]["polygon"] = polygon
+            paragraph_offset += 1
+            cursor += len(raw_prefix) + len(text) + (line_index < len(lines) - 1)
+        page_offset += len(raw) + 1
+    return payload
+
+
 @pytest.mark.parametrize("fixture_name", ["directive_v2_layout_a.json", "directive_v2_layout_b.json"])
 def test_sanitized_layout_fixtures_extract_metadata_and_preserve_administration(
     fixture_name: str,
@@ -210,23 +259,36 @@ def test_metadata_keeps_equal_text_outside_the_matching_table_cell() -> None:
         "Za tabulkou",
     ]
     payload = _payload(fixture)
-    table_line = payload["analyzeResult"]["pages"][1]["lines"][1]
+    matching_line = payload["analyzeResult"]["pages"][1]["lines"][1]
+    equal_line = payload["analyzeResult"]["pages"][1]["lines"][2]
     payload["analyzeResult"]["tables"] = [
         {
             "rowCount": 1,
             "columnCount": 1,
-            "spans": table_line["spans"],
+            "spans": [
+                {
+                    "offset": matching_line["spans"][0]["offset"],
+                    "length": (
+                        equal_line["spans"][0]["offset"]
+                        + equal_line["spans"][0]["length"]
+                        - matching_line["spans"][0]["offset"]
+                    ),
+                }
+            ],
             "boundingRegions": [
-                {"pageNumber": 2, "polygon": table_line["polygon"]}
+                {"pageNumber": 2, "polygon": [0, 0, 10, 0, 10, 100, 0, 100]}
             ],
             "cells": [
                 {
-                    "content": table_line["content"],
+                    "content": matching_line["content"],
                     "rowIndex": 0,
                     "columnIndex": 0,
-                    "spans": table_line["spans"],
+                    "spans": matching_line["spans"],
                     "boundingRegions": [
-                        {"pageNumber": 2, "polygon": table_line["polygon"]}
+                        {
+                            "pageNumber": 2,
+                            "polygon": matching_line["polygon"],
+                        }
                     ],
                 }
             ],
@@ -304,17 +366,18 @@ def test_document_intelligence_accepts_empty_table_cell_and_multispan_line() -> 
         {"offset": empty["spans"][0]["offset"], "length": 0}
     ]
     line = payload["analyzeResult"]["pages"][0]["lines"][0]
+    interleaved_line = payload["analyzeResult"]["pages"][0]["lines"][2]
     line["spans"] = [
         {"offset": line["spans"][0]["offset"], "length": 2},
-        {"offset": line["spans"][0]["offset"] + 2, "length": len(line["content"]) - 2},
+        {"offset": interleaved_line["spans"][0]["offset"], "length": 2},
     ]
-    payload["analyzeResult"]["paragraphs"][0]["spans"] = line["spans"]
 
     extraction = DocumentIntelligenceExtractor._parse_result(payload)
 
     assert extraction.tables[0].cells[1].text == ""
     assert extraction.tables[0].cells[1].spans[0].length == 0
     assert len(extraction.lines[0].spans) == 2
+    assert extraction.lines[0].spans[1].offset > extraction.lines[1].spans[0].offset
 
 
 @pytest.mark.parametrize(
@@ -333,6 +396,79 @@ def test_document_intelligence_rejects_cell_outside_table_parent(mutation) -> No
     mutation(payload)
 
     with pytest.raises(RuntimeError, match="table cell"):
+        DocumentIntelligenceExtractor._parse_result(payload)
+
+
+def test_document_intelligence_rejects_same_page_cell_span_outside_parent() -> None:
+    payload = _synthetic_structural_payload(3, 12, 8, 1)
+    table = payload["analyzeResult"]["tables"][0]
+    cell = table["cells"][0]
+    cell["spans"][0]["offset"] = table["spans"][0]["offset"] - 1
+
+    with pytest.raises(RuntimeError, match="outside table spans"):
+        DocumentIntelligenceExtractor._parse_result(payload)
+
+
+def test_document_intelligence_rejects_same_page_cell_polygon_outside_parent() -> None:
+    payload = _synthetic_structural_payload(3, 12, 8, 1)
+    payload["analyzeResult"]["tables"][0]["cells"][0]["boundingRegions"][0][
+        "polygon"
+    ] = [10.051, 0, 11, 0, 11, 1, 10.051, 1]
+
+    with pytest.raises(RuntimeError, match="polygon is outside"):
+        DocumentIntelligenceExtractor._parse_result(payload)
+
+
+@pytest.mark.parametrize(
+    ("left_edge", "matches"),
+    [(-0.05, True), (-0.051, False)],
+)
+def test_document_intelligence_allows_only_shared_edge_rounding(
+    left_edge: float, matches: bool
+) -> None:
+    payload = _synthetic_structural_payload(3, 12, 8, 1)
+    payload["analyzeResult"]["tables"][0]["cells"][0]["boundingRegions"][0][
+        "polygon"
+    ] = [left_edge, 0, 1, 0, 1, 1, left_edge, 1]
+
+    if matches:
+        DocumentIntelligenceExtractor._parse_result(payload)
+    else:
+        with pytest.raises(RuntimeError, match="polygon is outside"):
+            DocumentIntelligenceExtractor._parse_result(payload)
+
+
+def test_document_intelligence_accepts_merged_cells() -> None:
+    payload = _synthetic_structural_payload(3, 12, 8, 1)
+    table = payload["analyzeResult"]["tables"][0]
+    first, second = table["cells"]
+    table["rowCount"] = 2
+    table["columnCount"] = 2
+    first["columnSpan"] = 2
+    second["rowIndex"] = 1
+    second["columnIndex"] = 0
+    table["cells"].append(
+        {
+            **second,
+            "columnIndex": 1,
+        }
+    )
+
+    extraction = DocumentIntelligenceExtractor._parse_result(payload)
+
+    assert extraction.tables[0].cells[0].column_span == 2
+
+
+def test_document_intelligence_rejects_span_crossing_root_page() -> None:
+    fixture = json.loads((FIXTURES / "directive_v2_layout_a.json").read_text())
+    payload = _payload(fixture)
+    line = payload["analyzeResult"]["pages"][0]["lines"][-1]
+    root_span = payload["analyzeResult"]["pages"][0]["spans"][0]
+    line["spans"][0]["length"] = (
+        root_span["offset"] + root_span["length"] - line["spans"][0]["offset"] + 1
+    )
+
+    with pytest.raises(RuntimeError, match="exactly one page"):
         DocumentIntelligenceExtractor._parse_result(payload)
 
 
@@ -398,6 +534,26 @@ def test_synthetic_structural_layouts_are_span_valid(
                 for span in cell.spans
             ),
         ]
+    )
+    nested_spans = [
+        *(span for line in extraction.lines for span in line.spans),
+        *(span for paragraph in extraction.paragraphs for span in paragraph.spans),
+        *(span for table in extraction.tables for span in table.spans),
+        *(
+            span
+            for table in extraction.tables
+            for cell in table.cells
+            for span in cell.spans
+        ),
+    ]
+    assert all(
+        sum(
+            root.offset <= span.offset
+            and span.offset + span.length <= root.offset + root.length
+            for root in extraction.content_spans
+        )
+        == 1
+        for span in nested_spans
     )
 
 
@@ -580,22 +736,13 @@ def test_body_preamble_is_chunked_before_first_heading() -> None:
 
 def test_repeated_edge_header_does_not_remove_equal_mid_page_body_text() -> None:
     fixture = json.loads((FIXTURES / "directive_v2_layout_a.json").read_text())
-    payload = _payload(
-        fixture,
-        body=["Stejné záhlaví", "Stejné záhlaví", "Obsah třetí stránky"],
-        additional_body_pages=[["Stejné záhlaví", "Obsah čtvrté stránky"]],
-        section_headings=False,
-    )
-    payload["analyzeResult"]["pages"][2]["lines"][1]["polygon"] = [
-        0, 50, 10, 50, 10, 51, 0, 51
-    ]
-    payload["analyzeResult"]["paragraphs"][len(fixture["lines"]) + len(fixture["page_two_lines"]) + 1]["boundingRegions"][0]["polygon"] = [
-        0, 50, 10, 50, 10, 51, 0, 51
-    ]
+    payload = _wrapped_body_payload(fixture)
     directive = parse_canonical(
         _source(),
         DocumentIntelligenceExtractor._parse_result(payload),
         PROCESSING_HASH,
     )
 
-    assert directive.markdown.count("Stejné záhlaví") == 1
+    assert directive.markdown.count("Sdílené záhlaví") == 2
+    assert "Strana 3/4" not in directive.markdown
+    assert "Strana 4/4" not in directive.markdown
