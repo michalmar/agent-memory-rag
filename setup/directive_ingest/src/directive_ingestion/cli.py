@@ -22,14 +22,9 @@ def _parser() -> argparse.ArgumentParser:
     subparsers.add_parser("verify")
     subparsers.add_parser("bootstrap")
     subparsers.add_parser("maintenance")
-    subparsers.add_parser("reset-publication-guards")
     validate = subparsers.add_parser("validate")
     validate.add_argument("--source", type=Path)
     validate.add_argument("--mandates", type=Path)
-    documents = subparsers.add_parser("reconcile-documents")
-    documents.add_argument("--source", type=Path)
-    mandates = subparsers.add_parser("publish-mandates")
-    mandates.add_argument("--csv", type=Path)
     daily = subparsers.add_parser("run-daily")
     daily.add_argument("--source", type=Path)
     daily.add_argument("--mandates", type=Path)
@@ -70,30 +65,11 @@ async def _run(args: argparse.Namespace) -> None:
             print('{"status":"ready"}')
         elif args.command == "maintenance":
             return
-        elif args.command == "reset-publication-guards":
-            await runner.reset_publication_guards()
-            print('{"status":"publication_guards_reset"}')
         elif args.command == "validate":
             result = await runner.validate_inputs(
                 args.source, args.mandates
             )
             print(format_result(result))
-        elif args.command == "reconcile-documents":
-            print(
-                format_result(
-                    await runner.reconcile_documents(args.source)
-                )
-            )
-        elif args.command == "publish-mandates":
-            snapshot, changed = await runner.publish_mandates(args.csv)
-            print(
-                format_result(
-                    {
-                        "snapshot_id": snapshot.snapshot_id,
-                        "changed": changed,
-                    }
-                )
-            )
         elif args.command == "run-daily":
             if approval is None:
                 raise AssertionError("run-daily approval was not initialized")

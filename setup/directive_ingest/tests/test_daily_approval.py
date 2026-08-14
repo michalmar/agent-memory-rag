@@ -6,7 +6,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from directive_ingestion.cli import _daily_run_approval_from_environment
+from directive_ingestion.cli import (
+    _daily_run_approval_from_environment,
+    _parser,
+)
 from directive_ingestion.publication_commit_repository import (
     PublicationCommitRepository,
 )
@@ -81,6 +84,24 @@ def test_cli_daily_approval_requires_each_nonempty_digest(
 
     with pytest.raises(ValueError, match=name):
         _daily_run_approval_from_environment()
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "reconcile-documents",
+        "publish-mandates",
+        "reset-publication-guards",
+    ),
+)
+def test_cli_rejects_publishing_bypass_commands(
+    command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        _parser().parse_args([command])
+
+    assert exit_info.value.code == 2
+    assert f"invalid choice: '{command}'" in capsys.readouterr().err
 
 
 @pytest.mark.asyncio
