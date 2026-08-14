@@ -4,6 +4,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import directive_ingestion.search_repository as search_repository
+from directive_ingestion.integrity import IntegrityValidationError
 from directive_ingestion.search_repository import DirectiveSearchRepository
 
 
@@ -139,3 +141,55 @@ async def test_verification_exercises_direct_hybrid_query() -> None:
         "top": 1,
     }
     assert summary["direct_hybrid_query"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_published_chunk_visibility_waits_for_delayed_exact_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _repository()
+    directive = SimpleNamespace(
+        metadata=SimpleNamespace(
+            directive_version_id="Č/12:v1",
+            source_hash="a" * 64,
+            processing_hash="b" * 64,
+        )
+    )
+    repository._find_keys = AsyncMock(
+        side_effect=[[], ["chunk-1", "chunk-2"]]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(search_repository.asyncio, "sleep", sleep)
+
+    await repository.validate_published_chunk_ids(
+        directive, ["chunk-1", "chunk-2"]
+    )
+
+    assert repository._find_keys.await_count == 2
+    sleep.assert_awaited_once_with(1.0)
+    filter_expression = repository._find_keys.await_args.args[0]
+    assert "id eq 'chunk-1'" in filter_expression
+    assert "id eq 'chunk-2'" in filter_expression
+
+
+@pytest.mark.asyncio
+async def test_current_visibility_timeout_fails_on_exact_id_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _repository()
+    bundle = SimpleNamespace(
+        directive_id="Č/12",
+        directive_version_id="Č/12:v1",
+        manifest=SimpleNamespace(
+            sections=[SimpleNamespace(chunk_ids=["expected-chunk"])]
+        ),
+    )
+    repository._find_keys = AsyncMock(return_value=["stale-chunk"])
+    monkeypatch.setattr(search_repository, "_VISIBILITY_TIMEOUT_SECONDS", 0.5)
+    monotonic = iter((0.0, 1.0))
+    monkeypatch.setattr(search_repository, "monotonic", lambda: next(monotonic))
+
+    with pytest.raises(IntegrityValidationError, match="expected exact chunk IDs"):
+        await repository.validate_current_generation(bundle)
+
+    repository._find_keys.assert_awaited_once()

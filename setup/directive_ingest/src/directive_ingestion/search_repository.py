@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date
+from time import monotonic
 from typing import Any, Iterable
 
 import httpx
@@ -13,6 +14,12 @@ from .canonical import CanonicalDirective
 from .chunking import TextChunk
 from .config import IngestionConfig
 from .integrity import IntegrityValidationError
+
+_VISIBILITY_TIMEOUT_SECONDS = 90.0
+_VISIBILITY_INITIAL_BACKOFF_SECONDS = 1.0
+_VISIBILITY_MAX_BACKOFF_SECONDS = 10.0
+_VISIBILITY_MAX_ATTEMPTS = 12
+_VISIBILITY_ID_BATCH_SIZE = 250
 
 
 class DirectiveSearchRepository:
@@ -278,21 +285,22 @@ class DirectiveSearchRepository:
     async def validate_published_chunk_ids(
         self, directive: CanonicalDirective, chunk_ids: Iterable[str]
     ) -> None:
-        """Check a staged generation by its immutable document identities."""
+        """Wait until the just-published immutable document IDs are visible."""
         expected = set(chunk_ids)
         if not expected:
             return
-        published = set(
-            await self._find_keys(
-                _generation_filter(
-                    directive.metadata, publication_state="published"
-                )
-            )
+        generation_filter = _generation_filter(
+            directive.metadata, publication_state="published"
         )
-        missing = expected - published
-        if missing:
-            raise IntegrityValidationError(
-                "Published Search generation is missing manifest chunk IDs"
+        for batch in _batches(sorted(expected), _VISIBILITY_ID_BATCH_SIZE):
+            expected_batch = set(batch)
+            await self._wait_for_exact_ids(
+                (
+                    f"({generation_filter}) and "
+                    f"({_id_filter(expected_batch)})"
+                ),
+                expected_batch,
+                detail=directive.metadata.directive_version_id,
             )
 
     async def validate_current_generation(
@@ -309,11 +317,11 @@ class DirectiveSearchRepository:
             "publication_state eq 'published' and is_current eq true and "
             "is_valid eq true"
         )
-        actual_ids = set(await self._find_keys(filter_expression))
-        if actual_ids != expected_ids:
-            raise IntegrityValidationError(
-                "Current Search generation IDs do not match manifest chunks"
-            )
+        await self._wait_for_exact_ids(
+            filter_expression,
+            expected_ids,
+            detail=bundle.directive_version_id,
+        )
 
     async def validate_exact_published(
         self, bundles: Iterable[Any]
@@ -457,7 +465,9 @@ class DirectiveSearchRepository:
         detail: str,
     ) -> None:
         actual = -1
-        for attempt in range(12):
+        deadline = monotonic() + _VISIBILITY_TIMEOUT_SECONDS
+        backoff = _VISIBILITY_INITIAL_BACKOFF_SECONDS
+        for attempt in range(_VISIBILITY_MAX_ATTEMPTS):
             result = await self._request(
                 "POST",
                 f"/indexes/{self._config.search_index}/docs/search",
@@ -473,10 +483,38 @@ class DirectiveSearchRepository:
             actual = int(result.get("@odata.count", -1))
             if actual == expected_count:
                 return
-            await asyncio.sleep(min(2**attempt, 10))
+            remaining = deadline - monotonic()
+            if remaining <= 0 or attempt == _VISIBILITY_MAX_ATTEMPTS - 1:
+                break
+            await asyncio.sleep(min(backoff, remaining))
+            backoff = min(backoff * 2, _VISIBILITY_MAX_BACKOFF_SECONDS)
         raise IntegrityValidationError(
             f"Search visibility validation failed for {detail}: expected "
             f"{expected_count} chunks, found {actual}"
+        )
+
+    async def _wait_for_exact_ids(
+        self,
+        filter_expression: str,
+        expected_ids: set[str],
+        *,
+        detail: str,
+    ) -> None:
+        actual_ids: set[str] = set()
+        deadline = monotonic() + _VISIBILITY_TIMEOUT_SECONDS
+        backoff = _VISIBILITY_INITIAL_BACKOFF_SECONDS
+        for attempt in range(_VISIBILITY_MAX_ATTEMPTS):
+            actual_ids = set(await self._find_keys(filter_expression))
+            if actual_ids == expected_ids:
+                return
+            remaining = deadline - monotonic()
+            if remaining <= 0 or attempt == _VISIBILITY_MAX_ATTEMPTS - 1:
+                break
+            await asyncio.sleep(min(backoff, remaining))
+            backoff = min(backoff * 2, _VISIBILITY_MAX_BACKOFF_SECONDS)
+        raise IntegrityValidationError(
+            f"Search visibility validation failed for {detail}: expected exact "
+            f"chunk IDs {sorted(expected_ids)}, found {sorted(actual_ids)}"
         )
 
     async def _upload_actions(self, actions: list[dict[str, Any]]) -> None:
@@ -832,6 +870,14 @@ def _generation_filter(
         f"and source_hash eq '{_odata_string(metadata.source_hash)}' "
         f"and processing_hash eq '{_odata_string(metadata.processing_hash)}' "
         f"and publication_state eq '{publication_state}'"
+    )
+
+
+def _id_filter(ids: set[str]) -> str:
+    if not ids:
+        raise ValueError("Search visibility requires at least one chunk ID")
+    return " or ".join(
+        f"id eq '{_odata_string(chunk_id)}'" for chunk_id in sorted(ids)
     )
 
 
