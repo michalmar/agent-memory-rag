@@ -21,14 +21,14 @@ def _payload(
     fixture: dict,
     *,
     conflict: bool = False,
-    body: str = "Bez nadpisu těla",
+    body: str | list[str] = "Bez nadpisu těla",
     additional_body_pages: list[list[str]] | None = None,
     section_headings: bool = True,
 ) -> dict:
     page_lines = [
         fixture["lines"],
         fixture["page_two_lines"],
-        [body],
+        [body] if isinstance(body, str) else body,
         *(additional_body_pages or []),
     ]
     if conflict:
@@ -170,6 +170,12 @@ def test_metadata_table_is_interleaved_and_only_overlapping_lines_are_deduplicat
                     ),
                 }
             ],
+            "boundingRegions": [
+                {
+                    "pageNumber": 2,
+                    "polygon": [0, 0, 10, 0, 10, 100, 0, 100],
+                }
+            ],
             "cells": [
                 {
                     "content": line["content"],
@@ -193,6 +199,49 @@ def test_metadata_table_is_interleaved_and_only_overlapping_lines_are_deduplicat
         "Schválil: Testovací role"
     )
     assert page_two.count("Verze: 1.00") == 1
+
+
+def test_metadata_keeps_equal_text_outside_the_matching_table_cell() -> None:
+    fixture = json.loads((FIXTURES / "directive_v2_layout_a.json").read_text())
+    fixture["page_two_lines"] = [
+        "Před tabulkou",
+        "Verze: 1.00",
+        "Verze: 1.00",
+        "Za tabulkou",
+    ]
+    payload = _payload(fixture)
+    table_line = payload["analyzeResult"]["pages"][1]["lines"][1]
+    payload["analyzeResult"]["tables"] = [
+        {
+            "rowCount": 1,
+            "columnCount": 1,
+            "spans": table_line["spans"],
+            "boundingRegions": [
+                {"pageNumber": 2, "polygon": table_line["polygon"]}
+            ],
+            "cells": [
+                {
+                    "content": table_line["content"],
+                    "rowIndex": 0,
+                    "columnIndex": 0,
+                    "spans": table_line["spans"],
+                    "boundingRegions": [
+                        {"pageNumber": 2, "polygon": table_line["polygon"]}
+                    ],
+                }
+            ],
+        }
+    ]
+    extraction = DocumentIntelligenceExtractor._parse_result(payload)
+
+    directive = parse_canonical(_source(), extraction, PROCESSING_HASH)
+
+    page_two = directive.metadata_candidate.first_two_pages_markdown.split(
+        "### Page 2\n\n", 1
+    )[1]
+    assert page_two.index("Před tabulkou") < page_two.index("| Verze: 1.00 |")
+    assert page_two.index("| Verze: 1.00 |") < page_two.rindex("Verze: 1.00")
+    assert page_two.rindex("Verze: 1.00") < page_two.index("Za tabulkou")
 
 
 @pytest.mark.parametrize(
@@ -243,6 +292,47 @@ def test_document_intelligence_rejects_overlapping_table_cells() -> None:
     payload["analyzeResult"]["tables"][0]["cells"][1]["columnIndex"] = 0
 
     with pytest.raises(RuntimeError, match="must not overlap"):
+        DocumentIntelligenceExtractor._parse_result(payload)
+
+
+def test_document_intelligence_accepts_empty_table_cell_and_multispan_line() -> None:
+    payload = _synthetic_structural_payload(3, 12, 8, 1)
+    table = payload["analyzeResult"]["tables"][0]
+    empty = table["cells"][1]
+    empty["content"] = ""
+    empty["spans"] = [
+        {"offset": empty["spans"][0]["offset"], "length": 0}
+    ]
+    line = payload["analyzeResult"]["pages"][0]["lines"][0]
+    line["spans"] = [
+        {"offset": line["spans"][0]["offset"], "length": 2},
+        {"offset": line["spans"][0]["offset"] + 2, "length": len(line["content"]) - 2},
+    ]
+    payload["analyzeResult"]["paragraphs"][0]["spans"] = line["spans"]
+
+    extraction = DocumentIntelligenceExtractor._parse_result(payload)
+
+    assert extraction.tables[0].cells[1].text == ""
+    assert extraction.tables[0].cells[1].spans[0].length == 0
+    assert len(extraction.lines[0].spans) == 2
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda payload: payload["analyzeResult"]["tables"][0]["cells"][0][
+            "spans"
+        ][0].update(offset=0),
+        lambda payload: payload["analyzeResult"]["tables"][0]["cells"][0][
+            "boundingRegions"
+        ][0].update(pageNumber=2),
+    ],
+)
+def test_document_intelligence_rejects_cell_outside_table_parent(mutation) -> None:
+    payload = _synthetic_structural_payload(3, 12, 8, 1)
+    mutation(payload)
+
+    with pytest.raises(RuntimeError, match="table cell"):
         DocumentIntelligenceExtractor._parse_result(payload)
 
 
@@ -381,6 +471,15 @@ def _synthetic_structural_payload(
                         ),
                     }
                 ],
+                "boundingRegions": [
+                    {
+                        "pageNumber": page_number,
+                        "polygon": [0, 0, 10, 0, 10, 100, 0, 100],
+                    }
+                    for page_number in sorted(
+                        {cell["pageNumber"] for cell in cells}
+                    )
+                ],
                 "cells": [
                     {
                         "content": cell["content"],
@@ -477,3 +576,26 @@ def test_body_preamble_is_chunked_before_first_heading() -> None:
         "Hlavní část",
     ]
     assert directive.sections[1].content == "Úvodní text\n"
+
+
+def test_repeated_edge_header_does_not_remove_equal_mid_page_body_text() -> None:
+    fixture = json.loads((FIXTURES / "directive_v2_layout_a.json").read_text())
+    payload = _payload(
+        fixture,
+        body=["Stejné záhlaví", "Stejné záhlaví", "Obsah třetí stránky"],
+        additional_body_pages=[["Stejné záhlaví", "Obsah čtvrté stránky"]],
+        section_headings=False,
+    )
+    payload["analyzeResult"]["pages"][2]["lines"][1]["polygon"] = [
+        0, 50, 10, 50, 10, 51, 0, 51
+    ]
+    payload["analyzeResult"]["paragraphs"][len(fixture["lines"]) + len(fixture["page_two_lines"]) + 1]["boundingRegions"][0]["polygon"] = [
+        0, 50, 10, 50, 10, 51, 0, 51
+    ]
+    directive = parse_canonical(
+        _source(),
+        DocumentIntelligenceExtractor._parse_result(payload),
+        PROCESSING_HASH,
+    )
+
+    assert directive.markdown.count("Stejné záhlaví") == 1

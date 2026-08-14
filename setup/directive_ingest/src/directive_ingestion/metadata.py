@@ -382,43 +382,36 @@ def render_first_two_pages(
             for table in extraction.tables
             if any(cell.page_number == page_number for cell in table.cells)
         ]
-        table_ranges = [
+        page_tables = [
+            table
+            for table in tables
+            if any(cell.page_number == page_number for cell in table.cells)
+        ]
+        table_items = [
             (
                 min(
                     cell.spans[0].offset
                     for cell in table.cells
                     if cell.page_number == page_number
                 ),
-                max(
-                    cell.spans[-1].offset + cell.spans[-1].length
-                    for cell in table.cells
-                    if cell.page_number == page_number
-                ),
                 _render_table(table, page_number),
+                table,
             )
-            for table in tables
+            for table in page_tables
         ]
         items: list[tuple[int, str, bool]] = [
-            (start, rendered, True) for start, _, rendered in table_ranges
+            (start, rendered, True) for start, rendered, _ in table_items
         ]
         for line in extraction.lines:
             if line.page_number != page_number or _is_decorative(line.text):
                 continue
-            overlaps = [
-                rendered
-                for start, end, rendered in table_ranges
-                if line.spans[0].offset < end
-                and line.spans[-1].offset + line.spans[-1].length > start
-            ]
-            if overlaps and any(
-                _comparison_text(line.text)
-                in {
-                    _comparison_text(cell.text)
-                    for table in tables
-                    for cell in table.cells
-                    if cell.page_number == page_number
-                }
-                for _ in overlaps
+            if any(
+                _comparison_text(line.text) == _comparison_text(cell.text)
+                and _spans_overlap(line.spans, cell.spans)
+                and _polygons_overlap(line.polygon, cell.polygon)
+                for _, _, table in table_items
+                for cell in table.cells
+                if cell.page_number == page_number
             ):
                 continue
             items.append((line.spans[0].offset, line.text.strip(), False))
@@ -476,3 +469,21 @@ def _comparison_text(value: str) -> str:
 
 def _is_decorative(value: str) -> bool:
     return bool(_COUNTER.fullmatch(value))
+
+
+def _spans_overlap(left: tuple, right: tuple) -> bool:
+    return any(
+        left_span.offset < right_span.offset + right_span.length
+        and right_span.offset < left_span.offset + left_span.length
+        for left_span in left
+        for right_span in right
+    )
+
+
+def _polygons_overlap(left: tuple[float, ...], right: tuple[float, ...]) -> bool:
+    left_x, left_y = left[::2], left[1::2]
+    right_x, right_y = right[::2], right[1::2]
+    return (
+        max(min(left_x), min(right_x)) <= min(max(left_x), max(right_x))
+        and max(min(left_y), min(right_y)) <= min(max(left_y), max(right_y))
+    )

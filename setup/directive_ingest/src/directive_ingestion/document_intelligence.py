@@ -68,6 +68,7 @@ class ExtractedTable:
     column_count: int
     cells: tuple[ExtractedTableCell, ...]
     spans: tuple[ContentSpan, ...]
+    bounding_regions: tuple[BoundingRegion, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,13 +351,15 @@ def _require_number(value: Any, name: str, *, positive: bool = False) -> float:
     return result
 
 
-def _require_text(value: Any, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+def _require_text(value: Any, name: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value.strip()):
         raise RuntimeError(f"Document Intelligence {name} must be non-empty text")
     return value
 
 
-def _parse_spans(raw: Any, name: str) -> tuple[tuple[int, int], ...]:
+def _parse_spans(
+    raw: Any, name: str, *, allow_zero_length: bool = False
+) -> tuple[tuple[int, int], ...]:
     if not isinstance(raw, list) or not raw:
         raise RuntimeError(f"Document Intelligence {name} must be a non-empty array")
     values = tuple(
@@ -365,7 +368,9 @@ def _parse_spans(raw: Any, name: str) -> tuple[tuple[int, int], ...]:
                 _require_object(value, name).get("offset"), f"{name}.offset"
             ),
             _require_int(
-                _require_object(value, name).get("length"), f"{name}.length"
+                _require_object(value, name).get("length"),
+                f"{name}.length",
+                minimum=0 if allow_zero_length else 1,
             ),
         )
         for value in raw
@@ -474,7 +479,7 @@ def _parse_table(
     column_count = _require_int(
         table.get("columnCount"), "table.columnCount", minimum=1
     )
-    cells: list[ExtractedTableCell] = []
+    raw_cells: list[tuple[dict[str, Any], dict[str, Any], int, int, int, int, int]] = []
     for value in _required_list(table, "cells"):
         cell = _require_object(value, "table.cell")
         regions = _required_list(cell, "boundingRegions")
@@ -498,33 +503,17 @@ def _parse_table(
         )
         if row_index + row_span > row_count or column_index + column_span > column_count:
             raise RuntimeError("Document Intelligence table cell is outside table bounds")
-        cells.append(
-            ExtractedTableCell(
-                page_number=page_number,
-                row_index=row_index,
-                column_index=column_index,
-                row_span=row_span,
-                column_span=column_span,
-                text=_require_text(cell.get("content"), "table.cell.content"),
-                polygon=_parse_polygon(
-                    region.get("polygon"), "table.cell.polygon"
-                ),
-                spans=_assign_span_pages(
-                    tuple(
-                    ContentSpan(offset, length, page_number)
-                    for offset, length in _parse_spans(
-                        cell.get("spans"), "table.cell.spans"
-                    )
-                    ),
-                    page_spans,
-                    content_length,
-                    "table.cell.spans",
-                ),
+        raw_cells.append(
+            (
+                cell,
+                region,
+                page_number,
+                row_index,
+                column_index,
+                row_span,
+                column_span,
             )
         )
-    if tuple(sorted(cells, key=lambda cell: (cell.row_index, cell.column_index))) != tuple(cells):
-        raise RuntimeError("Document Intelligence table cells must be row-ordered")
-    _validate_table_occupancy(cells, row_count, column_count)
     table_spans = _assign_span_pages(
         tuple(
             ContentSpan(offset, length, 0)
@@ -536,11 +525,81 @@ def _parse_table(
         content_length,
         "table.spans",
     )
+    regions = tuple(
+        BoundingRegion(
+            page_number=_require_int(
+                _require_object(value, "table.boundingRegion").get("pageNumber"),
+                "table.boundingRegion.pageNumber",
+                minimum=1,
+            ),
+            polygon=_parse_polygon(
+                _require_object(value, "table.boundingRegion").get("polygon"),
+                "table.boundingRegion.polygon",
+            ),
+        )
+        for value in _required_list(table, "boundingRegions")
+    )
+    table_pages = {span.page_number for span in table_spans}
+    if {region.page_number for region in regions} != table_pages:
+        raise RuntimeError(
+            "Document Intelligence table spans and regions disagree"
+        )
+    cells: list[ExtractedTableCell] = []
+    for (
+        cell,
+        region,
+        page_number,
+        row_index,
+        column_index,
+        row_span,
+        column_span,
+    ) in raw_cells:
+        text = _require_text(
+            cell.get("content"), "table.cell.content", allow_empty=True
+        )
+        spans = _assign_span_pages(
+            tuple(
+                ContentSpan(offset, length, page_number)
+                for offset, length in _parse_spans(
+                    cell.get("spans"),
+                    "table.cell.spans",
+                    allow_zero_length=not text,
+                )
+            ),
+            page_spans,
+            content_length,
+            "table.cell.spans",
+        )
+        if text and any(span.length == 0 for span in spans):
+            raise RuntimeError(
+                "Document Intelligence non-empty table cell needs positive spans"
+            )
+        _validate_cell_in_table(spans, page_number, region, table_spans, regions)
+        cells.append(
+            ExtractedTableCell(
+                page_number=page_number,
+                row_index=row_index,
+                column_index=column_index,
+                row_span=row_span,
+                column_span=column_span,
+                text=text,
+                polygon=_parse_polygon(
+                    region.get("polygon"), "table.cell.polygon"
+                ),
+                spans=spans,
+            )
+        )
+    if tuple(
+        sorted(cells, key=lambda cell: (cell.row_index, cell.column_index))
+    ) != tuple(cells):
+        raise RuntimeError("Document Intelligence table cells must be row-ordered")
+    _validate_table_occupancy(cells, row_count, column_count)
     return ExtractedTable(
         row_count=row_count,
         column_count=column_count,
         cells=tuple(cells),
         spans=table_spans,
+        bounding_regions=regions,
     )
 
 
@@ -563,6 +622,61 @@ def _validate_table_occupancy(
         for column in range(column_count)
     }:
         raise RuntimeError("Document Intelligence table cells must cover the table")
+
+
+def _validate_cell_in_table(
+    cell_spans: tuple[ContentSpan, ...],
+    cell_page: int,
+    cell_region: dict[str, Any],
+    table_spans: tuple[ContentSpan, ...],
+    table_regions: tuple[BoundingRegion, ...],
+) -> None:
+    if cell_page not in {region.page_number for region in table_regions}:
+        raise RuntimeError(
+            "Document Intelligence table cell page is outside table regions"
+        )
+    if not any(
+        _polygon_contains(region.polygon, _parse_polygon(
+            cell_region.get("polygon"), "table.cell.polygon"
+        ))
+        for region in table_regions
+        if region.page_number == cell_page
+    ):
+        raise RuntimeError(
+            "Document Intelligence table cell polygon is outside table regions"
+        )
+    for cell_span in cell_spans:
+        if not any(
+            table_span.page_number == cell_span.page_number
+            and table_span.offset <= cell_span.offset
+            and cell_span.offset + cell_span.length
+            <= table_span.offset + table_span.length
+            for table_span in table_spans
+        ):
+            raise RuntimeError(
+                "Document Intelligence table cell span is outside table spans"
+            )
+
+
+def _polygon_contains(
+    outer: tuple[float, ...], inner: tuple[float, ...]
+) -> bool:
+    # Layout independently rounds table and cell boundaries at shared edges.
+    tolerance = 0.05
+    outer_x = outer[::2]
+    outer_y = outer[1::2]
+    inner_x = inner[::2]
+    inner_y = inner[1::2]
+    return (
+        min(outer_x) - tolerance
+        <= min(inner_x)
+        <= max(inner_x)
+        <= max(outer_x) + tolerance
+        and min(outer_y) - tolerance
+        <= min(inner_y)
+        <= max(inner_y)
+        <= max(outer_y) + tolerance
+    )
 
 
 def _validate_page_spans(
@@ -614,7 +728,6 @@ def _validate_nested_records(
             )
         previous_offset = parsed[-1].offset
     previous_offset = -1
-    previous_offset = -1
     for table in tables:
         if table.spans[0].offset < previous_offset:
             raise RuntimeError(
@@ -644,7 +757,7 @@ def _validate_ordered_items(
             raise RuntimeError(f"Document Intelligence {name} spans cross pages")
         if parsed[0].offset < prior_by_page.get(page_number, -1):
             raise RuntimeError(f"Document Intelligence {name}s must be content-ordered")
-        prior_by_page[page_number] = parsed[-1].offset
+        prior_by_page[page_number] = parsed[0].offset
 
 
 def _assign_span_pages(
@@ -661,7 +774,11 @@ def _assign_span_pages(
             page
             for page in page_spans
             if page.offset <= span.offset
-            and span.offset + span.length <= page.offset + page.length
+            and (
+                span.offset + span.length <= page.offset + page.length
+                if span.length
+                else span.offset < page.offset + page.length
+            )
         ]
         if len(matched) != 1:
             raise RuntimeError(

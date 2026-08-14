@@ -121,7 +121,7 @@ def _body_markdown(extraction: ExtractedDocument) -> _BodyMarkdown:
     body, offsets = _source_body(extraction)
     if not body:
         body, offsets = _line_body(extraction)
-    decorative = _repeated_header_footer_texts(extraction)
+    decorative_offsets = _repeated_header_footer_offsets(extraction)
     output: list[str] = []
     output_offsets: list[int] = []
     position = 0
@@ -129,7 +129,11 @@ def _body_markdown(extraction: ExtractedDocument) -> _BodyMarkdown:
         line_text = line.rstrip("\n")
         line_offsets = offsets[position : position + len(line_text)]
         position += len(line)
-        if _is_decorative_body_line(line_text, decorative):
+        if _is_decorative_body_line(
+            line_text,
+            line_offsets[0] if line_offsets else -1,
+            decorative_offsets,
+        ):
             continue
         rendered = line_text
         rendered_offsets = line_offsets
@@ -192,16 +196,16 @@ def _line_body(extraction: ExtractedDocument) -> tuple[str, tuple[int, ...]]:
 
 
 def _is_decorative_body_line(
-    markdown: str, repeated_headers_footers: set[str]
+    markdown: str, source_offset: int, repeated_edge_offsets: set[int]
 ) -> bool:
     counter = re.compile(r"^\s*(?:strana\s*)?\d+\s*(?:/|z)\s*\d+\s*$", re.IGNORECASE)
-    return bool(counter.fullmatch(markdown)) or _comparison_text(markdown) in (
-        repeated_headers_footers
+    return source_offset in repeated_edge_offsets or (
+        bool(counter.fullmatch(markdown)) and source_offset in repeated_edge_offsets
     )
 
 
-def _repeated_header_footer_texts(extraction: ExtractedDocument) -> set[str]:
-    candidates: dict[str, set[int]] = {}
+def _repeated_header_footer_offsets(extraction: ExtractedDocument) -> set[int]:
+    candidates: dict[str, list[tuple[int, int]]] = {}
     for line in extraction.lines:
         if line.page_number < 3 or not line.polygon:
             continue
@@ -211,9 +215,14 @@ def _repeated_header_footer_texts(extraction: ExtractedDocument) -> set[str]:
             continue
         value = _comparison_text(line.text)
         if value:
-            candidates.setdefault(value, set()).add(line.page_number)
+            candidates.setdefault(value, []).append(
+                (line.page_number, line.spans[0].offset)
+            )
     return {
-        value for value, pages in candidates.items() if len(pages) >= 2
+            offset
+            for entries in candidates.values()
+            if len({page_number for page_number, _ in entries}) >= 2
+            for _, offset in entries
     }
 
 

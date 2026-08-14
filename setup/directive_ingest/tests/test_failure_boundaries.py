@@ -26,12 +26,7 @@ async def test_document_intelligence_uses_acquired_bearer_token() -> None:
             authorization = kwargs["headers"]["Authorization"]
             assert authorization.startswith("Bearer ")
             assert authorization.endswith("test-token")
-            kwargs["headers"]["Authorization"] = "Bearer " + "test-token"
-            assert kwargs["headers"]["Authorization"] == "Bearer test-token"
-            kwargs["headers"]["Authorization"] = "******"
-            assert kwargs["headers"]["Authorization"] == (
-                "Bearer test-token"
-            )
+            assert authorization == "Bearer " + "test-token"
             return httpx.Response(
                 200,
                 json={
@@ -52,17 +47,18 @@ async def test_document_intelligence_uses_acquired_bearer_token() -> None:
                 },
             )
 
-    extractor = RecordingExtractor(
-        "https://document.example.com",
-        "2024-11-30",
-        _Credential(),
-    )
-    try:
-        result = await extractor.extract(b"%PDF-test")
-    finally:
-        await extractor.close()
+    async def extract() -> int:
+        extractor = RecordingExtractor(
+            "https://document.example.com",
+            "2024-11-30",
+            _Credential(),
+        )
+        try:
+            return (await extractor.extract(b"%PDF-test")).total_pages
+        finally:
+            await extractor.close()
 
-    assert result.total_pages == 1
+    assert run(extract()) == 1
 
 
 @pytest.mark.asyncio
