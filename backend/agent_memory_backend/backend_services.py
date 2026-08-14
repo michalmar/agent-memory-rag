@@ -325,6 +325,10 @@ class BackendServices:
                     "directive_mandates",
                 }
             )
+        if settings.foundry_hosted_enabled:
+            # The Hosted Agent initializes through the public MCP route, which
+            # calls back into this backend and cannot gate backend routing.
+            optional_checks.add("foundry_hosted_maf")
         if settings.directive_agent_enabled:
             optional_checks.add("directive_hosted_maf")
             optional_checks.add("directive_tool_gateway")

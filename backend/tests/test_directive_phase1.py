@@ -791,6 +791,40 @@ class DirectiveFeatureBoundaryTests(unittest.IsolatedAsyncioTestCase):
         )
         get_settings.cache_clear()
 
+    async def test_support_hosted_failure_does_not_deadlock_readiness(
+        self,
+    ) -> None:
+        services = BackendServices.build()
+        with patch.dict(
+            os.environ,
+            {
+                "FOUNDRY_HOSTED_ENABLED": "true",
+                "AGENT_GATEWAY_AUDIENCE": "api://backend",
+                "SUPPORT_HOSTED_AGENT_PRINCIPAL_IDS": (
+                    "a15ba753-8d64-45a3-a34c-5fb507ce34a8"
+                ),
+            },
+            clear=True,
+        ):
+            get_settings.cache_clear()
+            settings = get_settings()
+        readiness = await services.readiness(settings)
+
+        self.assertEqual(readiness["status"], "ready")
+        self.assertEqual(
+            readiness["degraded_dependencies"], ["foundry_hosted_maf"]
+        )
+        self.assertFalse(
+            readiness["dependencies"]["foundry_hosted_maf"]["required"]
+        )
+        self.assertEqual(
+            readiness["dependencies"]["hosted_tool_gateway"]["status"], "ok"
+        )
+        self.assertTrue(
+            readiness["dependencies"]["hosted_tool_gateway"]["required"]
+        )
+        get_settings.cache_clear()
+
     async def test_cancelled_startup_still_closes_backend_services(self) -> None:
         @asynccontextmanager
         async def mcp_lifespan(_app):
