@@ -8,6 +8,8 @@ export COPILOT_HOME="${COPILOT_HOME:-$HOME/.copilot}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INFRA_DIR="$REPO_ROOT/infra"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/directive_infrastructure_guards.sh"
 
 AZ_BIN="${AZ_BIN:-az}"
 TERRAFORM_BIN="${TERRAFORM_BIN:-terraform}"
@@ -98,46 +100,6 @@ sha256_file() {
   else
     die "shasum or sha256sum is required to bind the confirmation token"
   fi
-}
-
-extract_producer_record() {
-  local raw_file="$1"
-  local output_file="$2"
-  python3 - "$raw_file" "$output_file" <<'PY'
-import json
-import pathlib
-import sys
-
-raw_path = pathlib.Path(sys.argv[1])
-output_path = pathlib.Path(sys.argv[2])
-text = raw_path.read_text(encoding="utf-8", errors="replace")
-decoder = json.JSONDecoder()
-records = []
-offset = 0
-
-while True:
-    start = text.find("{", offset)
-    if start < 0:
-        break
-    try:
-        value, end = decoder.raw_decode(text, start)
-    except json.JSONDecodeError:
-        offset = start + 1
-        continue
-    offset = end
-    if isinstance(value, dict) and value.get("success") is True:
-        records.append(value)
-
-if len(records) != 1:
-    raise SystemExit(1)
-
-serialized = json.dumps(
-    records[0], ensure_ascii=False, separators=(",", ":"), sort_keys=True
-)
-if len(serialized.encode("utf-8")) > 65536:
-    raise SystemExit(1)
-output_path.write_text(serialized + "\n", encoding="utf-8")
-PY
 }
 
 stop_started_executions() {
@@ -629,17 +591,8 @@ purge_prefix() {
 }
 
 recreate_cosmos_containers() {
-  local allowed_addresses
   COSMOS_PLAN_FILE="$(mktemp)"
   COSMOS_PLAN_JSON_FILE="$(mktemp)"
-  allowed_addresses="$(
-    jq -cn \
-      '[
-        "azurerm_cosmosdb_sql_container.directive_catalog",
-        "azurerm_cosmosdb_sql_container.directive_content",
-        "azurerm_cosmosdb_sql_container.directive_mandates"
-      ]'
-  )"
   echo "==> Creating and inspecting a targeted Terraform recreation plan"
   "${TERRAFORM_CMD[@]}" -chdir="$INFRA_DIR" plan \
     -input=false \
@@ -649,19 +602,7 @@ recreate_cosmos_containers() {
     -target=azurerm_cosmosdb_sql_container.directive_mandates
   "${TERRAFORM_CMD[@]}" -chdir="$INFRA_DIR" show \
     -json "$COSMOS_PLAN_FILE" >"$COSMOS_PLAN_JSON_FILE"
-  jq -e \
-    --argjson allowed "$allowed_addresses" \
-    '
-      (.resource_changes // []) as $changes |
-      ($changes | map(select(.change.actions != ["no-op"]))) as $actionable |
-      ($actionable | map(select(.address as $address |
-        any($allowed[]; . == $address)))) as $targets |
-      ($actionable | map(select(.address as $address |
-        all($allowed[]; . != $address)))) as $unexpected |
-      ($targets | length == 3) and
-      ($unexpected | length == 0) and
-      all($targets[]; .change.actions == ["create"])
-    ' "$COSMOS_PLAN_JSON_FILE" >/dev/null || die \
+  directive_assert_cosmos_recreation_plan "$COSMOS_PLAN_JSON_FILE" || die \
     "Terraform plan is not an exact create-only plan for the three Cosmos containers"
   echo "==> Applying the inspected saved Terraform plan"
   "${TERRAFORM_CMD[@]}" -chdir="$INFRA_DIR" apply \
@@ -820,10 +761,7 @@ assert_verify_execution_contract() {
       --query "properties.template.containers[?name=='directive-ingestion'].image | [0]" \
       --output tsv
   )"
-  jq -e '
-    (.command | if type == "array" then . else [.] end) == ["directive-ingest"] and
-    (.args | if type == "array" then . else [.] end) == ["verify"]
-  ' <<<"$container_json" >/dev/null || \
+  directive_assert_execution_mode_json "$container_json" verify || \
     die "Fresh execution did not use the exact directive-ingest verify command"
   [[ "$actual_image" == "$expected_image" ]] || \
     die "Fresh verification execution image changed from the pinned live image"
@@ -886,7 +824,7 @@ start_fresh_verify() {
     --execution "$execution_name" \
     --tail 300 \
     --format text >"$log_file"
-  extract_producer_record "$log_file" "$log_file.record" || {
+  directive_extract_producer_record "$log_file" "$log_file.record" || {
     rm -f "$log_file"
     die "Fresh v2 verify did not emit exactly one complete producer record"
   }

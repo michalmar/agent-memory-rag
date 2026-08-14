@@ -8,6 +8,8 @@ export COPILOT_HOME="${COPILOT_HOME:-$HOME/.copilot}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INFRA_DIR="$REPO_ROOT/infra"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/directive_infrastructure_guards.sh"
 MANDATE_FILE="$REPO_ROOT/setup/directives/mandatory/mand.csv"
 PHASE="${DIRECTIVE_INGEST_PHASE:-all}"
 
@@ -285,52 +287,12 @@ safe_summary_lines() {
   local raw_file
   raw_file="$(mktemp)"
   printf '%s\n' "$raw_logs" >"$raw_file"
-  if ! extract_producer_record "$raw_file" "$output_file"; then
+  if ! directive_extract_producer_record "$raw_file" "$output_file"; then
     rm -f "$raw_file"
     echo "ERROR: ingestion logs must contain exactly one complete producer record" >&2
     return 1
   fi
   rm -f "$raw_file"
-}
-
-extract_producer_record() {
-  local raw_file="$1"
-  local output_file="$2"
-  python3 - "$raw_file" "$output_file" <<'PY'
-import json
-import pathlib
-import sys
-
-raw_path = pathlib.Path(sys.argv[1])
-output_path = pathlib.Path(sys.argv[2])
-text = raw_path.read_text(encoding="utf-8", errors="replace")
-decoder = json.JSONDecoder()
-records = []
-offset = 0
-
-while True:
-    start = text.find("{", offset)
-    if start < 0:
-        break
-    try:
-        value, end = decoder.raw_decode(text, start)
-    except json.JSONDecodeError:
-        offset = start + 1
-        continue
-    offset = end
-    if isinstance(value, dict) and value.get("success") is True:
-        records.append(value)
-
-if len(records) != 1:
-    raise SystemExit(1)
-
-serialized = json.dumps(
-    records[0], ensure_ascii=False, separators=(",", ":"), sort_keys=True
-)
-if len(serialized.encode("utf-8")) > 65536:
-    raise SystemExit(1)
-output_path.write_text(serialized + "\n", encoding="utf-8")
-PY
 }
 
 show_execution_logs() {
@@ -952,12 +914,8 @@ assert_execution_mode() {
         --query "properties.template.containers[?name=='$JOB_CONTAINER'] | [0]" \
         --output json 2>/dev/null || true
     )"
-    if jq -e \
-      --arg expected_argument "$expected_argument" \
-      '
-        (.command | if type == "array" then . else [.] end) == ["directive-ingest"] and
-        (.args | if type == "array" then . else [.] end) == [$expected_argument]
-      ' <<<"$container_json" >/dev/null 2>&1; then
+    if directive_assert_execution_mode_json "$container_json" "$expected_argument" \
+      >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
