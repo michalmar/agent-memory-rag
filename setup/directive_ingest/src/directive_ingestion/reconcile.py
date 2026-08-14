@@ -935,6 +935,10 @@ class DirectiveIngestionRunner:
                 canonical = parse_canonical(
                     item.source, item.extraction, self.config.processing_hash
                 )
+                existing_bundle = await self.catalog.get_published_version(
+                    canonical.metadata.directive_id,
+                    canonical.metadata.directive_version_id,
+                )
                 text_chunks, chunk_findings = chunk_sections(
                     canonical.metadata.directive_version_id,
                     canonical.metadata.source_hash,
@@ -957,6 +961,26 @@ class DirectiveIngestionRunner:
                     _generation_canonical_hash(canonical),
                     canonical_json_hash(summary),
                 )
+                if (
+                    existing_bundle is not None
+                    and existing_bundle.artifact_generation_id == generation_id
+                ):
+                    canonical = replace(
+                        canonical,
+                        markdown=(
+                            canonical.markdown.rstrip()
+                            + "\n\n<!-- directive-generation-repair:"
+                            + source_fingerprint(
+                                item.source.source_name, item.source.source_hash
+                            )
+                            + " -->\n"
+                        ),
+                    )
+                    generation_id = calculate_artifact_generation_id(
+                        canonical.metadata.processing_hash,
+                        _generation_canonical_hash(canonical),
+                        canonical_json_hash(summary),
+                    )
                 text_chunks = _generation_scoped_chunks(
                     text_chunks, generation_id
                 )

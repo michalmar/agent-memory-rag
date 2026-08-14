@@ -7,13 +7,18 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from directive_contracts import DirectiveMetadata
+from directive_contracts import (
+    DirectiveMetadata,
+    calculate_artifact_generation_id,
+    canonical_json_hash,
+)
 
 from directive_ingestion.chunking import TextChunk
 from directive_ingestion.reconcile import (
     DirectiveIngestionRunner,
     SourceMetadata,
     _generation_scoped_chunks,
+    _generation_canonical_hash,
     _public_record_digest,
     _build_artifact_locators,
 )
@@ -348,6 +353,67 @@ async def test_malformed_state_repairs_without_restaging_live_generation() -> No
     )
     runner.summaries.summarize.assert_not_awaited()
     runner.search.build_chunks.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_corrupt_live_generation_gets_isolated_repair_generation() -> None:
+    source = _source()
+    metadata = _metadata(source)
+    canonical = SimpleNamespace(
+        metadata=metadata,
+        markdown="# Directive\n",
+        sections=(),
+        findings=(),
+        relations=(),
+    )
+    generation_id = calculate_artifact_generation_id(
+        metadata.processing_hash,
+        _generation_canonical_hash(canonical),
+        canonical_json_hash({}),
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.config = SimpleNamespace(
+        processing_hash=metadata.processing_hash,
+        chunk_token_limit=800,
+        chunk_overlap_tokens=120,
+    )
+    runner.summaries = SimpleNamespace(summarize=AsyncMock(return_value={}))
+    runner.search = SimpleNamespace(build_chunks=AsyncMock(return_value=[]))
+    runner.blobs = SimpleNamespace(quarantine=AsyncMock())
+    runner.catalog = SimpleNamespace(
+        get_published_version=AsyncMock(
+            return_value=SimpleNamespace(artifact_generation_id=generation_id)
+        )
+    )
+    runner.source_states = SimpleNamespace(record=AsyncMock())
+    runner._state_has_live_publication = AsyncMock(return_value=False)
+    import directive_ingestion.reconcile as reconcile_module
+
+    captured: list[object] = []
+    original_parse = reconcile_module.parse_canonical
+    original_chunks = reconcile_module.chunk_sections
+    original_manifest = reconcile_module._build_manifest
+    original_bundle = reconcile_module._build_published_bundle
+    original_replace = reconcile_module.replace
+    reconcile_module.parse_canonical = lambda *_args: canonical
+    reconcile_module.chunk_sections = lambda *_args, **_kwargs: ([], ())
+    reconcile_module._build_manifest = lambda value, *_args: captured.append(value) or object()
+    reconcile_module._build_published_bundle = lambda *_args: (object(), ())
+    reconcile_module.replace = lambda value, **changes: SimpleNamespace(
+        **(vars(value) | changes)
+    )
+    try:
+        await runner.prepare_changed_documents(
+            [SourceMetadata(source, metadata, object(), None)], "run"
+        )
+    finally:
+        reconcile_module.parse_canonical = original_parse
+        reconcile_module.chunk_sections = original_chunks
+        reconcile_module._build_manifest = original_manifest
+        reconcile_module._build_published_bundle = original_bundle
+        reconcile_module.replace = original_replace
+
+    assert "directive-generation-repair:" in captured[0].markdown
 
 
 @pytest.mark.asyncio
