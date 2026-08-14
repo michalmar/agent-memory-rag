@@ -35,6 +35,7 @@ from directive_ingestion.reconcile import (
     _generation_scoped_chunks,
     _generation_canonical_hash,
     _public_record_digest,
+    _corrupt_catalog_repair_salt,
     _validation_digest_projection,
     _build_artifact_locators,
     _validate_public_corpus_limit,
@@ -862,7 +863,7 @@ async def test_corrupt_live_generation_gets_isolated_repair_generation() -> None
 
 
 @pytest.mark.asyncio
-async def test_corrupt_catalog_slot_repair_does_not_salt_from_bad_descriptor() -> None:
+async def test_corrupt_catalog_slot_repair_uses_raw_slot_hash_salt() -> None:
     source = _source()
     metadata = _metadata(source)
     canonical = SimpleNamespace(
@@ -889,7 +890,7 @@ async def test_corrupt_catalog_slot_repair_does_not_salt_from_bad_descriptor() -
             return_value=CatalogSlotSnapshot(
                 metadata.directive_id,
                 metadata.directive_version_id,
-                {"malformed": object(), "_etag": "before"},
+                {"malformed": True, "_etag": "before"},
                 "before",
             )
         ),
@@ -918,10 +919,84 @@ async def test_corrupt_catalog_slot_repair_does_not_salt_from_bad_descriptor() -
         reconcile_module._build_manifest = original_manifest
         reconcile_module._build_published_bundle = original_bundle
 
-    assert captured == [None]
+    assert len(captured) == 1
+    assert isinstance(captured[0], str)
+    assert captured[0]
     runner.catalog.snapshot_version.assert_awaited_once_with(
         metadata.directive_id, metadata.directive_version_id
     )
+
+
+def test_corrupt_catalog_slot_repair_uses_trusted_source_state_generation() -> None:
+    source = _source()
+    metadata = _metadata(source)
+    generation_id = "c" * 64
+    salt = _corrupt_catalog_repair_salt(
+        metadata,
+        "d" * 64,
+        _published_state(source, metadata, generation_id),
+        CatalogSlotSnapshot(
+            metadata.directive_id,
+            metadata.directive_version_id,
+            {"malformed": object()},
+            "before",
+        ),
+    )
+
+    assert len(salt) == 64
+    assert salt != generation_id
+
+
+@pytest.mark.asyncio
+async def test_corrupt_catalog_slot_without_trusted_descriptor_requires_reset() -> None:
+    source = _source()
+    metadata = _metadata(source)
+    canonical = SimpleNamespace(
+        metadata=metadata,
+        markdown="# Directive\n",
+        sections=(),
+        findings=(),
+        relations=(),
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.config = SimpleNamespace(
+        processing_hash=metadata.processing_hash,
+        chunk_token_limit=800,
+        chunk_overlap_tokens=120,
+    )
+    runner.summaries = SimpleNamespace(summarize=AsyncMock(return_value={}))
+    runner.search = SimpleNamespace(build_chunks=AsyncMock(return_value=[]))
+    runner.blobs = SimpleNamespace(quarantine=AsyncMock())
+    runner.catalog = SimpleNamespace(
+        get_published_version=AsyncMock(
+            side_effect=IntegrityValidationError("invalid descriptor")
+        ),
+        snapshot_version=AsyncMock(
+            return_value=CatalogSlotSnapshot(
+                metadata.directive_id,
+                metadata.directive_version_id,
+                {"_etag": "before"},
+                "before",
+            )
+        ),
+    )
+    runner.source_states = SimpleNamespace(record=AsyncMock())
+    import directive_ingestion.reconcile as reconcile_module
+
+    original_parse = reconcile_module.parse_canonical
+    original_chunks = reconcile_module.chunk_sections
+    reconcile_module.parse_canonical = lambda *_args: canonical
+    reconcile_module.chunk_sections = lambda *_args, **_kwargs: ([], ())
+    try:
+        with pytest.raises(CatalogResetRequiredError, match="before staging"):
+            await runner.prepare_changed_documents(
+                [SourceMetadata(source, metadata, object(), None)], "run"
+            )
+    finally:
+        reconcile_module.parse_canonical = original_parse
+        reconcile_module.chunk_sections = original_chunks
+
+    runner.search.build_chunks.assert_not_awaited()
 
 
 @pytest.mark.asyncio

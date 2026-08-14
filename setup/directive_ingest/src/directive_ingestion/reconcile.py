@@ -92,6 +92,7 @@ class SourceMetadata:
     metadata: DirectiveMetadata
     extraction: Any | None
     source_state: PublishedSourceState | None
+    repair_source_state: PublishedSourceState | None = None
 
     @property
     def changed(self) -> bool:
@@ -139,6 +140,7 @@ class PublicationSnapshot:
 class SourceArtifactSnapshot:
     blob_name: str
     content: bytes
+    metadata: dict[str, str]
     etag: str
 
 
@@ -1158,6 +1160,7 @@ class DirectiveIngestionRunner:
                         metadata=candidate.metadata,
                         extraction=extraction,
                         source_state=None,
+                        repair_source_state=state,
                     )
                 )
             except ValueError as exc:
@@ -1252,6 +1255,7 @@ class DirectiveIngestionRunner:
                         canonical.metadata.directive_id,
                         canonical.metadata.directive_version_id,
                     )
+                    corrupt_catalog_slot = None
                 except IntegrityValidationError:
                     snapshot_method = getattr(
                         self.catalog, "snapshot_version", None
@@ -1261,16 +1265,15 @@ class DirectiveIngestionRunner:
                             "Catalog repair requires a raw ETag snapshot: "
                             f"{canonical.metadata.directive_version_id}"
                         ) from None
-                    if await snapshot_method(
+                    corrupt_catalog_slot = await snapshot_method(
                         canonical.metadata.directive_id,
                         canonical.metadata.directive_version_id,
-                    ) is None:
+                    )
+                    if corrupt_catalog_slot is None:
                         raise CatalogResetRequiredError(
                             "Corrupt catalog slot disappeared before repair: "
                             f"{canonical.metadata.directive_version_id}"
                         ) from None
-                    # The source document, not a malformed stored descriptor,
-                    # is authoritative for a deterministic replacement.
                     existing_bundle = None
                 text_chunks, chunk_findings = chunk_sections(
                     canonical.metadata.directive_version_id,
@@ -1297,6 +1300,16 @@ class DirectiveIngestionRunner:
                 ):
                     repair_salt = _repair_generation_salt(
                         canonical.metadata, generation_id
+                    )
+                    generation_id = _generation_id(
+                        canonical, summary, repair_salt
+                    )
+                elif corrupt_catalog_slot is not None:
+                    repair_salt = _corrupt_catalog_repair_salt(
+                        canonical.metadata,
+                        generation_id,
+                        item.repair_source_state,
+                        corrupt_catalog_slot,
                     )
                     generation_id = _generation_id(
                         canonical, summary, repair_salt
@@ -1523,7 +1536,7 @@ class DirectiveIngestionRunner:
                 else None
             )
             artifact_snapshot_method = getattr(
-                self.blobs, "read_bytes_with_etag", None
+                self.blobs, "read_bytes_with_metadata_and_etag", None
             )
             artifact_snapshot = (
                 await artifact_snapshot_method(
@@ -1537,6 +1550,7 @@ class DirectiveIngestionRunner:
                     item.bundle.artifacts.source_blob_name,
                     artifact_snapshot[0],
                     artifact_snapshot[1],
+                    artifact_snapshot[2],
                 )
                 if artifact_snapshot is not None
                 else None
@@ -1656,6 +1670,7 @@ class DirectiveIngestionRunner:
                         snapshot.previous_source_artifact.content,
                         snapshot.candidate_source_artifact_etag,
                         content_type="application/pdf",
+                        metadata=snapshot.previous_source_artifact.metadata,
                     )
             if (
                 snapshot.preserve_candidate_generation
@@ -2064,7 +2079,11 @@ class DirectiveIngestionRunner:
                 item.source.content,
                 "application/pdf",
             )
-        elif source_snapshot.content != item.source.content:
+        elif (
+            source_snapshot.content != item.source.content
+            or source_snapshot.metadata.get("content_sha256")
+            != item.source.source_hash
+        ):
             candidate_source_etag = await self.blobs.replace_bytes(
                 artifacts.source_blob_name,
                 item.source.content,
@@ -2266,6 +2285,90 @@ def _repair_generation_salt(
             + base_generation_id
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _corrupt_catalog_repair_salt(
+    metadata: DirectiveMetadata,
+    base_generation_id: str,
+    source_state: PublishedSourceState | None,
+    corrupt_slot: CatalogSlotSnapshot,
+) -> str:
+    """Create an isolated generation without trusting corrupt catalog fields."""
+    trusted = _trusted_source_state_generation(metadata, source_state)
+    raw_slot_hash = _raw_catalog_slot_hash(corrupt_slot)
+    if trusted is None and raw_slot_hash is None:
+        raise CatalogResetRequiredError(
+            "Catalog reset required before staging: corrupt stable slot has no "
+            f"trusted repair descriptor for {metadata.directive_version_id}"
+        )
+    descriptors = [
+        value
+        for value in (
+            f"source-state:{trusted}" if trusted is not None else None,
+            f"raw-slot:{raw_slot_hash}" if raw_slot_hash is not None else None,
+        )
+        if value is not None
+    ]
+    return hashlib.sha256(
+        (
+            "directive-corrupt-catalog-repair\0"
+            + metadata.directive_id
+            + "\0"
+            + metadata.directive_version_id
+            + "\0"
+            + base_generation_id
+            + "\0"
+            + "\0".join(descriptors)
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _trusted_source_state_generation(
+    metadata: DirectiveMetadata, source_state: PublishedSourceState | None
+) -> str | None:
+    if source_state is None:
+        return None
+    state_metadata = getattr(source_state, "directive_metadata", None)
+    generation_id = getattr(source_state, "artifact_generation_id", None)
+    if (
+        getattr(source_state, "publication_state", None) != "published"
+        or getattr(state_metadata, "directive_id", None) != metadata.directive_id
+        or getattr(state_metadata, "directive_version_id", None)
+        != metadata.directive_version_id
+        or getattr(state_metadata, "source_filename", None)
+        != metadata.source_filename
+        or getattr(state_metadata, "source_hash", None) != metadata.source_hash
+        or getattr(state_metadata, "processing_hash", None)
+        != metadata.processing_hash
+        or not _is_sha256(generation_id)
+    ):
+        return None
+    return generation_id
+
+
+def _raw_catalog_slot_hash(corrupt_slot: CatalogSlotSnapshot) -> str | None:
+    payload = getattr(corrupt_slot, "payload", None)
+    if not isinstance(payload, dict):
+        return None
+    canonical_payload = {
+        key: value
+        for key, value in payload.items()
+        if isinstance(key, str) and not key.startswith("_")
+    }
+    if not canonical_payload:
+        return None
+    try:
+        return canonical_json_hash(canonical_payload)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _expected_live_generation_id(

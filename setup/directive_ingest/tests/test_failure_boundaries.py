@@ -80,6 +80,45 @@ async def test_catalog_publication_failure_retires_staged_search_chunks() -> Non
 
 
 @pytest.mark.asyncio
+async def test_transient_catalog_failure_leaves_prior_search_generation_untouched() -> None:
+    item = SimpleNamespace(
+        bundle=SimpleNamespace(
+            directive_id="d-1",
+            directive_version_id="d-1:v2",
+            artifact_generation_id="candidate",
+        ),
+        source=SimpleNamespace(),
+        canonical=SimpleNamespace(metadata=SimpleNamespace(processing_hash="a" * 64)),
+        search_chunks=[object()],
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.catalog = SimpleNamespace(
+        snapshot_version=AsyncMock(return_value=None),
+        get_published_version=AsyncMock(
+            side_effect=exceptions.CosmosHttpResponseError(
+                status_code=503, message="temporarily unavailable"
+            )
+        ),
+    )
+    runner.search = SimpleNamespace(
+        stage_chunks=AsyncMock(),
+        publish_chunks=AsyncMock(),
+        retire_chunks=AsyncMock(),
+        delete_chunks=AsyncMock(),
+        restore_current_generation=AsyncMock(),
+    )
+
+    with pytest.raises(exceptions.CosmosHttpResponseError):
+        await runner._publish_transaction([item])
+
+    runner.search.stage_chunks.assert_not_awaited()
+    runner.search.publish_chunks.assert_not_awaited()
+    runner.search.retire_chunks.assert_not_awaited()
+    runner.search.delete_chunks.assert_not_awaited()
+    runner.search.restore_current_generation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["stage", "publish", "state", "activate"])
 async def test_transaction_failure_restores_prior_catalog_and_current(
