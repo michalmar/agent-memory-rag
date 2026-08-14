@@ -332,11 +332,11 @@ class DirectiveSearchRepository:
             for section in bundle.manifest.sections
             for chunk_id in section.chunk_ids
         }
-        actual_ids = set(await self._find_keys(""))
-        if actual_ids != expected_ids:
-            raise IntegrityValidationError(
-                "Search documents do not exactly match manifests"
-            )
+        await self._wait_for_exact_ids(
+            "",
+            expected_ids,
+            detail="the whole published Search corpus",
+        )
 
     async def reconcile_generation(
         self, bundle: Any
@@ -431,9 +431,16 @@ class DirectiveSearchRepository:
         return keys
 
     async def _delete_keys(self, keys: Iterable[str]) -> None:
-        for batch in _batches(list(keys), 500):
+        key_list = sorted(set(keys))
+        for batch in _batches(key_list, 500):
             await self._upload_actions(
                 [{"id": key, "@search.action": "delete"} for key in batch]
+            )
+        for batch in _batches(key_list, _VISIBILITY_ID_BATCH_SIZE):
+            await self._wait_for_exact_ids(
+                _id_filter(set(batch)),
+                set(),
+                detail="deleted Search chunks",
             )
 
     async def _merge_chunk_state(

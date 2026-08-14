@@ -197,6 +197,69 @@ async def test_current_visibility_timeout_fails_on_exact_id_mismatch(
 
 
 @pytest.mark.asyncio
+async def test_whole_corpus_visibility_waits_for_delayed_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _repository()
+    bundle = SimpleNamespace(
+        manifest=SimpleNamespace(
+            sections=[SimpleNamespace(chunk_ids=["expected-chunk"])]
+        )
+    )
+    repository._find_keys = AsyncMock(
+        side_effect=[
+            ["expected-chunk", "stale-chunk"],
+            ["expected-chunk"],
+        ]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(search_repository.asyncio, "sleep", sleep)
+
+    await repository.validate_exact_published([bundle])
+
+    assert repository._find_keys.await_count == 2
+    assert repository._find_keys.await_args.args == ("",)
+    sleep.assert_awaited_once_with(1.0)
+
+
+@pytest.mark.asyncio
+async def test_deletion_waits_until_exact_ids_are_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _repository()
+    repository._upload_actions = AsyncMock()
+    repository._find_keys = AsyncMock(side_effect=[["stale-chunk"], []])
+    sleep = AsyncMock()
+    monkeypatch.setattr(search_repository.asyncio, "sleep", sleep)
+
+    await repository.delete_chunk_ids(["stale-chunk"])
+
+    repository._upload_actions.assert_awaited_once_with(
+        [{"id": "stale-chunk", "@search.action": "delete"}]
+    )
+    assert repository._find_keys.await_count == 2
+    assert "id eq 'stale-chunk'" in repository._find_keys.await_args.args[0]
+    sleep.assert_awaited_once_with(1.0)
+
+
+@pytest.mark.asyncio
+async def test_deletion_times_out_on_persistent_stale_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _repository()
+    repository._upload_actions = AsyncMock()
+    repository._find_keys = AsyncMock(return_value=["stale-chunk"])
+    monkeypatch.setattr(search_repository, "_VISIBILITY_TIMEOUT_SECONDS", 0.5)
+    monotonic = iter((0.0, 1.0))
+    monkeypatch.setattr(search_repository, "monotonic", lambda: next(monotonic))
+
+    with pytest.raises(IntegrityValidationError, match="deleted Search chunks"):
+        await repository.delete_chunk_ids(["stale-chunk"])
+
+    repository._find_keys.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_exact_visibility_propagates_transport_errors() -> None:
     repository = _repository()
     directive = SimpleNamespace(

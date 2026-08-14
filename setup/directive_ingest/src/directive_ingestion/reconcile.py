@@ -568,8 +568,8 @@ class DirectiveIngestionRunner:
                 "Section-content records do not exactly match published bundles"
             )
 
-        search = await self.search.verification_summary()
         await self.search.validate_exact_published(bundles)
+        search = await self.search.verification_summary()
         if (
             search["published_chunks"] != expected_chunks
             or search["published_directives"] != len(directive_ids)
