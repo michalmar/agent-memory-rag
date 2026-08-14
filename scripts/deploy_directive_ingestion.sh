@@ -23,6 +23,12 @@ load_recovery_candidates() {
   done <"$candidates_file"
 }
 
+adopt_recovered_publication_execution() {
+  local recovery_status="$1"
+  [[ "$recovery_status" -eq 0 && "${#RECOVERY_CANDIDATES[@]}" -eq 1 ]] || return 1
+  STARTED_EXECUTION_NAME="${RECOVERY_CANDIDATES[0]}"
+}
+
 run_bash_compat_self_test() {
   local candidates_file execution_name execution_already_tracked=false
   candidates_file="$(mktemp)"
@@ -45,6 +51,17 @@ run_bash_compat_self_test() {
     done
   fi
   [[ "$execution_already_tracked" == false ]] || return 1
+  [[ "${#STARTED_EXECUTIONS[@]}" -eq 0 ]] || return 1
+  RECOVERY_CANDIDATES=("recovered-run")
+  STARTED_EXECUTIONS=()
+  adopt_recovered_publication_execution 0 || return 1
+  [[ "$STARTED_EXECUTION_NAME" == recovered-run ]] || return 1
+  RECOVERY_CANDIDATES=()
+  STARTED_EXECUTIONS=()
+  adopt_recovered_publication_execution 2 && return 1
+  RECOVERY_CANDIDATES=("one" "two")
+  STARTED_EXECUTIONS=()
+  adopt_recovered_publication_execution 2 && return 1
   [[ "${#STARTED_EXECUTIONS[@]}" -eq 0 ]]
 }
 
@@ -680,7 +697,7 @@ recover_publication_execution() {
       [[ -n "$execution_name" ]] && track_started_execution "$execution_name"
     done
   fi
-  [[ "$recovery_status" -eq 0 && "${#RECOVERY_CANDIDATES[@]}" -eq 1 ]] || return 1
+  adopt_recovered_publication_execution "$recovery_status"
 }
 
 start_job_execution() {
@@ -723,19 +740,24 @@ start_job_execution() {
   then
     rm -f "$execution_name_file"
     if [[ "$expected_argument" == run-daily ]]; then
-      recover_publication_execution "$execution_snapshot" || true
+      recover_publication_execution "$execution_snapshot" || return 1
+      execution_name="$STARTED_EXECUTION_NAME"
+    else
+      return 1
     fi
-    return 1
+  else
+    execution_name="$(<"$execution_name_file")"
+    rm -f "$execution_name_file"
   fi
-  execution_name="$(<"$execution_name_file")"
-  rm -f "$execution_name_file"
-  [[ -n "$execution_name" ]] || {
+  if [[ -z "$execution_name" ]]; then
     if [[ "$expected_argument" == run-daily ]]; then
-      recover_publication_execution "$execution_snapshot" || true
+      recover_publication_execution "$execution_snapshot" || return 1
+      execution_name="$STARTED_EXECUTION_NAME"
+    else
+      echo "ERROR: Container Apps did not return an execution name" >&2
+      return 1
     fi
-    echo "ERROR: Container Apps did not return an execution name" >&2
-    return 1
-  }
+  fi
   track_started_execution "$execution_name"
   assert_execution_mode "$execution_name" "$expected_argument"
   assert_execution_image "$execution_name"
