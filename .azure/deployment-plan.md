@@ -2,9 +2,50 @@
 
 > **Status:** Deployed
 >
-> **Current release status:** Deployed; application readiness degraded by the pre-existing Hosted Agent check
+> **Current release status:** Deployed
 
 Generated: 2026-07-25T20:33:12Z
+
+## Current release: Hosted Agent readiness deadlock
+
+Deployed: 2026-08-14
+
+Backend readiness previously required the support Hosted Agent runtime. That
+runtime initializes by calling its MCP tool through the public frontend and
+back into the backend. Container Apps withheld backend routing while readiness
+was 503, so MCP initialization timed out and the runtime could never recover.
+
+The support Hosted Agent runtime is now reported as an optional degraded
+dependency during initialization. Gateway authorization, Cosmos DB, Search,
+directive data, and other backend dependencies remain required. Once backend
+routing becomes available, the existing retry loop initializes the Hosted
+Agent and clears the degraded status.
+
+### Validation proof
+
+| Check | Result |
+| --- | --- |
+| Regression tests | 29 tests and 7 subtests passed |
+| Review | Five-axis review found no required issues |
+| Failure reproduction | Direct Hosted Agent invocation failed because MCP initialization through `/api/mcp/` timed out while backend readiness was 503 |
+| Safety boundary | `hosted_tool_gateway` remains required; only `foundry_hosted_maf` is callback-dependent and optional during recovery |
+
+### Deployment proof
+
+Verified at `2026-08-14T12:31:14Z`.
+
+| Item | Result |
+| --- | --- |
+| Commit | `22f3c330b03e6a6560705e57f42ece6041c0ae6c` |
+| Workflow | [31800291794](https://github.com/michalmar/agent-memory-rag/actions/runs/31800291794) succeeded; backend only |
+| Backend image | `agmem5df652acr.azurecr.io/backend:22f3c330b03e6a6560705e57f42ece6041c0ae6c-31800291794-1` |
+| Revision | `ca-agmem-backend--0000061`, running and latest-ready |
+| Public readiness | HTTP 200 with status `ready` |
+| Recovery behavior | `foundry_hosted_maf` was briefly degraded, then recovered to `ok`; `degraded_dependencies` is empty |
+| Hosted Agent | Direct remote invocation completed successfully and returned `OK` |
+
+Frontend:
+`https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io/`
 
 ## Current release: portable existing-environment Terraform
 
