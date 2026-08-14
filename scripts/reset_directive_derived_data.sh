@@ -24,6 +24,7 @@ CONFIRMATION_TOKEN=""
 VERIFICATION_FILE=""
 INVENTORY_EVIDENCE_FILE=""
 SOURCE_INVENTORY_FILE=""
+EXPECTED_ENVIRONMENT_FILE="$(mktemp)"
 SOURCE_INVENTORY_DIGEST=""
 SOURCE_COUNT=0
 STARTED_EXECUTIONS=()
@@ -75,6 +76,7 @@ cleanup() {
     assert_no_active_execution || true
   fi
   [[ -z "$SOURCE_INVENTORY_FILE" ]] || rm -f "$SOURCE_INVENTORY_FILE"
+  rm -f "$EXPECTED_ENVIRONMENT_FILE"
   [[ -z "$COSMOS_PLAN_FILE" ]] || rm -f "$COSMOS_PLAN_FILE"
   [[ -z "$COSMOS_PLAN_JSON_FILE" ]] || rm -f "$COSMOS_PLAN_JSON_FILE"
   exit "$status"
@@ -252,6 +254,35 @@ load_inventory() {
   MANDATES_CONTAINER="$(tf_output directive_mandates_container)"
   SEARCH_NAME="$(tf_output search_service_name)"
   JOB_NAME="$(tf_output directive_ingestion_job_name)"
+  jq -S -n \
+    --arg source_kind azure_blob \
+    --arg source_storage_account "$STORAGE_ACCOUNT" \
+    --arg source_container "$SOURCE_CONTAINER" \
+    --arg source_prefix "$SOURCE_PREFIX" \
+    --arg artifact_storage_account "$STORAGE_ACCOUNT" \
+    --arg artifact_container "$ARTIFACT_CONTAINER" \
+    --arg cosmos_account "$COSMOS_ACCOUNT" \
+    --arg cosmos_database "$COSMOS_DATABASE" \
+    --arg catalog_container "$CATALOG_CONTAINER" \
+    --arg content_container "$CONTENT_CONTAINER" \
+    --arg mandate_container "$MANDATES_CONTAINER" \
+    --arg search_service "$SEARCH_NAME" \
+    --arg search_index "$V2_INDEX" \
+    '{
+      source_kind: $source_kind,
+      source_storage_account: $source_storage_account,
+      source_container: $source_container,
+      source_prefix: $source_prefix,
+      artifact_storage_account: $artifact_storage_account,
+      artifact_container: $artifact_container,
+      cosmos_account: $cosmos_account,
+      cosmos_database: $cosmos_database,
+      catalog_container: $catalog_container,
+      content_container: $content_container,
+      mandate_container: $mandate_container,
+      search_service: $search_service,
+      search_index: $search_index
+    }' >"$EXPECTED_ENVIRONMENT_FILE"
   ACTIVE_EXECUTIONS="$(
     "${AZ_CMD[@]}" containerapp job execution list \
       --name "$JOB_NAME" \
@@ -276,6 +307,8 @@ source_inventory_digest=$SOURCE_INVENTORY_DIGEST
 artifact_prefix=directives/
 artifact_prefix=source-state/
 artifact_prefix=quarantine/ (obsolete quarantine)
+artifact_prefix=publication-approval/
+artifact_prefix=publication-commit/
 cosmos_account=$COSMOS_ACCOUNT
 cosmos_database=$COSMOS_DATABASE
 cosmos_container=$CATALOG_CONTAINER partition_key=/directive_id
@@ -652,52 +685,48 @@ reset_derived_data() {
   purge_prefix "directives/"
   purge_prefix "source-state/"
   purge_prefix "quarantine/"
+  purge_prefix "publication-approval/"
+  purge_prefix "publication-commit/"
   delete_v2_index
   rm -f "$INVENTORY_EVIDENCE_FILE"
   echo "==> Reset complete; v1 Search remains and v2 bootstrap is owned by the ingestion deployment"
 }
 
 verification_file_is_fresh() {
-  local calculated_digest record_without_digest
+  local calculated_digest record_without_digest validated_record
   [[ -f "$VERIFICATION_FILE" ]] || die \
     "A safe output file from the successful v2 verify execution is required"
   [[ -s "$VERIFICATION_FILE" ]] || die "Verification evidence file is empty"
   [[ "$(wc -c <"$VERIFICATION_FILE")" -le 65536 ]] || die \
     "Verification evidence file is unexpectedly large"
-  jq -s -e \
+  validated_record="$(mktemp)"
+  jq -c '.producer_record' "$VERIFICATION_FILE" >"$validated_record"
+  directive_validate_producer_record \
+    "$validated_record" "$validated_record.normalized" \
+    directive.verify.v2 "$EXPECTED_ENVIRONMENT_FILE" \
+    "$SOURCE_INVENTORY_DIGEST" directive-v2-czech-layout "$V2_INDEX" || {
+    rm -f "$validated_record" "$validated_record.normalized"
+    die "Verification evidence is not one complete successful pinned v2 verify record"
+  }
+  rm -f "$validated_record" "$validated_record.normalized"
+  jq -e \
     --arg subscription "$SUBSCRIPTION_ID" \
     --arg resource_group "$RG" \
     --arg job "$JOB_NAME" \
-    --arg search_index "directive-chunks-v2" \
+    --arg search_index "$V2_INDEX" \
+    --arg source_digest "$SOURCE_INVENTORY_DIGEST" \
     '
-      length == 1 and
-      (.[0] | type == "object") and
-      (.[0] | (.producer_record // .)) as $record |
-      $record.success == true and
-      ($record.normalized_directive_ids | type == "array" and all(.[]; type == "string")) and
-      ($record.directive_version_ids | type == "array" and all(.[]; type == "string")) and
-      ($record.warnings | type == "array" and length <= 100) and
-      ($record.environment | type == "object") and
-      ($record.source_count | type == "number" and . > 0) and
-      $record.search_index == $search_index and
-      $record.processing_version == "directive-v2-czech-layout" and
-      ($record.processing_hash | test("^[0-9a-f]{64}$")) and
-      ($record.source_inventory_digest | test("^[0-9a-f]{64}$")) and
-      ($record.state_digest | test("^[0-9a-f]{64}$")) and
-      ($record.verify_digest | test("^[0-9a-f]{64}$")) and
-      ($record.verify_execution_id | type == "string" and length > 0) and
-      ($record.cross_store | type == "object" and length > 0) and
-      (.[0].wrapper.subscription_id == $subscription) and
-      (.[0].wrapper.resource_group == $resource_group) and
-      (.[0].wrapper.job_name == $job) and
-      (.[0].wrapper.search_index == $search_index) and
-      (.[0].wrapper.processing_version == "directive-v2-czech-layout") and
-      (.[0].wrapper.image_digest | test("^sha256:[0-9a-f]{64}$")) and
-      (.[0].wrapper.source_inventory_digest == $record.source_inventory_digest) and
-      (.[0].wrapper.verification_execution_id == $record.verify_execution_id) and
-      ((.[0].wrapper.verification_record_digest // "") | test("^[0-9a-f]{64}$"))
+      .wrapper.subscription_id == $subscription and
+      .wrapper.resource_group == $resource_group and
+      .wrapper.job_name == $job and
+      .wrapper.search_index == $search_index and
+      .wrapper.processing_version == "directive-v2-czech-layout" and
+      (.wrapper.image_digest | test("^sha256:[0-9a-f]{64}$")) and
+      .wrapper.source_inventory_digest == $source_digest and
+      (.wrapper.verification_execution_id | type == "string" and length > 0) and
+      (.wrapper.verification_record_digest | test("^[0-9a-f]{64}$"))
     ' "$VERIFICATION_FILE" >/dev/null || die \
-      "Verification evidence is not one complete successful pinned v2 verify record"
+      "Verification wrapper is not bound to the current Azure environment"
   record_without_digest="$(jq -S -c 'del(.wrapper.verification_record_digest, .verification_record_digest)' "$VERIFICATION_FILE")"
   calculated_digest="$(sha256_text "$record_without_digest")"
   [[ "$calculated_digest" == "$(jq -r '.wrapper.verification_record_digest // .verification_record_digest' "$VERIFICATION_FILE")" ]] || die \
@@ -828,6 +857,13 @@ start_fresh_verify() {
     rm -f "$log_file"
     die "Fresh v2 verify did not emit exactly one complete producer record"
   }
+  directive_validate_producer_record \
+    "$log_file.record" "$log_file.validated" \
+    directive.verify.v2 "$EXPECTED_ENVIRONMENT_FILE" \
+    "$SOURCE_INVENTORY_DIGEST" directive-v2-czech-layout "$V2_INDEX" || {
+    rm -f "$log_file" "$log_file.record" "$log_file.validated"
+    die "Fresh v2 verify producer record failed the exact schema and digest checks"
+  }
   execution_image="$(
     "${AZ_CMD[@]}" containerapp job execution show \
       --name "$JOB_NAME" \
@@ -862,14 +898,13 @@ start_fresh_verify() {
         processing_version: $processing_version,
         search_index: $search_index
       }}' \
-    "$log_file.record" >"$VERIFICATION_FILE"
-  [[ "$(jq -r '.producer_record.verify_execution_id' "$VERIFICATION_FILE")" == "$execution_name" ]] || \
-    die "Fresh verify producer record is not bound to the started execution"
+    "$log_file.validated" >"$VERIFICATION_FILE"
   record_digest="$(sha256_text "$(jq -S -c 'del(.wrapper.verification_record_digest)' "$VERIFICATION_FILE")")"
   jq --arg digest "$record_digest" '.wrapper.verification_record_digest = $digest' \
     "$VERIFICATION_FILE" >"$log_file.evidence"
   mv "$log_file.evidence" "$VERIFICATION_FILE"
   rm -f "$log_file.record"
+  rm -f "$log_file.validated"
   rm -f "$log_file"
 }
 
@@ -892,7 +927,7 @@ finalize_v1() {
   evidence_image="$(jq -r '.wrapper.image_digest // .image_digest' "$VERIFICATION_FILE")"
   evidence_source="$(jq -r '.producer_record.source_inventory_digest // .source_inventory_digest' "$VERIFICATION_FILE")"
   evidence_processing_hash="$(jq -r '.producer_record.processing_hash // .processing_hash' "$VERIFICATION_FILE")"
-  verification_execution="$(jq -r '.producer_record.verify_execution_id // .verify_execution_id' "$VERIFICATION_FILE")"
+  verification_execution="$(jq -r '.wrapper.verification_execution_id' "$VERIFICATION_FILE")"
   evidence_state_digest="$(jq -r '.producer_record.state_digest' "$VERIFICATION_FILE")"
   [[ "$evidence_state_digest" == "$expected_state_digest" ]] || die \
     "Fresh verification state_digest differs from the finalize dry-run evidence"
@@ -938,7 +973,7 @@ finalize_v1() {
       --resource "https://search.azure.com" \
       --output tsv
   )"
-  expected_chunk_count="$(jq -r '.producer_record.cross_store.search.count // .cross_store.search.count // empty' "$VERIFICATION_FILE")"
+  expected_chunk_count="$(jq -r '.producer_record.cross_store.search.document_count // empty' "$VERIFICATION_FILE")"
   [[ "$expected_chunk_count" =~ ^[0-9]+$ ]] || die \
     "Fresh verification is missing the exact Search cross-store count"
   [[ "$live_chunk_count" == "$expected_chunk_count" ]] || die \

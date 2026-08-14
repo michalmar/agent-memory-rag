@@ -13,9 +13,13 @@ MOCK_AZ="$(mktemp)"
 MOCK_TERRAFORM="$(mktemp)"
 MOCK_LOG="$(mktemp)"
 EVIDENCE="$(mktemp)"
+ENVIRONMENT="$(mktemp)"
+VALIDATE_RECORD="$(mktemp)"
+VERIFY_RECORD="$(mktemp)"
+NORMALIZED_RECORD="$(mktemp)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/directive_infrastructure_guards.sh"
-trap 'rm -f "$FIXTURE" "$PLAN" "$BAD_PLAN" "$RAW_LOG" "$RECORD" "$OVERSIZE_LOG" "$MOCK_AZ" "$MOCK_TERRAFORM" "$MOCK_LOG" "$EVIDENCE"' EXIT
+trap 'rm -f "$FIXTURE" "$PLAN" "$BAD_PLAN" "$RAW_LOG" "$RECORD" "$OVERSIZE_LOG" "$MOCK_AZ" "$MOCK_TERRAFORM" "$MOCK_LOG" "$EVIDENCE" "$ENVIRONMENT" "$VALIDATE_RECORD" "$VERIFY_RECORD" "$NORMALIZED_RECORD"' EXIT
 
 cat >"$FIXTURE" <<'EOF'
 {"name":"directive-ingestion","command":["directive-ingest"],"args":["verify"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
@@ -61,6 +65,90 @@ if directive_extract_producer_record "$OVERSIZE_LOG" "$RECORD"; then
   echo "oversize producer record was accepted" >&2
   exit 1
 fi
+
+python3 - "$ENVIRONMENT" "$VALIDATE_RECORD" "$VERIFY_RECORD" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+environment_path, validate_path, verify_path = map(pathlib.Path, sys.argv[1:])
+environment = {
+    "source_kind": "azure_blob",
+    "source_storage_account": "sttest",
+    "source_container": "directive-source",
+    "source_prefix": "",
+    "artifact_storage_account": "sttest",
+    "artifact_container": "directive-artifacts",
+    "cosmos_account": "costest",
+    "cosmos_database": "directives",
+    "catalog_container": "catalog",
+    "content_container": "directive_content",
+    "mandate_container": "user_mandates",
+    "search_service": "searchtest",
+    "search_index": "directive-chunks-v2",
+}
+digest = lambda value: hashlib.sha256(
+    json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+).hexdigest()
+source = "b" * 64
+base = {
+    "record_schema": "directive.validate.v2",
+    "success": True,
+    "run_id": "validate-run",
+    "environment": environment,
+    "processing_version": "directive-v2-czech-layout",
+    "processing_hash": "a" * 64,
+    "search_index": "directive-chunks-v2",
+    "source_inventory_digest": source,
+    "source_count": 1,
+    "directive_count": 1,
+    "normalized_directive_ids": ["D-1"],
+    "directive_version_ids": ["V-1"],
+    "mandate_count": 0,
+    "mandate_user_count": 0,
+    "warnings": [],
+    "warning_count": 0,
+    "failures": [],
+}
+base["validation_digest"] = digest({k: v for k, v in base.items() if k != "validation_digest"})
+validate_path.write_text(json.dumps(base, separators=(",", ":")) + "\n")
+cross_store = {
+    "catalog": {"directive_count": 1, "version_count": 1, "current_count": 1, "identity_digest": "c" * 64},
+    "content": {"item_count": 1, "section_count": 1, "part_count": 1, "identity_digest": "d" * 64},
+    "artifacts": {"object_count": 1, "required_count": 1, "identity_digest": "e" * 64},
+    "source_state": {"record_count": 1, "identity_digest": "f" * 64},
+    "search": {
+        "document_count": 1, "current_document_count": 1, "directive_count": 1,
+        "version_count": 1, "vector_dimensions": 3072, "vector_profile": "p",
+        "vectorizer": "v", "semantic_configuration": "s", "direct_hybrid_query": "true",
+        "identity_digest": "1" * 64,
+    },
+    "mandates": {
+        "snapshot_id": "snapshot", "checksum": "2" * 64, "assignment_count": 0,
+        "user_count": 0, "identity_digest": "3" * 64,
+    },
+}
+verify = {k: v for k, v in base.items() if k not in {"record_schema", "mandate_count", "mandate_user_count", "failures", "validation_digest"}}
+verify.update({"record_schema": "directive.verify.v2", "run_id": "verify-run", "warnings": [], "warning_count": 0, "cross_store": cross_store})
+projection = {k: verify[k] for k in (
+    "record_schema", "environment", "processing_version", "processing_hash",
+    "search_index", "source_count", "source_inventory_digest", "directive_count",
+    "normalized_directive_ids", "directive_version_ids", "cross_store",
+)}
+verify["state_digest"] = digest(projection)
+verify["verify_digest"] = digest({k: v for k, v in verify.items() if k != "verify_digest"})
+verify_path.write_text(json.dumps(verify, separators=(",", ":")) + "\n")
+environment_path.write_text(json.dumps(environment, separators=(",", ":")))
+PY
+directive_validate_producer_record \
+  "$VALIDATE_RECORD" "$NORMALIZED_RECORD" \
+  directive.validate.v2 "$ENVIRONMENT" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  directive-v2-czech-layout directive-chunks-v2
+directive_validate_producer_record \
+  "$VERIFY_RECORD" "$NORMALIZED_RECORD" \
+  directive.verify.v2 "$ENVIRONMENT" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  directive-v2-czech-layout directive-chunks-v2
 
 cat >"$PLAN" <<'EOF'
 {"resource_changes":[

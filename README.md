@@ -413,9 +413,10 @@ invalidate it. A successful reset consumes the evidence file.
 
 The reset deletes only the three derived Cosmos containers, recreates them with
 Terraform and the retained `/directive_id`, `/directive_version_id`, and
-`/user_id` partition keys, then purges only `directives/`, `source-state/`, and
-obsolete `quarantine/` prefixes from the artifact container. It never edits
-Terraform state or touches source data. Deploy the compatible image with
+`/user_id` partition keys, then purges only `directives/`, `source-state/`,
+obsolete `quarantine/`, `publication-approval/`, and `publication-commit/`
+prefixes from the artifact container. It never edits Terraform state or
+touches source data. Deploy the compatible image with
 `scripts/deploy_directive_ingestion.sh`; the job runs preflight, metadata-only
 `validate`, an explicit operator confirmation, full ingestion (which bootstraps
 `directive-chunks-v2`), and cross-store `verify`. Terraform's durable job
@@ -432,7 +433,11 @@ DIRECTIVE_VALIDATE_EVIDENCE_FILE=/tmp/directive-v2-validation.json \
 
 Validation prints a fresh `DIRECTIVE-PUBLISH-V2-...` approval token bound to the
 complete canonical validation record, pinned image digest, and source inventory
-digest. Publish later, noninteractively, only with that evidence and token:
+digest. The producer `run_id` is distinct from Azure execution IDs, which remain
+only in the evidence wrapper. Before `run-daily`, deployment atomically reserves
+`publication-approval/<validation-digest>.json` with create-only semantics;
+replays are rejected and the marker is retained after successful publication.
+Publish later, noninteractively, only with that evidence and token:
 
 ```bash
 DIRECTIVE_VALIDATE_EVIDENCE_FILE=/tmp/directive-v2-validation.json \

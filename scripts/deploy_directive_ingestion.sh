@@ -90,9 +90,13 @@ COSMOS_ENDPOINT="$(tf cosmos_endpoint)"
 COSMOS_ACCOUNT="${COSMOS_ENDPOINT#https://}"
 COSMOS_ACCOUNT="${COSMOS_ACCOUNT%%.*}"
 COSMOS_DATABASE="$(tf directive_cosmos_database)"
+COSMOS_CATALOG_CONTAINER="$(tf directive_catalog_container)"
+COSMOS_CONTENT_CONTAINER="$(tf directive_content_container)"
+COSMOS_MANDATE_CONTAINER="$(tf directive_mandates_container)"
 STORAGE_ACCOUNT="$(tf directive_artifacts_storage_account)"
 ARTIFACT_BLOB_CONTAINER="$(tf directive_artifacts_container)"
 SOURCE_BLOB_CONTAINER="$(tf directive_source_container)"
+SOURCE_PREFIX="$(tf directive_source_prefix)"
 DOCUMENT_INTELLIGENCE_NAME="$(tf directive_document_intelligence_name)"
 SEARCH_NAME="$(tf search_service_name)"
 FOUNDRY_SCOPE="$(tf foundry_agents_account_id)"
@@ -107,12 +111,16 @@ EXPECTED_PROCESSING_VERSION="directive-v2-czech-layout"
 EXPECTED_SEARCH_INDEX="directive-chunks-v2"
 MAX_VALIDATION_EVIDENCE_AGE_SECONDS="${DIRECTIVE_VALIDATE_EVIDENCE_MAX_AGE_SECONDS:-86400}"
 INDEX_SCHEMA_FILE="$(mktemp)"
+EXPECTED_ENVIRONMENT_FILE="$(mktemp)"
 VALIDATION_SUMMARY_FILE="$(mktemp)"
 VERIFY_SUMMARY_FILE="$(mktemp)"
 SOURCE_INVENTORY_FILE="$(mktemp)"
 VALIDATION_RECORD_DIGEST=""
+VALIDATION_PRODUCER_DIGEST=""
 SOURCE_INVENTORY_DIGEST=""
 STARTED_EXECUTIONS=()
+PUBLICATION_MARKER_RESERVED=false
+PUBLICATION_STARTED=false
 
 ACR_SCOPE="$(
   az acr show --name "$ACR_NAME" --resource-group "$RG" --query id --output tsv
@@ -156,6 +164,15 @@ cleanup() {
   local status=$?
   trap - EXIT
   set +e
+  if [[ "$PUBLICATION_MARKER_RESERVED" == true && "$PUBLICATION_STARTED" != true ]]; then
+    az storage blob delete \
+      --account-name "$STORAGE_ACCOUNT" \
+      --container-name "$ARTIFACT_BLOB_CONTAINER" \
+      --name "publication-approval/$VALIDATION_PRODUCER_DIGEST.json" \
+      --auth-mode login \
+      --delete-snapshots include \
+      --output none || echo "ERROR: failed to roll back unused publication approval reservation" >&2
+  fi
   if [[ "$status" -ne 0 && -n "${JOB_NAME:-}" ]]; then
     stop_started_executions
   fi
@@ -163,6 +180,7 @@ cleanup() {
     "$ARM_ROLE_SNAPSHOT" \
     "$COSMOS_ROLE_SNAPSHOT" \
     "$INDEX_SCHEMA_FILE" \
+    "$EXPECTED_ENVIRONMENT_FILE" \
     "$VALIDATION_SUMMARY_FILE" \
     "$VERIFY_SUMMARY_FILE" \
     "$SOURCE_INVENTORY_FILE"
@@ -184,6 +202,40 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+
+write_expected_environment() {
+  jq -S -n \
+    --arg source_kind azure_blob \
+    --arg source_storage_account "$STORAGE_ACCOUNT" \
+    --arg source_container "$SOURCE_BLOB_CONTAINER" \
+    --arg source_prefix "$SOURCE_PREFIX" \
+    --arg artifact_storage_account "$STORAGE_ACCOUNT" \
+    --arg artifact_container "$ARTIFACT_BLOB_CONTAINER" \
+    --arg cosmos_account "$COSMOS_ACCOUNT" \
+    --arg cosmos_database "$COSMOS_DATABASE" \
+    --arg catalog_container "$COSMOS_CATALOG_CONTAINER" \
+    --arg content_container "$COSMOS_CONTENT_CONTAINER" \
+    --arg mandate_container "$COSMOS_MANDATE_CONTAINER" \
+    --arg search_service "$SEARCH_NAME" \
+    --arg search_index "$EXPECTED_SEARCH_INDEX" \
+    '{
+      source_kind: $source_kind,
+      source_storage_account: $source_storage_account,
+      source_container: $source_container,
+      source_prefix: $source_prefix,
+      artifact_storage_account: $artifact_storage_account,
+      artifact_container: $artifact_container,
+      cosmos_account: $cosmos_account,
+      cosmos_database: $cosmos_database,
+      catalog_container: $catalog_container,
+      content_container: $content_container,
+      mandate_container: $mandate_container,
+      search_service: $search_service,
+      search_index: $search_index
+    }' >"$EXPECTED_ENVIRONMENT_FILE"
+}
+
+write_expected_environment
 
 stop_started_executions() {
   local execution_name status
@@ -328,6 +380,7 @@ confirm_validation() {
         echo "ERROR: DIRECTIVE_VALIDATE_CONFIRMATION must equal the token printed after validation" >&2
         return 1
     }
+
     return 0
   fi
   if [[ ! -t 0 ]]; then
@@ -339,6 +392,36 @@ confirm_validation() {
   local answer
   read -r -p "Type $expected to publish the validated corpus: " answer
   [[ "$answer" == "$expected" ]]
+}
+
+reserve_publication_approval() {
+  local marker_file marker_name
+  marker_name="publication-approval/$VALIDATION_PRODUCER_DIGEST.json"
+  marker_file="$(mktemp)"
+  jq -S -n \
+    --arg validation_digest "$VALIDATION_PRODUCER_DIGEST" \
+    --arg source_digest "$SOURCE_INVENTORY_DIGEST" \
+    --arg image_digest "$IMAGE_DIGEST" \
+    --arg search_index "$EXPECTED_SEARCH_INDEX" \
+    '{
+      validation_digest: $validation_digest,
+      source_inventory_digest: $source_digest,
+      image_digest: $image_digest,
+      search_index: $search_index
+    }' >"$marker_file"
+  if ! az storage blob upload \
+    --account-name "$STORAGE_ACCOUNT" \
+    --container-name "$ARTIFACT_BLOB_CONTAINER" \
+    --name "$marker_name" \
+    --file "$marker_file" \
+    --auth-mode login \
+    --if-none-match "*" \
+    --output none; then
+    rm -f "$marker_file"
+    die "Publication approval has already been consumed or could not be reserved"
+  fi
+  rm -f "$marker_file"
+  PUBLICATION_MARKER_RESERVED=true
 }
 
 assert_live_v2_config() {
@@ -486,6 +569,7 @@ start_job_execution() {
   }
   STARTED_EXECUTIONS+=("$execution_name")
   STARTED_EXECUTION_NAME="$execution_name"
+  [[ "$expected_argument" == run-daily ]] && PUBLICATION_STARTED=true
   assert_execution_mode "$execution_name" "$expected_argument"
   assert_execution_image "$execution_name"
 }
@@ -644,6 +728,7 @@ load_validation_evidence() {
   VALIDATE_EXECUTION="$(jq -r '.wrapper.validation_execution_id // empty' "$VALIDATION_EVIDENCE_FILE")"
   SOURCE_INVENTORY_DIGEST="$(jq -r '.wrapper.source_inventory_digest // empty' "$VALIDATION_EVIDENCE_FILE")"
   VALIDATION_RECORD_DIGEST="$(jq -r '.wrapper.validation_record_digest // empty' "$VALIDATION_EVIDENCE_FILE")"
+  VALIDATION_PRODUCER_DIGEST="$(jq -r '.producer_record.validation_digest // empty' "$VALIDATION_EVIDENCE_FILE")"
   [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
     echo "ERROR: validation evidence image digest is not immutable" >&2
     return 1
@@ -654,6 +739,10 @@ load_validation_evidence() {
   }
   [[ "$VALIDATION_RECORD_DIGEST" =~ ^[0-9a-f]{64}$ ]] || {
     echo "ERROR: validation evidence record digest is invalid" >&2
+    return 1
+  }
+  [[ "$VALIDATION_PRODUCER_DIGEST" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "ERROR: validation producer digest is invalid" >&2
     return 1
   }
 }
@@ -708,31 +797,24 @@ write_validation_evidence() {
      . + {evidence_created_at: $created_at, evidence_nonce: $nonce}' \
     <(printf '%s\n' "$canonical_record") >"$VALIDATION_EVIDENCE_FILE"
   VALIDATION_RECORD_DIGEST="$record_digest"
+  VALIDATION_PRODUCER_DIGEST="$(jq -r '.validation_digest' "$VALIDATION_SUMMARY_FILE")"
   echo "validation_record_digest=$VALIDATION_RECORD_DIGEST"
 }
 
 validate_metadata_summary() {
   require_one_summary_record "$VALIDATION_SUMMARY_FILE" "Metadata validation"
-  jq -e \
-    --arg processing "$EXPECTED_PROCESSING_VERSION" \
-    --arg search_index "$EXPECTED_SEARCH_INDEX" \
-    '
-      .success == true and
-      (.normalized_directive_ids | type == "array") and
-      (.directive_version_ids | type == "array") and
-      (.warnings | type == "array" and length <= 100) and
-      (.environment | type == "object") and
-      .processing_version == $processing and
-      (.processing_hash | test("^[0-9a-f]{64}$")) and
-      .search_index == $search_index and
-      (.source_count | type == "number" and . > 0) and
-      (.source_inventory_digest | test("^[0-9a-f]{64}$")) and
-      (.validation_execution_id | type == "string" and length > 0) and
-      (.validation_digest | test("^[0-9a-f]{64}$"))
-    ' "$VALIDATION_SUMMARY_FILE" >/dev/null || {
+  local validated_file
+  validated_file="$(mktemp)"
+  directive_validate_producer_record \
+    "$VALIDATION_SUMMARY_FILE" "$validated_file" \
+    directive.validate.v2 "$EXPECTED_ENVIRONMENT_FILE" \
+    "$SOURCE_INVENTORY_DIGEST" "$EXPECTED_PROCESSING_VERSION" \
+    "$EXPECTED_SEARCH_INDEX" || {
+    rm -f "$validated_file"
     echo "ERROR: validation summary does not match the complete v2 contract" >&2
     return 1
   }
+  mv "$validated_file" "$VALIDATION_SUMMARY_FILE"
 }
 
 revalidate_validation_evidence() {
@@ -787,13 +869,24 @@ revalidate_validation_evidence() {
   [[ "$actual_digest" == "$evidence_digest" ]] || die \
     "Validation evidence does not match the pinned Azure execution output"
   VALIDATION_RECORD_DIGEST="$actual_digest"
+  VALIDATION_PRODUCER_DIGEST="$(jq -r '.validation_digest' "$VALIDATION_SUMMARY_FILE")"
 }
 
 write_verification_evidence() {
   local source_record="$1"
   [[ -n "$VERIFY_EVIDENCE_FILE" ]] || return 0
   require_one_summary_record "$source_record" "Directive verification"
-  local canonical_record record_digest
+  local canonical_record record_digest validated_record
+  validated_record="$(mktemp)"
+  directive_validate_producer_record \
+    "$source_record" "$validated_record" \
+    directive.verify.v2 "$EXPECTED_ENVIRONMENT_FILE" \
+    "$SOURCE_INVENTORY_DIGEST" "$EXPECTED_PROCESSING_VERSION" \
+    "$EXPECTED_SEARCH_INDEX" || {
+    rm -f "$validated_record"
+    echo "ERROR: verification summary is incomplete for v2 finalization" >&2
+    return 1
+  }
   canonical_record="$(
     jq -S -c \
       --arg image_digest "$IMAGE_DIGEST" \
@@ -822,37 +915,10 @@ write_verification_evidence() {
             search_index: $search_index
           }
         }
-      ' "$source_record"
+      ' "$validated_record"
   )"
+  rm -f "$validated_record"
   record_digest="$(sha256_text "$canonical_record")"
-  jq -e \
-    --arg digest "$record_digest" \
-    --arg verify_digest "$(sha256_text "$canonical_record")" \
-    '
-      (.producer_record | type == "object") and
-      .producer_record.success == true and
-      (.producer_record.normalized_directive_ids | type == "array" and all(.[]; type == "string")) and
-      (.producer_record.directive_version_ids | type == "array" and all(.[]; type == "string")) and
-      (.producer_record.warnings | type == "array" and length <= 100) and
-      (.producer_record.verify_execution_id | type == "string" and length > 0) and
-      (.producer_record.environment | type == "object") and
-      (.producer_record.source_count | type == "number" and . > 0) and
-      .producer_record.search_index == "directive-chunks-v2" and
-      .producer_record.processing_version == "directive-v2-czech-layout" and
-      (.producer_record.processing_hash | test("^[0-9a-f]{64}$")) and
-      (.producer_record.source_inventory_digest | test("^[0-9a-f]{64}$")) and
-      (.producer_record.state_digest | test("^[0-9a-f]{64}$")) and
-      (.producer_record.verify_digest | test("^[0-9a-f]{64}$")) and
-      (.producer_record.cross_store | type == "object" and length > 0) and
-      .wrapper.verification_execution_id != "" and
-      .wrapper.validation_execution_id != "" and
-      .wrapper.image_digest != "" and
-      .wrapper.source_inventory_digest != "" and
-      $digest == $verify_digest
-    ' <(printf '%s\n' "$canonical_record") >/dev/null || {
-    echo "ERROR: verification summary is incomplete for v2 finalization" >&2
-    return 1
-  }
   jq -S -c \
     --arg digest "$record_digest" \
     '.wrapper.verification_record_digest = $digest | .' \
@@ -1044,8 +1110,10 @@ refresh_source_inventory
   die "Source inventory changed immediately before publication"
 
 echo "==> Starting approved publication through a per-execution override"
+reserve_publication_approval
 start_job_execution run-daily
 EXECUTION_NAME="$STARTED_EXECUTION_NAME"
+PUBLICATION_STARTED=true
 echo "==> Ingestion execution: $EXECUTION_NAME"
 wait_for_execution "$EXECUTION_NAME" "Directive ingestion" 240 30
 
