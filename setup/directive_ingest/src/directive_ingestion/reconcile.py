@@ -342,12 +342,18 @@ class DirectiveIngestionRunner:
         *,
         validation_digest: str | None = None,
         expected_validation_digest: str | None = None,
+        expected_sources: list[SourceDocument] | None = None,
+        expected_mandates: Any | None = None,
     ) -> dict[str, object]:
         expected_validation_digest = _expected_validation_digest(
             validation_digest, expected_validation_digest
         )
         run_id = _run_id()
-        sources = await self.discover_sources()
+        sources = (
+            expected_sources
+            if expected_sources is not None
+            else await self.discover_sources()
+        )
         _validate_public_corpus_limit(sources)
         environment = _safe_environment(self.config)
         environment_digest = _public_record_digest(environment)
@@ -386,11 +392,12 @@ class DirectiveIngestionRunner:
         bundles = await self.catalog.list_published_versions()
         current = await self.catalog.list_current_pointers()
         relations = await self.catalog.list_published_relations()
-        expected_mandates = parse_mandates(
-            self.config.mandate_csv,
-            self.config.azure_tenant_id,
-            directive_ids,
-        )
+        if expected_mandates is None:
+            expected_mandates = parse_mandates(
+                self.config.mandate_csv,
+                self.config.azure_tenant_id,
+                directive_ids,
+            )
         if expected_validation_digest is not None:
             await self._validate_published_approval(
                 expected_validation_digest,
@@ -870,7 +877,9 @@ class DirectiveIngestionRunner:
             await self.verify(
                 expected_validation_digest=(
                     approval.validation_digest if approval is not None else None
-                )
+                ),
+                expected_sources=sources,
+                expected_mandates=parsed_mandates,
             )
             if await self.commits.load() is not None:
                 await self.commits.clear()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -423,6 +424,89 @@ async def test_daily_binding_persists_validation_digest_to_source_state() -> Non
         pending_cleanup=(),
         validation_warnings=(),
         expected_etag="etag",
+    )
+
+
+@pytest.mark.asyncio
+async def test_daily_final_verification_uses_captured_override_snapshots() -> None:
+    source = _source()
+    config = SimpleNamespace(
+        **_config().__dict__,
+        mandate_csv=object(),
+        azure_tenant_id="tenant",
+        processing_version="v2",
+        processing_hash="a" * 64,
+    )
+    metadata = [
+        SourceMetadata(
+            source,
+            SimpleNamespace(
+                directive_id="directive",
+                directive_version_id="directive:v1",
+            ),
+            None,
+            None,
+        )
+    ]
+    mandates = SimpleNamespace(assignments=(), checksum="b" * 64, user_count=0)
+    approval = _validation_payload(
+        config, "approved", [source], metadata, mandates, []
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.config = config
+    runner.discover_sources = AsyncMock(return_value=[source])
+    runner.extract_or_load_metadata = AsyncMock(return_value=metadata)
+    runner._validate_and_quarantine = AsyncMock()
+    runner._validate_published_approval = AsyncMock()
+    runner._bind_source_state_validation_digest = AsyncMock()
+    runner.prepare_changed_documents = AsyncMock(return_value=[])
+    runner._validate_relations = AsyncMock()
+    runner._reconcile_after_publication = AsyncMock()
+    runner.mandates = SimpleNamespace(
+        is_current=AsyncMock(return_value=True),
+        validate_exact=AsyncMock(
+            return_value={
+                "snapshot_id": "mandates-" + "b" * 64,
+                "checksum": "b" * 64,
+                "assignment_count": 0,
+                "user_count": 0,
+            }
+        ),
+    )
+    runner.search = SimpleNamespace(ensure_resources=AsyncMock())
+    runner.commits = SimpleNamespace(
+        load=AsyncMock(return_value=None),
+        clear=AsyncMock(),
+        acquire_publication_lock=AsyncMock(
+            return_value=SimpleNamespace(run_id="run", etag="lock-etag")
+        ),
+        release_publication_lock=AsyncMock(),
+    )
+    runner.catalog = SimpleNamespace(record_run=AsyncMock())
+    runner.verify = AsyncMock()
+
+    import directive_ingestion.reconcile as reconcile_module
+
+    original_mandates = reconcile_module.parse_mandates
+    reconcile_module.parse_mandates = lambda *_args: mandates
+    try:
+        await runner.run_daily(
+            source_directory=Path("approved-source"),
+            mandate_csv=Path("approved-mandates.csv"),
+            approved_validation_digest=approval["validation_digest"],
+            approved_environment_digest=approval["environment_digest"],
+            approved_source_inventory_digest=approval[
+                "source_inventory_digest"
+            ],
+        )
+    finally:
+        reconcile_module.parse_mandates = original_mandates
+
+    runner.discover_sources.assert_awaited_once_with(Path("approved-source"))
+    runner.verify.assert_awaited_once_with(
+        expected_validation_digest=approval["validation_digest"],
+        expected_sources=runner.discover_sources.return_value,
+        expected_mandates=mandates,
     )
 
 
