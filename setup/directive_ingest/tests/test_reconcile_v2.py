@@ -700,6 +700,14 @@ async def test_run_daily_unchanged_corpus_performs_no_publication_writes() -> No
     runner.mandates = SimpleNamespace(
         is_current=AsyncMock(return_value=True),
         publish=AsyncMock(),
+        validate_exact=AsyncMock(
+            return_value={
+                "snapshot_id": "mandates-" + "c" * 64 + "-repaired",
+                "checksum": "c" * 64,
+                "assignment_count": 0,
+                "user_count": 0,
+            }
+        ),
     )
     runner.search = SimpleNamespace(ensure_resources=AsyncMock())
     runner._publish_transaction = AsyncMock()
@@ -717,8 +725,64 @@ async def test_run_daily_unchanged_corpus_performs_no_publication_writes() -> No
         reconcile_module.parse_mandates = original_mandates
 
     assert result.changed_count == 0
+    assert result.mandate_snapshot_id == "mandates-" + "c" * 64 + "-repaired"
     runner.search.ensure_resources.assert_not_awaited()
     runner._publish_transaction.assert_not_awaited()
     runner.mandates.publish.assert_not_awaited()
     runner.catalog.record_run.assert_not_awaited()
     runner.commits.clear.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mandate_only_activation_is_reported_as_a_change() -> None:
+    source = _source()
+    metadata = _metadata(source)
+    parsed = SimpleNamespace(
+        assignments=(), checksum="c" * 64, user_count=0
+    )
+    snapshot = SimpleNamespace(
+        snapshot_id="mandates-" + "c" * 64,
+        checksum=parsed.checksum,
+        assignment_count=0,
+        user_count=0,
+        complete=True,
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.config = SimpleNamespace(
+        mandate_csv=object(), azure_tenant_id="tenant"
+    )
+    runner.discover_sources = AsyncMock(return_value=[source])
+    runner.extract_or_load_metadata = AsyncMock(
+        return_value=[SourceMetadata(source, metadata, None, object())]
+    )
+    runner._validate_and_quarantine = AsyncMock()
+    runner.prepare_changed_documents = AsyncMock(return_value=[])
+    runner._validate_relations = AsyncMock()
+    runner.mandates = SimpleNamespace(
+        is_current=AsyncMock(return_value=False),
+        cleanup=AsyncMock(return_value=False),
+    )
+    runner.search = SimpleNamespace(ensure_resources=AsyncMock())
+    runner._publish_transaction = AsyncMock(
+        return_value=([], SimpleNamespace(snapshot=snapshot, changed=True))
+    )
+    runner._reconcile_after_publication = AsyncMock()
+    runner.verify = AsyncMock()
+    runner.catalog = SimpleNamespace(record_run=AsyncMock())
+    runner.commits = SimpleNamespace(
+        load=AsyncMock(return_value=None), clear=AsyncMock()
+    )
+    import directive_ingestion.reconcile as reconcile_module
+
+    original_mandates = reconcile_module.parse_mandates
+    reconcile_module.parse_mandates = lambda *_args: parsed
+    try:
+        result = await runner.run_daily()
+    finally:
+        reconcile_module.parse_mandates = original_mandates
+
+    assert result.changed_count == 0
+    assert result.mandate_changed is True
+    assert result.mandate_snapshot_id == snapshot.snapshot_id
+    runner.mandates.cleanup.assert_awaited_once_with(snapshot.snapshot_id)
+    runner.catalog.record_run.assert_awaited_once()

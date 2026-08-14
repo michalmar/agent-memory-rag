@@ -676,13 +676,15 @@ class DirectiveIngestionRunner:
         )
         if mandate_transaction is not None:
             snapshot = mandate_transaction.snapshot
-            mandate_changed = await self.mandates.cleanup(snapshot.snapshot_id)
+            cleanup_changed = await self.mandates.cleanup(snapshot.snapshot_id)
+            mandate_changed = mandate_transaction.changed or cleanup_changed
         elif mandates_current:
+            summary = await self.mandates.validate_exact(parsed_mandates)
             snapshot = MandateSnapshot(
-                snapshot_id=f"mandates-{parsed_mandates.checksum}",
-                checksum=parsed_mandates.checksum,
-                assignment_count=len(parsed_mandates.assignments),
-                user_count=parsed_mandates.user_count,
+                snapshot_id=str(summary["snapshot_id"]),
+                checksum=str(summary["checksum"]),
+                assignment_count=int(summary["assignment_count"]),
+                user_count=int(summary["user_count"]),
                 complete=True,
             )
             mandate_changed = False

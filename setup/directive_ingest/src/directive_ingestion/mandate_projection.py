@@ -21,6 +21,7 @@ from directive_contracts import (
 
 _CONTROL_PARTITION = "_control"
 _ACTIVE_ID = "active-snapshot"
+_UNSET = object()
 
 
 @dataclass(frozen=True)
@@ -129,18 +130,43 @@ class MandateRepository:
     ) -> tuple[MandateSnapshot, dict[str, Any] | None, bool]:
         """Write candidate assignments without switching the active pointer."""
         active = await self._read_active()
-        snapshot_id = f"mandates-{parsed.checksum}"
+        active_snapshot_id = (
+            active.get("snapshot_id") if active is not None else None
+        )
         if (
             active
             and active.get("complete") is True
             and active.get("checksum") == parsed.checksum
-            and not await self._snapshot_assignments_match(
-                snapshot_id, parsed
+            and isinstance(active_snapshot_id, str)
+            and await self._snapshot_assignments_match(
+                active_snapshot_id, parsed
             )
         ):
-            snapshot_id += "-" + await self._snapshot_identity_digest(
-                snapshot_id
+            snapshot = self._snapshot_from_active(active)
+            if (
+                snapshot is not None
+                and await self._snapshot_records_match(snapshot, parsed)
+            ):
+                return snapshot, active, False
+
+        snapshot_id = f"mandates-{parsed.checksum}"
+        repair_snapshot_id = (
+            active_snapshot_id
+            if (
+                active
+                and active.get("complete") is True
+                and active.get("checksum") == parsed.checksum
+                and isinstance(active_snapshot_id, str)
             )
+            else snapshot_id
+        )
+        repair_records = await self._snapshot_records(repair_snapshot_id)
+        if repair_records or repair_snapshot_id != snapshot_id:
+            snapshot_id += "-" + self._snapshot_records_digest(repair_records)
+        candidate_records = await self._snapshot_records(snapshot_id)
+        if candidate_records:
+            snapshot_id += "-" + self._snapshot_records_digest(candidate_records)
+
         snapshot = MandateSnapshot(
             snapshot_id=snapshot_id,
             checksum=parsed.checksum,
@@ -151,22 +177,12 @@ class MandateRepository:
                 active.get("snapshot_id") if active else None
             ),
         )
-        if (
-            active
-            and active.get("complete") is True
-            and active.get("checksum") == parsed.checksum
-            and await self._snapshot_assignments_match(snapshot_id, parsed)
-        ):
-            return snapshot, active, False
 
         published_at = datetime.now(UTC).isoformat()
         for assignment in parsed.assignments:
             await self._container.upsert_item(
                 {
-                    "id": (
-                        f"assignment:{snapshot_id}:"
-                        f"{directive_storage_key(assignment.directive_id)}"
-                    ),
+                    "id": self._assignment_item_id(snapshot_id, assignment),
                     "type": "assignment",
                     "user_id": assignment.user_id,
                     "directive_id": assignment.directive_id,
@@ -175,23 +191,6 @@ class MandateRepository:
                     "run_id": run_id,
                     "published_at": published_at,
                 }
-            )
-
-        actual_count = 0
-        query = (
-            "SELECT VALUE COUNT(1) FROM c WHERE "
-            "c.type = 'assignment' AND c.snapshot_id = @snapshot"
-        )
-        parameters = [{"name": "@snapshot", "value": snapshot_id}]
-        async for value in self._container.query_items(
-            query=query,
-            parameters=parameters,
-        ):
-            actual_count = int(value)
-        if actual_count != len(parsed.assignments):
-            raise RuntimeError(
-                "Mandate snapshot validation failed: expected "
-                f"{len(parsed.assignments)} assignments, found {actual_count}"
             )
 
         await self._container.upsert_item(
@@ -204,6 +203,11 @@ class MandateRepository:
                 "published_at": published_at,
             }
         )
+        if not await self._snapshot_records_match(snapshot, parsed):
+            raise RuntimeError(
+                "Mandate snapshot validation failed: assignment or control "
+                "records do not match the candidate"
+            )
         return snapshot, active, True
 
     async def activate(
@@ -264,10 +268,11 @@ class MandateRepository:
         """Compatibility API performing stage, activation, then cleanup."""
         snapshot, _, changed = await self.stage(parsed, run_id)
         if not changed:
-            return snapshot, await self.cleanup(snapshot.snapshot_id)
+            cleanup_changed = await self.cleanup(snapshot.snapshot_id)
+            return snapshot, cleanup_changed
         await self.activate(snapshot, run_id)
-        await self.cleanup(snapshot.snapshot_id)
-        return snapshot, True
+        cleanup_changed = await self.cleanup(snapshot.snapshot_id)
+        return snapshot, changed or cleanup_changed
 
     async def is_current(self, parsed: ParsedMandates) -> bool:
         active = await self._read_active()
@@ -278,9 +283,15 @@ class MandateRepository:
         ):
             return False
         snapshot_id = active.get("snapshot_id")
-        return (
+        if not (
             isinstance(snapshot_id, str)
             and await self._snapshot_assignments_match(snapshot_id, parsed)
+        ):
+            return False
+        snapshot = self._snapshot_from_active(active)
+        return (
+            snapshot is not None
+            and await self._snapshot_records_match(snapshot, parsed)
             and not await self._has_inactive(snapshot_id)
         )
 
@@ -288,34 +299,22 @@ class MandateRepository:
         active = await self._read_active()
         if not active or active.get("complete") is not True:
             raise RuntimeError("No complete active mandate snapshot exists")
-        snapshot_id = active.get("snapshot_id")
-        if not isinstance(snapshot_id, str):
-            raise RuntimeError("Active mandate snapshot has no snapshot ID")
-        actual_count = 0
-        query = (
-            "SELECT VALUE COUNT(1) FROM c WHERE "
-            "c.type = 'assignment' AND c.snapshot_id = @snapshot"
-        )
-        async for value in self._container.query_items(
-            query=query,
-            parameters=[{"name": "@snapshot", "value": snapshot_id}],
-        ):
-            actual_count = int(value)
-        expected_count = int(active.get("assignment_count", -1))
-        if actual_count != expected_count:
+        snapshot = self._snapshot_from_active(active)
+        if snapshot is None:
+            raise RuntimeError("Active mandate snapshot has invalid metadata")
+        if not await self._snapshot_structure_matches(snapshot):
             raise RuntimeError(
-                "Active mandate snapshot count mismatch: expected "
-                f"{expected_count}, found {actual_count}"
+                "Active mandate assignment or control records are invalid"
             )
-        if await self._has_inactive(snapshot_id):
+        if await self._has_inactive(snapshot.snapshot_id):
             raise RuntimeError(
                 "Inactive mandate assignments or snapshots are present"
             )
         return {
-            "snapshot_id": snapshot_id,
-            "checksum": active.get("checksum"),
-            "assignment_count": actual_count,
-            "user_count": int(active.get("user_count", -1)),
+            "snapshot_id": snapshot.snapshot_id,
+            "checksum": snapshot.checksum,
+            "assignment_count": snapshot.assignment_count,
+            "user_count": snapshot.user_count,
         }
 
     async def validate_exact(self, parsed: ParsedMandates) -> dict[str, object]:
@@ -331,41 +330,212 @@ class MandateRepository:
     async def _snapshot_assignments_match(
         self, snapshot_id: str, parsed: ParsedMandates
     ) -> bool:
-        actual = await self._snapshot_assignments(snapshot_id)
-        expected = sorted(
-            (assignment.user_id, assignment.directive_id, "M")
+        records = await self._snapshot_records(snapshot_id)
+        expected_assignments = sorted(
+            (
+                "assignment",
+                self._assignment_item_id(snapshot_id, assignment),
+                assignment.user_id,
+                assignment.directive_id,
+                "M",
+            )
             for assignment in parsed.assignments
         )
-        return sorted(actual) == expected
-
-    async def _snapshot_identity_digest(self, snapshot_id: str) -> str:
-        identities = await self._snapshot_assignments(snapshot_id)
-        canonical = "\n".join(
-            ",".join(identity) for identity in sorted(identities)
-        ).encode("utf-8")
-        return hashlib.sha256(canonical).hexdigest()[:16]
-
-    async def _snapshot_assignments(
-        self, snapshot_id: str
-    ) -> list[tuple[str, str, str]]:
-        query = (
-            "SELECT c.user_id, c.directive_id, c.flag FROM c WHERE "
-            "c.type = 'assignment' AND c.snapshot_id = @snapshot"
+        actual_assignments = sorted(
+            (
+                record.get("type"),
+                record.get("id"),
+                record.get("user_id"),
+                record.get("directive_id"),
+                record.get("flag"),
+            )
+            for record in records
+            if record.get("type") == "assignment"
         )
-        actual: list[tuple[str, str, str]] = []
+        controls = [
+            record for record in records if record.get("type") == "snapshot"
+        ]
+        return (
+            len(records) == len(expected_assignments) + 1
+            and actual_assignments == expected_assignments
+            and len(controls) == 1
+            and self._control_record_matches(
+                controls[0],
+                snapshot_id,
+                parsed.checksum,
+                len(parsed.assignments),
+                parsed.user_count,
+            )
+        )
+
+    async def _snapshot_records_match(
+        self, snapshot: MandateSnapshot, parsed: ParsedMandates
+    ) -> bool:
+        if not await self._snapshot_assignments_match(
+            snapshot.snapshot_id, parsed
+        ):
+            return False
+        controls = [
+            record
+            for record in await self._snapshot_records(snapshot.snapshot_id)
+            if record.get("type") == "snapshot"
+        ]
+        return len(controls) == 1 and self._control_record_matches(
+            controls[0],
+            snapshot.snapshot_id,
+            snapshot.checksum,
+            snapshot.assignment_count,
+            snapshot.user_count,
+            snapshot.previous_snapshot_id,
+        )
+
+    async def _snapshot_structure_matches(self, snapshot: MandateSnapshot) -> bool:
+        records = await self._snapshot_records(snapshot.snapshot_id)
+        assignments = [
+            record for record in records if record.get("type") == "assignment"
+        ]
+        controls = [
+            record for record in records if record.get("type") == "snapshot"
+        ]
+        return (
+            len(records) == snapshot.assignment_count + 1
+            and len(assignments) == snapshot.assignment_count
+            and all(
+                self._assignment_record_matches(record, snapshot.snapshot_id)
+                for record in assignments
+            )
+            and len(controls) == 1
+            and self._control_record_matches(
+                controls[0],
+                snapshot.snapshot_id,
+                snapshot.checksum,
+                snapshot.assignment_count,
+                snapshot.user_count,
+                snapshot.previous_snapshot_id,
+            )
+        )
+
+    async def _snapshot_records(self, snapshot_id: str) -> list[dict[str, Any]]:
+        query = (
+            "SELECT c.id, c.type, c.user_id, c.directive_id, c.flag, "
+            "c.snapshot_id, c.schema_version, c.checksum, "
+            "c.assignment_count, c.user_count, c.complete, "
+            "c.previous_snapshot_id FROM c WHERE "
+            "(c.type = 'assignment' OR c.type = 'snapshot') AND "
+            "c.snapshot_id = @snapshot"
+        )
+        records: list[dict[str, Any]] = []
         async for value in self._container.query_items(
             query=query,
             parameters=[{"name": "@snapshot", "value": snapshot_id}],
         ):
-            user_id = value.get("user_id")
-            directive_id = value.get("directive_id")
-            flag = value.get("flag")
-            if not all(
-                isinstance(item, str) for item in (user_id, directive_id, flag)
-            ):
-                raise RuntimeError("Active mandate assignment has invalid identity")
-            actual.append((user_id, directive_id, flag))
-        return actual
+            if not isinstance(value, dict):
+                raise RuntimeError("Mandate snapshot record is invalid")
+            records.append(value)
+        return records
+
+    @staticmethod
+    def _assignment_item_id(
+        snapshot_id: str, assignment: MandateAssignment
+    ) -> str:
+        return (
+            f"assignment:{snapshot_id}:"
+            f"{directive_storage_key(assignment.directive_id)}"
+        )
+
+    @classmethod
+    def _assignment_record_matches(
+        cls, record: dict[str, Any], snapshot_id: str
+    ) -> bool:
+        user_id = record.get("user_id")
+        directive_id = record.get("directive_id")
+        if not isinstance(user_id, str) or not isinstance(directive_id, str):
+            return False
+        try:
+            expected_id = cls._assignment_item_id(
+                snapshot_id,
+                MandateAssignment(user_id=user_id, directive_id=directive_id),
+            )
+        except ValueError:
+            return False
+        return (
+            record.get("type") == "assignment"
+            and record.get("snapshot_id") == snapshot_id
+            and record.get("flag") == "M"
+            and record.get("id") == expected_id
+        )
+
+    @staticmethod
+    def _control_record_matches(
+        record: dict[str, Any],
+        snapshot_id: str,
+        checksum: str,
+        assignment_count: int,
+        user_count: int,
+        previous_snapshot_id: str | None | object = _UNSET,
+    ) -> bool:
+        return (
+            record.get("id") == f"snapshot:{snapshot_id}"
+            and record.get("type") == "snapshot"
+            and record.get("user_id") == _CONTROL_PARTITION
+            and record.get("snapshot_id") == snapshot_id
+            and record.get("schema_version") == "1.0"
+            and record.get("checksum") == checksum
+            and record.get("assignment_count") == assignment_count
+            and record.get("user_count") == user_count
+            and record.get("complete") is True
+            and (
+                previous_snapshot_id is _UNSET
+                or record.get("previous_snapshot_id") == previous_snapshot_id
+            )
+        )
+
+    @staticmethod
+    def _snapshot_records_digest(records: list[dict[str, Any]]) -> str:
+        canonical = "\n".join(
+            repr(
+                tuple(
+                    record.get(field)
+                    for field in (
+                        "id",
+                        "type",
+                        "user_id",
+                        "directive_id",
+                        "flag",
+                        "snapshot_id",
+                        "schema_version",
+                        "checksum",
+                        "assignment_count",
+                        "user_count",
+                        "complete",
+                        "previous_snapshot_id",
+                    )
+                )
+            )
+            for record in sorted(
+                records,
+                key=lambda record: (
+                    str(record.get("id")),
+                    str(record.get("user_id")),
+                ),
+            )
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()[:16]
+
+    @staticmethod
+    def _snapshot_from_active(
+        active: dict[str, Any]
+    ) -> MandateSnapshot | None:
+        try:
+            return MandateSnapshot.model_validate(
+                {
+                    field: active.get(field)
+                    for field in MandateSnapshot.model_fields
+                    if field in active
+                }
+            )
+        except ValueError:
+            return None
 
     async def _read_active(self) -> dict[str, Any] | None:
         try:
