@@ -20,7 +20,10 @@ from directive_ingestion.metadata import DirectiveMetadataCandidate
 from directive_ingestion.publication_commit_repository import (
     PublicationCommitRepository,
 )
-from directive_ingestion.reconcile import DirectiveIngestionRunner
+from directive_ingestion.reconcile import (
+    DirectiveIngestionRunner,
+    _public_record_digest,
+)
 from directive_ingestion.source import SourceDocument, SourceProvenance
 from directive_ingestion.source_state_repository import SourceStateRepository
 
@@ -440,6 +443,8 @@ class MemoryMandates:
     def __init__(self) -> None:
         self.active: MandateSnapshot | None = None
         self.staged: MandateSnapshot | None = None
+        self.restore_calls: list[tuple[object, str]] = []
+        self.discard_calls: list[tuple[object, str]] = []
 
     async def is_current(self, parsed) -> bool:
         return self.active is not None and self.active.checksum == parsed.checksum
@@ -467,9 +472,11 @@ class MemoryMandates:
         return False
 
     async def restore_active(self, previous, _candidate_etag: str) -> None:
+        self.restore_calls.append((previous, _candidate_etag))
         self.active = previous
 
-    async def discard_staged(self, _snapshot) -> None:
+    async def discard_staged(self, _snapshot, _run_id: str) -> None:
+        self.discard_calls.append((_snapshot, _run_id))
         self.staged = None
 
     async def validate_exact(self, parsed) -> dict[str, object]:
@@ -683,6 +690,42 @@ async def test_initial_publication_then_noop_daily_run_is_write_free(
 
 
 @pytest.mark.asyncio
+async def test_verify_exposes_and_binds_the_mandate_checksum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    await harness.runner.run_daily()
+
+    verification = await harness.runner.verify()
+
+    assert verification["mandate_checksum"] == "b" * 64
+    assert verification["cross_store"]["mandates"]["checksum"] == verification[
+        "mandate_checksum"
+    ]
+    assert verification["state_digest"] == _public_record_digest(
+        {
+            key: verification[key]
+            for key in (
+                "record_schema",
+                "environment",
+                "environment_digest",
+                "processing_version",
+                "processing_hash",
+                "search_index",
+                "source_count",
+                "source_inventory_digest",
+                "directive_count",
+                "normalized_directive_ids",
+                "directive_version_ids",
+                "mandate_checksum",
+                "cross_store",
+                "validation_digest",
+            )
+        }
+    )
+
+
+@pytest.mark.asyncio
 async def test_marker_write_failure_rolls_back_changed_mandates_without_documents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -721,6 +764,12 @@ async def test_marker_write_failure_rolls_back_changed_mandates_without_document
 
     assert harness.runner.mandates.active == previous_active
     assert harness.runner.mandates.staged is None
+    assert harness.runner.mandates.restore_calls == [
+        (previous_active, "memory-candidate-etag")
+    ]
+    assert harness.runner.mandates.discard_calls == [
+        (mandate_transaction.snapshot, "run")
+    ]
     assert (
         dict(harness.catalog.bundles),
         harness.catalog.current,

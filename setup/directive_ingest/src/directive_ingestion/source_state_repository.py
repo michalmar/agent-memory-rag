@@ -29,6 +29,7 @@ class PublishedSourceState:
     publication_state: str
     pending_cleanup: tuple[PublishedDirectiveVersion, ...] = ()
     validation_digest: str | None = None
+    mandate_checksum: str | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,7 @@ class SourceStateRepository:
                     for bundle in value.get("pending_cleanup", [])
                 ),
                 validation_digest=value.get("validation_digest"),
+                mandate_checksum=value.get("mandate_checksum"),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -99,6 +101,11 @@ class SourceStateRepository:
                     or not state.validation_digest.strip()
                 )
             )
+            or (
+                state.mandate_checksum is not None
+                and not _is_checksum(state.mandate_checksum)
+            )
+            or (state.validation_digest is None) != (state.mandate_checksum is None)
         ):
             return None
         return state
@@ -111,11 +118,18 @@ class SourceStateRepository:
         pending_cleanup: tuple[PublishedDirectiveVersion, ...] = (),
         *,
         validation_digest: str | None = None,
+        mandate_checksum: str | None = None,
         expected_etag: str | None = None,
         require_absent: bool = False,
     ) -> str:
         if validation_digest is not None and not validation_digest.strip():
             raise ValueError("Validation digest must not be empty")
+        if (validation_digest is None) != (mandate_checksum is None):
+            raise ValueError(
+                "Validation digest and mandate checksum must be recorded together"
+            )
+        if mandate_checksum is not None and not _is_checksum(mandate_checksum):
+            raise ValueError("Mandate checksum must be a lowercase SHA-256 digest")
         payload: dict[str, Any] = {
             "type": "source_state",
             "source_filename": source.source_name,
@@ -133,6 +147,7 @@ class SourceStateRepository:
         }
         if validation_digest is not None:
             payload["validation_digest"] = validation_digest
+            payload["mandate_checksum"] = mandate_checksum
         return await self._blobs.replace_json(
             self.blob_name(source, metadata.processing_hash),
             payload,
@@ -146,12 +161,14 @@ class SourceStateRepository:
         metadata: DirectiveMetadata,
         artifact_generation_id: str,
         validation_digest: str | None = None,
+        mandate_checksum: str | None = None,
     ) -> None:
         await self.record(
             source,
             metadata,
             artifact_generation_id,
             validation_digest=validation_digest,
+            mandate_checksum=mandate_checksum,
         )
 
     async def prune(self, expected_names: set[str]) -> None:
@@ -195,3 +212,11 @@ class SourceStateRepository:
         await self._blobs.restore_bytes(
             snapshot.blob_name, snapshot.content, candidate_etag
         )
+
+
+def _is_checksum(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )

@@ -322,6 +322,7 @@ async def test_validation_digest_drift_stops_before_summary_or_writes() -> None:
             "environment_digest": "wrong",
             "source_inventory_digest": "inventory",
             "processing_hash": "a" * 64,
+            "mandate_checksum": "b" * 64,
         },
     ),
 )
@@ -334,11 +335,34 @@ async def test_published_approval_requires_exact_named_marker(
 
     with pytest.raises(RuntimeError, match="does not exactly match"):
         await runner._validate_published_approval(
-            "approved-validation", "environment", "inventory"
+            "approved-validation", "environment", "inventory", "b" * 64
         )
 
     runner.blobs.get_json.assert_awaited_once_with(
         "publication-approval/approved-validation.json"
+    )
+
+
+@pytest.mark.asyncio
+async def test_published_approval_binds_the_mandate_checksum() -> None:
+    checksum = "b" * 64
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.config = SimpleNamespace(processing_hash="a" * 64)
+    runner.blobs = SimpleNamespace(
+        get_json=AsyncMock(
+            return_value={
+                "record_schema": "directive.approval.v2",
+                "validation_digest": "approved-validation",
+                "environment_digest": "environment",
+                "source_inventory_digest": "inventory",
+                "processing_hash": "a" * 64,
+                "mandate_checksum": checksum,
+            }
+        )
+    )
+
+    await runner._validate_published_approval(
+        "approved-validation", "environment", "inventory", checksum
     )
 
 
@@ -348,6 +372,7 @@ async def test_daily_binding_persists_validation_digest_to_source_state() -> Non
     metadata = SimpleNamespace()
     state = SimpleNamespace(
         validation_digest=None,
+        mandate_checksum=None,
         directive_metadata=metadata,
         artifact_generation_id="generation",
         pending_cleanup=(),
@@ -364,7 +389,7 @@ async def test_daily_binding_persists_validation_digest_to_source_state() -> Non
     runner._state_has_live_publication = AsyncMock(return_value=True)
 
     await runner._bind_source_state_validation_digest(
-        [SimpleNamespace(source=source)], "approved-validation"
+        [SimpleNamespace(source=source)], "approved-validation", "b" * 64
     )
 
     runner.source_states.record.assert_awaited_once_with(
@@ -372,6 +397,7 @@ async def test_daily_binding_persists_validation_digest_to_source_state() -> Non
         metadata,
         "generation",
         validation_digest="approved-validation",
+        mandate_checksum="b" * 64,
         pending_cleanup=(),
         expected_etag="etag",
     )
@@ -397,12 +423,15 @@ async def test_verify_rejects_source_state_with_different_approval_binding() -> 
                 "environment_digest": environment_digest,
                 "source_inventory_digest": source_inventory_digest,
                 "processing_hash": config.processing_hash,
+                "mandate_checksum": "b" * 64,
             }
         )
     )
     runner.source_states = SimpleNamespace(
         load=AsyncMock(
-            return_value=SimpleNamespace(validation_digest="other-validation")
+            return_value=SimpleNamespace(
+                validation_digest="other-validation", mandate_checksum="b" * 64
+            )
         )
     )
     runner._state_has_live_publication = AsyncMock(return_value=True)
@@ -410,9 +439,7 @@ async def test_verify_rejects_source_state_with_different_approval_binding() -> 
     with pytest.raises(RuntimeError, match="Source-state records"):
         await runner.verify(expected_validation_digest="approved-validation")
 
-    runner.blobs.get_json.assert_awaited_once_with(
-        "publication-approval/approved-validation.json"
-    )
+    runner.blobs.get_json.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -428,6 +455,7 @@ async def test_publication_commit_binds_and_restores_validation_digest() -> None
         [],
         {"source-state/directive.json"},
         validation_digest="approved-validation",
+        mandate_checksum="b" * 64,
     )
     payload = blobs.replace_json.await_args.args[1]
     blobs.get_json.return_value = payload
@@ -435,5 +463,7 @@ async def test_publication_commit_binds_and_restores_validation_digest() -> None
     marker = await repository.load()
 
     assert payload["validation_digest"] == "approved-validation"
+    assert payload["mandate_checksum"] == "b" * 64
     assert marker is not None
     assert marker.validation_digest == "approved-validation"
+    assert marker.mandate_checksum == "b" * 64

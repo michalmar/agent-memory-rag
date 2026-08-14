@@ -286,3 +286,30 @@ async def test_first_active_pointer_rollback_conditionally_deletes_candidate() -
 
     assert ("active-snapshot", "_control") not in container.items
     assert container.delete_etags[-1] == candidate_etag
+
+
+@pytest.mark.asyncio
+async def test_staged_cleanup_does_not_delete_another_runs_records() -> None:
+    container = MemoryMandateContainer()
+    repository = _repository(container)
+    snapshot, _, changed = await repository.stage(_parsed(), "run-1")
+    assert changed is True
+
+    for record in [
+        record
+        for record in container.items.values()
+        if record.get("snapshot_id") == snapshot.snapshot_id
+    ]:
+        replacement = {
+            key: value for key, value in record.items() if key != "_etag"
+        }
+        replacement["run_id"] = "run-2"
+        await container.upsert_item(replacement)
+
+    await repository.discard_staged(snapshot, "run-1")
+
+    assert all(
+        record.get("run_id") == "run-2"
+        for record in container.items.values()
+        if record.get("snapshot_id") == snapshot.snapshot_id
+    )

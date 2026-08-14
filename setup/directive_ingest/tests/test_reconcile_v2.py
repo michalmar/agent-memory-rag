@@ -755,12 +755,9 @@ async def test_validate_output_has_finalize_guard_shape() -> None:
         "validation_digest",
     }.issubset(value)
     assert value["record_schema"] == "directive.validate.v2"
-    assert "mandate_identity_digest" not in value
+    assert value["mandate_checksum"] == "b" * 64
     assert value["validation_digest"] == _public_record_digest(
-        _validation_digest_projection(
-            value,
-            SimpleNamespace(assignments=(), checksum="b" * 64, user_count=0),
-        )
+        _validation_digest_projection(value)
     )
 
 

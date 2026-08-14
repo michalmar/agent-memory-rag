@@ -409,8 +409,10 @@ Agent changes required before deployment.
    `DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST`, and
    `DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST`. Before publication, write the
    exact `directive.approval.v2` record at
-   `publication-approval/<validation_digest>.json`, binding those three values
-   and the processing hash. Run
+   `publication-approval/<validation_digest>.json`, binding those three values,
+   the processing hash, and the required top-level `mandate_checksum` from the
+   validation record. That checksum is derived from canonical tenant-qualified
+   mandate assignments, so tenant changes are approval-bound. Run
    `scripts/deploy_directive_ingestion.sh <release>` to build the ingestion
    image, verify exact source-reader/artifact-contributor roles, run preflight,
    publish the approved source corpus, and verify the resulting state.

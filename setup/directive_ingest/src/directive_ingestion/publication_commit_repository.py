@@ -17,6 +17,7 @@ class PublicationCommit:
     stale_bundles: tuple[PublishedDirectiveVersion, ...]
     expected_state_names: frozenset[str]
     validation_digest: str | None = None
+    mandate_checksum: str | None = None
 
 
 class PublicationCommitRepository:
@@ -37,6 +38,7 @@ class PublicationCommitRepository:
             )
             names = frozenset(value["expected_state_names"])
             validation_digest = value.get("validation_digest")
+            mandate_checksum = value.get("mandate_checksum")
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError("Publication commit marker is invalid") from exc
         if not isinstance(run_id, str) or not all(
@@ -49,7 +51,17 @@ class PublicationCommitRepository:
             raise RuntimeError(
                 "Publication commit marker has an invalid validation digest"
             )
-        return PublicationCommit(run_id, bundles, names, validation_digest)
+        if (validation_digest is None) != (mandate_checksum is None):
+            raise RuntimeError(
+                "Publication commit marker must bind validation and mandate checksum"
+            )
+        if mandate_checksum is not None and not _is_checksum(mandate_checksum):
+            raise RuntimeError(
+                "Publication commit marker has an invalid mandate checksum"
+            )
+        return PublicationCommit(
+            run_id, bundles, names, validation_digest, mandate_checksum
+        )
 
     async def record(
         self,
@@ -58,9 +70,16 @@ class PublicationCommitRepository:
         expected_state_names: set[str],
         *,
         validation_digest: str | None = None,
+        mandate_checksum: str | None = None,
     ) -> PublicationCommit:
         if validation_digest is not None and not validation_digest.strip():
             raise ValueError("Validation digest must not be empty")
+        if (validation_digest is None) != (mandate_checksum is None):
+            raise ValueError(
+                "Validation digest and mandate checksum must be recorded together"
+            )
+        if mandate_checksum is not None and not _is_checksum(mandate_checksum):
+            raise ValueError("Mandate checksum must be a lowercase SHA-256 digest")
         marker = PublicationCommit(
             run_id,
             tuple(
@@ -75,6 +94,7 @@ class PublicationCommitRepository:
             ),
             frozenset(expected_state_names),
             validation_digest,
+            mandate_checksum,
         )
         payload: dict[str, object] = {
             "type": "publication_commit",
@@ -86,8 +106,17 @@ class PublicationCommitRepository:
         }
         if marker.validation_digest is not None:
             payload["validation_digest"] = marker.validation_digest
+            payload["mandate_checksum"] = marker.mandate_checksum
         await self._blobs.replace_json(_MARKER_NAME, payload)
         return marker
 
     async def clear(self) -> None:
         await self._blobs.delete_names({_MARKER_NAME})
+
+
+def _is_checksum(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )

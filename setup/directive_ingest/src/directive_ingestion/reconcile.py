@@ -147,6 +147,7 @@ class MandatePublicationSnapshot:
     snapshot: MandateSnapshot
     previous_active: dict[str, Any] | None
     changed: bool
+    run_id: str
     candidate_active_etag: str | None = None
 
 
@@ -337,12 +338,6 @@ class DirectiveIngestionRunner:
         source_inventory_digest = _public_record_digest(
             _source_inventory(sources)
         )
-        if expected_validation_digest is not None:
-            await self._validate_published_approval(
-                expected_validation_digest,
-                environment_digest,
-                source_inventory_digest,
-            )
         source_states: list[PublishedSourceState] = []
         for source in sources:
             state = await self.source_states.load(
@@ -380,6 +375,22 @@ class DirectiveIngestionRunner:
             self.config.azure_tenant_id,
             directive_ids,
         )
+        if expected_validation_digest is not None:
+            await self._validate_published_approval(
+                expected_validation_digest,
+                environment_digest,
+                source_inventory_digest,
+                expected_mandates.checksum,
+            )
+            if any(
+                state.validation_digest != expected_validation_digest
+                or state.mandate_checksum != expected_mandates.checksum
+                for state in source_states
+            ):
+                raise RuntimeError(
+                    "Source-state records do not match the approved validation "
+                    "or mandate checksum"
+                )
         canonical_relation_ids = {
             relation.relation_id for relation, _, _ in relations
         }
@@ -660,11 +671,17 @@ class DirectiveIngestionRunner:
             "directive_count": len(directive_ids),
             "normalized_directive_ids": normalized_ids,
             "directive_version_ids": version_ids,
+            "mandate_checksum": expected_mandates.checksum,
             "warnings": [],
             "warning_count": 0,
             "cross_store": cross_store,
             "validation_digest": expected_validation_digest,
         }
+        if cross_store["mandates"]["checksum"] != payload["mandate_checksum"]:
+            raise RuntimeError(
+                "Active mandate checksum does not match the verified top-level "
+                "mandate checksum"
+            )
         payload["state_digest"] = _public_record_digest(
             {
                 key: payload[key]
@@ -680,6 +697,7 @@ class DirectiveIngestionRunner:
                     "directive_count",
                     "normalized_directive_ids",
                     "directive_version_ids",
+                    "mandate_checksum",
                     "cross_store",
                     "validation_digest",
                 )
@@ -746,12 +764,14 @@ class DirectiveIngestionRunner:
                 approval.validation_digest,
                 approval.environment_digest,
                 approval.source_inventory_digest,
+                parsed_mandates.checksum,
             )
         marker_before = await self.commits.load()
         self._validate_pending_marker_corpus(
             metadata,
             marker_before,
             approval.validation_digest if approval is not None else None,
+            parsed_mandates.checksum if approval is not None else None,
         )
         prepared = await self.prepare_changed_documents(metadata, run_id)
         await self._validate_relations(
@@ -771,6 +791,9 @@ class DirectiveIngestionRunner:
                 validation_digest=(
                     approval.validation_digest if approval is not None else None
                 ),
+                mandate_checksum=(
+                    parsed_mandates.checksum if approval is not None else None
+                ),
             )
         await self._reconcile_after_publication(
             metadata,
@@ -779,6 +802,7 @@ class DirectiveIngestionRunner:
             mandate_transaction,
             marker_before,
             approval.validation_digest if approval is not None else None,
+            parsed_mandates.checksum if approval is not None else None,
         )
         if mandate_transaction is not None:
             snapshot = mandate_transaction.snapshot
@@ -798,7 +822,7 @@ class DirectiveIngestionRunner:
             raise RuntimeError("Mandate publication transaction did not complete")
         if approval is not None:
             await self._bind_source_state_validation_digest(
-                metadata, approval.validation_digest
+                metadata, approval.validation_digest, parsed_mandates.checksum
             )
         result = ReconcileResult(
             run_id=run_id,
@@ -887,6 +911,7 @@ class DirectiveIngestionRunner:
         mandates: MandatePublicationSnapshot | None,
         marker_before: object | None,
         validation_digest: str | None = None,
+        mandate_checksum: str | None = None,
     ) -> None:
         """Rollback only before the durable cleanup marker is written."""
         try:
@@ -896,6 +921,7 @@ class DirectiveIngestionRunner:
                 run_id,
                 force_commit=mandates is not None,
                 validation_digest=validation_digest,
+                mandate_checksum=mandate_checksum,
             )
         except Exception:
             marker_after = await self.commits.load()
@@ -912,6 +938,7 @@ class DirectiveIngestionRunner:
         metadata: list[SourceMetadata],
         marker: object | None,
         validation_digest: str | None = None,
+        mandate_checksum: str | None = None,
     ) -> None:
         """Do not activate another corpus until a pending cleanup can resume."""
         if marker is None:
@@ -933,6 +960,13 @@ class DirectiveIngestionRunner:
             raise RuntimeError(
                 "Publication cleanup marker does not match the approved "
                 "validation"
+            )
+        if (
+            mandate_checksum is not None
+            and getattr(marker, "mandate_checksum", None) != mandate_checksum
+        ):
+            raise RuntimeError(
+                "Publication cleanup marker does not match the approved mandates"
             )
 
     def _validate_daily_approval(
@@ -998,6 +1032,7 @@ class DirectiveIngestionRunner:
         validation_digest: str,
         environment_digest: str,
         source_inventory_digest: str,
+        mandate_checksum: str,
     ) -> None:
         """Read only the approval named by the expected immutable digest."""
         marker = await self.blobs.get_json(
@@ -1009,6 +1044,7 @@ class DirectiveIngestionRunner:
             "environment_digest": environment_digest,
             "source_inventory_digest": source_inventory_digest,
             "processing_hash": self.config.processing_hash,
+            "mandate_checksum": mandate_checksum,
         }
         if marker != expected:
             raise RuntimeError(
@@ -1017,7 +1053,10 @@ class DirectiveIngestionRunner:
             )
 
     async def _bind_source_state_validation_digest(
-        self, metadata: list[SourceMetadata], validation_digest: str
+        self,
+        metadata: list[SourceMetadata],
+        validation_digest: str,
+        mandate_checksum: str,
     ) -> None:
         """Persist the approved snapshot identity with every live source state."""
         for item in metadata:
@@ -1031,7 +1070,10 @@ class DirectiveIngestionRunner:
                     "Source-state does not match a live published bundle: "
                     f"{item.source.source_name}"
                 )
-            if state.validation_digest == validation_digest:
+            if (
+                state.validation_digest == validation_digest
+                and state.mandate_checksum == mandate_checksum
+            ):
                 continue
             snapshot = await self.source_states.snapshot(
                 item.source, self.config.processing_hash
@@ -1046,6 +1088,7 @@ class DirectiveIngestionRunner:
                 state.artifact_generation_id,
                 pending_cleanup=state.pending_cleanup,
                 validation_digest=validation_digest,
+                mandate_checksum=mandate_checksum,
                 expected_etag=snapshot.etag,
             )
 
@@ -1414,6 +1457,7 @@ class DirectiveIngestionRunner:
         run_id: str = "",
         *,
         validation_digest: str | None = None,
+        mandate_checksum: str | None = None,
     ) -> tuple[
         list[PublishedDirectiveVersion], MandatePublicationSnapshot | None
     ]:
@@ -1516,7 +1560,7 @@ class DirectiveIngestionRunner:
                     mandates, run_id
                 )
                 mandate_snapshot = MandatePublicationSnapshot(
-                    snapshot, previous_active, changed
+                    snapshot, previous_active, changed, run_id
                 )
             await self.stage_documents(prepared, snapshots)
             await self.publish_documents(prepared, snapshots)
@@ -1536,7 +1580,10 @@ class DirectiveIngestionRunner:
                     candidate_active_etag=candidate_active_etag,
                 )
             await self.record_source_states(
-                prepared, snapshots, validation_digest=validation_digest
+                prepared,
+                snapshots,
+                validation_digest=validation_digest,
+                mandate_checksum=mandate_checksum,
             )
         except Exception:
             await self._rollback_publication(snapshots, mandate_snapshot)
@@ -1652,7 +1699,9 @@ class DirectiveIngestionRunner:
                 mandate_snapshot.candidate_active_etag,
             )
         if mandate_snapshot is not None and mandate_snapshot.changed:
-            await self.mandates.discard_staged(mandate_snapshot.snapshot)
+            await self.mandates.discard_staged(
+                mandate_snapshot.snapshot, mandate_snapshot.run_id
+            )
 
     async def record_source_states(
         self,
@@ -1660,6 +1709,7 @@ class DirectiveIngestionRunner:
         snapshots: list[PublicationSnapshot] | None = None,
         *,
         validation_digest: str | None = None,
+        mandate_checksum: str | None = None,
     ) -> None:
         """Commit private idempotency records only after live publication checks."""
         for item in prepared:
@@ -1703,6 +1753,7 @@ class DirectiveIngestionRunner:
             }
             if validation_digest is not None:
                 record_kwargs["validation_digest"] = validation_digest
+                record_kwargs["mandate_checksum"] = mandate_checksum
             candidate_etag = await self.source_states.record(
                 item.source,
                 item.canonical.metadata,
@@ -1725,6 +1776,7 @@ class DirectiveIngestionRunner:
         run_id: str | None = None,
         force_commit: bool = False,
         validation_digest: str | None = None,
+        mandate_checksum: str | None = None,
     ) -> None:
         """Retire every store record not represented by validated sources."""
         expected_versions = {
@@ -1786,7 +1838,9 @@ class DirectiveIngestionRunner:
             )
             marker = (
                 await self.commits.record(
-                    *record_args, validation_digest=validation_digest
+                    *record_args,
+                    validation_digest=validation_digest,
+                    mandate_checksum=mandate_checksum,
                 )
                 if validation_digest is not None
                 else await self.commits.record(*record_args)
@@ -1802,6 +1856,13 @@ class DirectiveIngestionRunner:
             raise RuntimeError(
                 "Publication cleanup marker does not match the approved "
                 "validation"
+            )
+        elif (
+            mandate_checksum is not None
+            and marker.mandate_checksum != mandate_checksum
+        ):
+            raise RuntimeError(
+                "Publication cleanup marker does not match the approved mandates"
             )
         stale = {
             (
@@ -1829,7 +1890,16 @@ class DirectiveIngestionRunner:
                     item.source,
                     state.directive_metadata,
                     state.artifact_generation_id,
-                    validation_digest=validation_digest,
+                    validation_digest=(
+                        validation_digest
+                        if validation_digest is not None
+                        else state.validation_digest
+                    ),
+                    mandate_checksum=(
+                        mandate_checksum
+                        if mandate_checksum is not None
+                        else state.mandate_checksum
+                    ),
                 )
 
     async def _validate_candidate_documents(
@@ -2437,6 +2507,7 @@ def _validation_payload(
         ),
         "mandate_count": len(mandates.assignments),
         "mandate_user_count": mandates.user_count,
+        "mandate_checksum": _mandate_checksum(mandates),
         "warnings": warnings,
         "warning_count": len(warnings),
         "failures": [],
@@ -2445,14 +2516,12 @@ def _validation_payload(
         ),
     }
     payload["validation_digest"] = _public_record_digest(
-        _validation_digest_projection(payload, mandates)
+        _validation_digest_projection(payload)
     )
     return payload
 
 
-def _validation_digest_projection(
-    payload: dict[str, object], mandates: Any | None = None
-) -> dict[str, object]:
+def _validation_digest_projection(payload: dict[str, object]) -> dict[str, object]:
     """Only hash the public, stable validation contract—not run metadata."""
     fields = (
         "record_schema",
@@ -2468,40 +2537,29 @@ def _validation_digest_projection(
         "directive_version_ids",
         "mandate_count",
         "mandate_user_count",
+        "mandate_checksum",
         "warnings",
         "warning_count",
         "failures",
         "source_inventory_digest",
     )
-    projection = {field: payload[field] for field in fields}
-    if mandates is not None:
-        projection["mandate_identity_digest"] = _mandate_identity_digest(mandates)
-    return projection
+    return {field: payload[field] for field in fields}
 
 
-def _mandate_identity_digest(mandates: Any) -> str:
+def _mandate_checksum(mandates: Any) -> str:
     """Bind approval to canonical tenant-qualified mandate assignments."""
     checksum = getattr(mandates, "checksum", None)
-    if (
-        isinstance(checksum, str)
-        and len(checksum) == 64
-        and all(character in "0123456789abcdef" for character in checksum)
-    ):
+    if _is_checksum(checksum):
         return checksum
-    assignments = getattr(mandates, "assignments", None)
-    if assignments is None:
-        raise ValueError("Mandate approval identity is unavailable")
-    canonical = "\n".join(
-        f"{assignment.user_id},{assignment.directive_id},M"
-        for assignment in sorted(
-            assignments,
-            key=lambda assignment: (
-                str(assignment.user_id),
-                str(assignment.directive_id),
-            ),
-        )
-    ).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
+    raise ValueError("Mandate checksum is unavailable or invalid")
+
+
+def _is_checksum(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _safe_failure_code(exc: BaseException) -> str:

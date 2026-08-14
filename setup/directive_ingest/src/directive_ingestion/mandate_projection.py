@@ -290,27 +290,44 @@ class MandateRepository:
                 "pointer"
             ) from exc
 
-    async def discard_staged(self, snapshot: MandateSnapshot) -> None:
+    async def discard_staged(self, snapshot: MandateSnapshot, run_id: str) -> None:
         """Idempotently delete a candidate snapshot that was never committed."""
         query = (
-            "SELECT c.id, c.user_id FROM c WHERE "
+            "SELECT c.id, c.user_id, c.run_id, c._etag FROM c WHERE "
             "(c.type = 'assignment' OR c.type = 'snapshot') AND "
             "c.snapshot_id = @snapshot"
         )
-        stale: list[tuple[str, str]] = []
+        stale: list[tuple[str, str, str]] = []
         async for value in self._container.query_items(
             query=query,
             parameters=[{"name": "@snapshot", "value": snapshot.snapshot_id}],
         ):
             item_id = value.get("id")
             user_id = value.get("user_id")
-            if isinstance(item_id, str) and isinstance(user_id, str):
-                stale.append((item_id, user_id))
-        for item_id, user_id in stale:
+            item_run_id = value.get("run_id")
+            etag = value.get("_etag")
+            if (
+                isinstance(item_id, str)
+                and isinstance(user_id, str)
+                and item_run_id == run_id
+                and isinstance(etag, str)
+                and etag
+            ):
+                stale.append((item_id, user_id, etag))
+        for item_id, user_id, etag in stale:
             try:
-                await self._container.delete_item(item=item_id, partition_key=user_id)
+                await self._container.delete_item(
+                    item=item_id,
+                    partition_key=user_id,
+                    etag=etag,
+                    match_condition=MatchConditions.IfNotModified,
+                )
             except exceptions.CosmosResourceNotFoundError:
                 continue
+            except exceptions.CosmosAccessConditionFailedError as exc:
+                raise RuntimeError(
+                    "Concurrent mandate staging prevented discarding the candidate"
+                ) from exc
 
     async def cleanup(self, active_snapshot_id: str) -> bool:
         return await self._prune_inactive(active_snapshot_id)
