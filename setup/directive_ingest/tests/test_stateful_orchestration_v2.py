@@ -8,7 +8,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from directive_contracts import DirectiveChunk, DirectiveMetadata, DirectiveSummary
+from directive_contracts import (
+    DirectiveChunk,
+    DirectiveMetadata,
+    DirectiveSummary,
+    MandateSnapshot,
+)
 
 from directive_ingestion.canonical import CanonicalDirective, ParsedSection
 from directive_ingestion.metadata import DirectiveMetadataCandidate
@@ -405,15 +410,47 @@ class MemorySearch:
 
 
 class MemoryMandates:
-    async def is_current(self, _parsed) -> bool:
-        return True
+    def __init__(self) -> None:
+        self.active: MandateSnapshot | None = None
+        self.staged: MandateSnapshot | None = None
+
+    async def is_current(self, parsed) -> bool:
+        return self.active is not None and self.active.checksum == parsed.checksum
+
+    async def stage(self, parsed, _run_id: str):
+        snapshot = MandateSnapshot(
+            snapshot_id=f"mandates-{parsed.checksum}",
+            checksum=parsed.checksum,
+            assignment_count=len(parsed.assignments),
+            user_count=parsed.user_count,
+            complete=True,
+            previous_snapshot_id=(
+                self.active.snapshot_id if self.active is not None else None
+            ),
+        )
+        changed = self.active != snapshot
+        self.staged = snapshot
+        return snapshot, None, changed
+
+    async def activate(self, snapshot, _run_id: str) -> None:
+        self.active = snapshot
+
+    async def cleanup(self, _snapshot_id: str) -> bool:
+        return False
+
+    async def restore_active(self, _previous) -> None:
+        self.active = None
+
+    async def discard_staged(self, _snapshot) -> None:
+        self.staged = None
 
     async def validate_exact(self, parsed) -> dict[str, object]:
+        assert self.active is not None
         return {
-            "snapshot_id": f"mandates-{parsed.checksum}",
-            "checksum": parsed.checksum,
-            "assignment_count": len(parsed.assignments),
-            "user_count": parsed.user_count,
+            "snapshot_id": self.active.snapshot_id,
+            "checksum": self.active.checksum,
+            "assignment_count": self.active.assignment_count,
+            "user_count": self.active.user_count,
         }
 
 
@@ -617,6 +654,13 @@ async def test_pre_marker_rollback_then_post_marker_retry_preserves_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     harness = Harness(monkeypatch)
+    harness.runner.mandates.active = MandateSnapshot(
+        snapshot_id="mandates-" + "b" * 64,
+        checksum="b" * 64,
+        assignment_count=0,
+        user_count=0,
+        complete=True,
+    )
     harness.states.break_candidate_once = True
 
     with pytest.raises(
@@ -680,6 +724,13 @@ async def test_malformed_source_state_repairs_without_replacing_search_generatio
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     harness = Harness(monkeypatch)
+    harness.runner.mandates.active = MandateSnapshot(
+        snapshot_id="mandates-" + "b" * 64,
+        checksum="b" * 64,
+        assignment_count=0,
+        user_count=0,
+        complete=True,
+    )
     await harness.runner.reconcile_documents()
     bundle = next(iter(harness.catalog.bundles.values()))
     generation = bundle.artifact_generation_id
