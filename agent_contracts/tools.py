@@ -6,7 +6,18 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from directive_contracts import (
+    normalize_directive_id,
+    normalize_directive_version,
+    validate_directive_version_id,
+)
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 class StrictArguments(BaseModel):
@@ -36,7 +47,7 @@ class ProfileUpdateArguments(StrictArguments):
 
 class ResolveDirectiveArguments(StrictArguments):
     query: str | None = Field(default=None, min_length=1, max_length=500)
-    directive_id: str | None = Field(default=None, pattern=r"^\d{8}$")
+    directive_id: str | None = Field(default=None, min_length=1)
     directive_version_id: str | None = Field(
         default=None,
         min_length=1,
@@ -44,6 +55,18 @@ class ResolveDirectiveArguments(StrictArguments):
     )
     version_label: str | None = Field(default=None, min_length=1, max_length=100)
     as_of: date | None = None
+
+    @field_validator("directive_id", mode="before")
+    @classmethod
+    def normalize_directive_id(cls, value: str | None) -> str | None:
+        return None if value is None else normalize_directive_id(value)
+
+    @field_validator("version_label")
+    @classmethod
+    def validate_version_label(cls, value: str | None) -> str | None:
+        if value is not None:
+            normalize_directive_version(value)
+        return value
 
     @model_validator(mode="after")
     def validate_selector(self) -> ResolveDirectiveArguments:
@@ -60,6 +83,10 @@ class ResolveDirectiveArguments(StrictArguments):
             )
         if self.directive_version_id and not self.directive_id:
             raise ValueError("directive_id is required with directive_version_id")
+        if self.directive_version_id and self.directive_id:
+            self.directive_version_id = validate_directive_version_id(
+                self.directive_version_id, self.directive_id
+            )
         return self
 
 
@@ -74,6 +101,11 @@ class SearchDirectivesArguments(StrictArguments):
     current_only: bool = True
     max_results: int = Field(default=10, ge=1, le=100)
 
+    @field_validator("directive_ids", mode="before")
+    @classmethod
+    def normalize_directive_ids(cls, value: list[str]) -> list[str]:
+        return [normalize_directive_id(item) for item in value]
+
     @model_validator(mode="after")
     def validate_filters(self) -> SearchDirectivesArguments:
         if any(
@@ -81,16 +113,14 @@ class SearchDirectivesArguments(StrictArguments):
             for intent in self.intents
         ):
             raise ValueError("intents must contain 1..500 non-whitespace characters")
-        if any(
-            len(value) != 8 or not value.isdigit()
-            for value in self.directive_ids
-        ):
-            raise ValueError("directive_ids must contain eight-digit identifiers")
         if self.directive_version_id and len(self.directive_ids) != 1:
             raise ValueError(
                 "exact version filtering requires exactly one directive_id"
             )
         if self.directive_version_id:
+            self.directive_version_id = validate_directive_version_id(
+                self.directive_version_id, self.directive_ids[0]
+            )
             self.current_only = False
         elif not self.current_only:
             raise ValueError(
@@ -100,8 +130,20 @@ class SearchDirectivesArguments(StrictArguments):
 
 
 class DirectiveVersionArguments(StrictArguments):
-    directive_id: str = Field(pattern=r"^\d{8}$")
+    directive_id: str = Field(min_length=1)
     directive_version_id: str = Field(min_length=1, max_length=200)
+
+    @field_validator("directive_id", mode="before")
+    @classmethod
+    def normalize_directive_id(cls, value: str) -> str:
+        return normalize_directive_id(value)
+
+    @model_validator(mode="after")
+    def validate_version_identity(self) -> DirectiveVersionArguments:
+        self.directive_version_id = validate_directive_version_id(
+            self.directive_version_id, self.directive_id
+        )
+        return self
 
 
 class DirectiveContentArguments(DirectiveVersionArguments):
@@ -135,13 +177,13 @@ class RelatedDirectivesArguments(DirectiveVersionArguments):
 class UserDirectiveMandatesArguments(StrictArguments):
     directive_ids: list[str] = Field(min_length=1, max_length=100)
 
+    @field_validator("directive_ids", mode="before")
+    @classmethod
+    def normalize_directive_ids(cls, value: list[str]) -> list[str]:
+        return [normalize_directive_id(item) for item in value]
+
     @model_validator(mode="after")
     def validate_directive_ids(self) -> UserDirectiveMandatesArguments:
-        if any(
-            len(value) != 8 or not value.isdigit()
-            for value in self.directive_ids
-        ):
-            raise ValueError("directive_ids must contain eight-digit identifiers")
         return self
 
 
