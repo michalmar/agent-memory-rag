@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from azure.cosmos import exceptions
+from directive_contracts import directive_storage_key, normalize_directive_id
 
 from .config import get_settings
 from .cosmos_container import CosmosContainerLifecycle
@@ -45,7 +46,12 @@ class DirectiveMandateRepository(CosmosContainerLifecycle):
         user_id: str,
         directive_ids: list[str],
     ) -> dict[str, Any]:
-        ordered_ids = list(dict.fromkeys(directive_ids))
+        try:
+            ordered_ids = list(
+                dict.fromkeys(normalize_directive_id(value) for value in directive_ids)
+            )
+        except (TypeError, ValueError) as exc:
+            raise DirectiveDataUnavailable("Directive mandate identity is invalid") from exc
         container = self._require_initialized_container(
             "Directive mandates are unavailable"
         )
@@ -83,7 +89,10 @@ class DirectiveMandateRepository(CosmosContainerLifecycle):
         for directive_id in ordered_ids:
             try:
                 assignment = await container.read_item(
-                    item=f"assignment:{snapshot_id}:{directive_id}",
+                    item=(
+                        f"assignment:{snapshot_id}:"
+                        f"{directive_storage_key(directive_id)}"
+                    ),
                     partition_key=user_id,
                 )
             except exceptions.CosmosResourceNotFoundError:

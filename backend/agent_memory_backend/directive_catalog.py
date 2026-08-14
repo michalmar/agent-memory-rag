@@ -12,7 +12,11 @@ from directive_contracts import (
     DirectiveMetadata,
     DirectiveRelation,
     PublishedDirectiveVersion,
+    normalize_directive_id,
+    normalize_directive_version,
+    published_directive_version_item_id,
     serialized_json_size,
+    validate_directive_version_id,
 )
 
 from .config import get_settings
@@ -56,12 +60,17 @@ class DirectiveCatalogRepository(CosmosContainerLifecycle):
         directive_id: str,
         directive_version_id: str,
     ) -> PublishedDirectiveVersion | None:
+        directive_id, directive_version_id = _normalize_version_identity(
+            directive_id, directive_version_id
+        )
         container = self._require_initialized_container(
             "Directive catalog is unavailable"
         )
         try:
             item = await container.read_item(
-                item=f"version:{directive_version_id}",
+                item=published_directive_version_item_id(
+                    directive_id, _version_from_id(directive_version_id)
+                ),
                 partition_key=directive_id,
             )
         except exceptions.CosmosResourceNotFoundError:
@@ -77,7 +86,17 @@ class DirectiveCatalogRepository(CosmosContainerLifecycle):
             or item.get("directive_version_id") != directive_version_id
         ):
             return None
-        return _validate_published_bundle(item)
+        bundle = _validate_published_bundle(item)
+        if (
+            bundle.id
+            != published_directive_version_item_id(
+                directive_id, _version_from_id(directive_version_id)
+            )
+            or bundle.directive_id != directive_id
+            or bundle.directive_version_id != directive_version_id
+        ):
+            return None
+        return bundle
 
     async def get_version_record(
         self,
@@ -93,6 +112,7 @@ class DirectiveCatalogRepository(CosmosContainerLifecycle):
         self,
         directive_id: str,
     ) -> dict[str, Any] | None:
+        directive_id = _normalize_directive_id(directive_id)
         container = self._require_initialized_container(
             "Directive catalog is unavailable"
         )
@@ -110,8 +130,13 @@ class DirectiveCatalogRepository(CosmosContainerLifecycle):
         version_id = pointer.get("directive_version_id")
         if (
             pointer.get("type") != "current"
+            or pointer.get("directive_id") != directive_id
             or not isinstance(version_id, str)
         ):
+            return None
+        try:
+            version_id = validate_directive_version_id(version_id, directive_id)
+        except (TypeError, ValueError):
             return None
         return await self.get_version_record(directive_id, version_id)
 
@@ -123,17 +148,23 @@ class DirectiveCatalogRepository(CosmosContainerLifecycle):
         version_label: str | None = None,
         as_of: date | None = None,
     ) -> dict[str, Any] | None:
+        directive_id = _normalize_directive_id(directive_id)
         if directive_version_id:
             return await self.get_version_record(
                 directive_id,
                 directive_version_id,
             )
         if version_label:
+            try:
+                normalized_label = normalize_directive_version(version_label)
+            except (TypeError, ValueError):
+                return None
             versions = await self._list_versions(directive_id)
             matches = [
                 item
                 for item in versions
-                if item.get("version_label") == version_label
+                if _normalized_version_label(item.get("version_label"))
+                == normalized_label
             ]
             return matches[0] if len(matches) == 1 else None
         if as_of:
@@ -159,6 +190,9 @@ class DirectiveCatalogRepository(CosmosContainerLifecycle):
         directive_version_id: str,
         relation_types: set[str] | None = None,
     ) -> tuple[DirectiveRelation, ...]:
+        directive_id, directive_version_id = _normalize_version_identity(
+            directive_id, directive_version_id
+        )
         version = await self.get_version_record(
             directive_id,
             directive_version_id,
@@ -172,6 +206,7 @@ class DirectiveCatalogRepository(CosmosContainerLifecycle):
             str,
         ):
             return ()
+        directive_id = _normalize_directive_id(directive_id)
         container = self._require_initialized_container(
             "Directive catalog is unavailable"
         )
@@ -262,13 +297,18 @@ class DirectiveCatalogRepository(CosmosContainerLifecycle):
             if name in source
         }
         try:
-            return DirectiveMetadata.model_validate(fields).model_dump(
+            metadata = DirectiveMetadata.model_validate(fields).model_dump(
                 mode="json"
             )
         except ValueError as exc:
             raise DirectiveDataUnavailable(
                 "Directive version metadata is invalid"
             ) from exc
+        return {
+            name: value
+            for name, value in metadata.items()
+            if name not in {"source_hash", "processing_hash"}
+        }
 
 
 def _catalog_date(value: Any) -> date | None:
@@ -279,6 +319,41 @@ def _catalog_date(value: Any) -> date | None:
     try:
         return date.fromisoformat(str(value)[:10])
     except ValueError:
+        return None
+
+
+def _normalize_directive_id(value: str) -> str:
+    try:
+        return normalize_directive_id(value)
+    except (TypeError, ValueError) as exc:
+        raise DirectiveDataUnavailable("Directive identity is invalid") from exc
+
+
+def _normalize_version_identity(
+    directive_id: str, directive_version_id: str
+) -> tuple[str, str]:
+    normalized_id = _normalize_directive_id(directive_id)
+    try:
+        return (
+            normalized_id,
+            validate_directive_version_id(
+                directive_version_id, normalized_id
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        raise DirectiveDataUnavailable("Directive version identity is invalid") from exc
+
+
+def _version_from_id(directive_version_id: str) -> str:
+    return directive_version_id.rsplit(":v", 1)[1]
+
+
+def _normalized_version_label(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return normalize_directive_version(value)
+    except (TypeError, ValueError):
         return None
 
 

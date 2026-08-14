@@ -96,13 +96,13 @@ class DirectiveHostedAgentTests(unittest.TestCase):
             new=invoke_gateway_tool,
         ):
             result = asyncio.run(
-                gateway_tools.get_user_directive_mandates(["10000001"])
+                gateway_tools.get_user_directive_mandates(["ČD/42-A"])
             )
 
         self.assertEqual(result["status"], "ok")
         invoke_gateway_tool.assert_awaited_once_with(
             "get_user_directive_mandates",
-            {"directive_ids": ["10000001"]},
+            {"directive_ids": ["ČD/42-A"]},
             timeout_env_var="DIRECTIVE_TOOL_HTTP_TIMEOUT_SECONDS",
             default_timeout=180.0,
         )

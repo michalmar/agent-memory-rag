@@ -10,6 +10,9 @@ from directive_contracts import (
     DirectiveManifest,
     DirectiveSummary,
     PublishedDirectiveVersion,
+    directive_storage_key,
+    directive_version_storage_key,
+    published_directive_version_item_id,
 )
 from fastapi import HTTPException
 
@@ -23,8 +26,8 @@ from agent_memory_backend.directive_documents import (
 )
 from agent_memory_backend.directive_errors import DirectiveDataUnavailable
 
-_DIRECTIVE_ID = "30336958"
-_VERSION_ID = "30336958:v1"
+_DIRECTIVE_ID = "ČD/42-A"
+_VERSION_ID = "ČD/42-A:v1"
 _HASH = "a" * 64
 
 
@@ -44,16 +47,17 @@ def _manifest(**overrides) -> DirectiveManifest:
 
 def _bundle() -> PublishedDirectiveVersion:
     return PublishedDirectiveVersion(
-        id=f"version:{_VERSION_ID}",
+        id=published_directive_version_item_id(_DIRECTIVE_ID, "1"),
         directive_id=_DIRECTIVE_ID,
         directive_version_id=_VERSION_ID,
         version_label="1.0",
         title="Company Car Driver Safety Requirements",
-        status="published",
+        status="Current",
         is_current=True,
+        is_valid=True,
         effective_from="2025-01-01",
         source_filename=(
-            "30336958-company-car-driver-safety-requirements-v1.pdf"
+            "Řidičský předpis 42.PDF"
         ),
         source_hash=_HASH,
         processing_hash="b" * 64,
@@ -72,11 +76,13 @@ def _bundle() -> PublishedDirectiveVersion:
         ),
         artifacts=DirectiveArtifactLocators(
             canonical_blob_name=(
-                f"directives/{_DIRECTIVE_ID}/{_VERSION_ID}/"
-                f"{_HASH}/document.md"
+                f"directives/{directive_storage_key(_DIRECTIVE_ID)}/"
+                f"{directive_version_storage_key(_DIRECTIVE_ID, '1')}/"
+                f"{_HASH}/generations/{_HASH}/document.md"
             ),
             source_blob_name=(
-                f"directives/{_DIRECTIVE_ID}/{_VERSION_ID}/"
+                f"directives/{directive_storage_key(_DIRECTIVE_ID)}/"
+                f"{directive_version_storage_key(_DIRECTIVE_ID, '1')}/"
                 f"{_HASH}/source.pdf"
             ),
         ),
@@ -110,7 +116,7 @@ class _Catalog:
             "title": "Company Car Driver Safety Requirements",
             "effective_from": "2025-01-01",
             "source_filename": (
-                "30336958-company-car-driver-safety-requirements-v1.pdf"
+                "Řidičský předpis 42.PDF"
             ),
             "source_hash": _HASH,
         }
@@ -147,6 +153,7 @@ class DirectiveDocumentServiceTests(unittest.IsolatedAsyncioTestCase):
         assert document is not None
         self.assertEqual(document.markdown, "# Driver safety")
         self.assertEqual(document.total_pages, 4)
+        self.assertNotIn("source_hash", document.model_dump(mode="json"))
         self.assertEqual(
             artifacts.text_names,
             [catalog.bundle.artifacts.canonical_blob_name],
@@ -194,9 +201,7 @@ class DirectiveDocumentServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejects_mismatched_manifest_identity(self) -> None:
         invalid_bundle = _bundle().model_copy(
             update={
-                "manifest": _manifest(
-                    directive_version_id="30336958:v2"
-                )
+                "manifest": _manifest(directive_version_id="ČD/42-A:v2")
             }
         )
         catalog = _Catalog(bundle=invalid_bundle)
@@ -237,7 +242,7 @@ class DirectiveArtifactStreamingTests(unittest.IsolatedAsyncioTestCase):
         repository._container = container
 
         chunks = await repository.stream_bytes(
-            f"directives/{_DIRECTIVE_ID}/{_VERSION_ID}/{_HASH}/source.pdf"
+            _bundle().artifacts.source_blob_name
         )
 
         self.assertFalse(download.started)
@@ -324,7 +329,7 @@ class DirectiveDocumentRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.media_type, "application/pdf")
         self.assertEqual(
             response.headers["content-disposition"],
-            'inline; filename="30336958.pdf"; '
+            'inline; filename="directive.pdf"; '
             "filename*=UTF-8''driver%20safety.pdf",
         )
         self.assertEqual(response.headers["etag"], f'"{_HASH}"')
@@ -372,10 +377,8 @@ class DirectiveDocumentRouteTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_routes_require_authenticated_user_dependency(self) -> None:
         paths = {
-            "/directives/{directive_id}/versions/"
-            "{directive_version_id}/document",
-            "/directives/{directive_id}/versions/"
-            "{directive_version_id}/source",
+            "/directives/document",
+            "/directives/source",
         }
         routes = [
             route
@@ -390,3 +393,12 @@ class DirectiveDocumentRouteTests(unittest.IsolatedAsyncioTestCase):
                 for dependency in route.dependant.dependencies
             }
             self.assertIn(get_current_user, dependencies)
+
+    async def test_query_routes_reject_mismatched_identities(self) -> None:
+        with self.assertRaises(HTTPException) as error:
+            await server.get_directive_document(
+                _DIRECTIVE_ID,
+                "OTHER:v1",
+                _user(),
+            )
+        self.assertEqual(error.exception.status_code, 422)

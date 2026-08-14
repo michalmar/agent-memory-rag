@@ -122,3 +122,10 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings.directive_data_configured)
         self.assertEqual(settings.directive_search_index, "directive-index")
         self.assertEqual(settings.directive_search_api_version, "2026-04-01")
+
+    def test_directive_search_defaults_to_v2(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            get_settings.cache_clear()
+            settings = get_settings()
+
+        self.assertEqual(settings.directive_search_index, "directive-chunks-v2")

@@ -15,14 +15,15 @@ from directive_contracts import (
     DirectiveSummary,
     PublishedDirectiveVersion,
     build_section_content_items,
+    published_directive_version_item_id,
 )
 
 from agent_memory_backend.directive_catalog import DirectiveCatalogRepository
 from agent_memory_backend.directive_content import DirectiveContentRepository
 from agent_memory_backend.directive_errors import DirectiveDataUnavailable
 
-_DIRECTIVE_ID = "12345678"
-_VERSION_ID = "12345678:v1"
+_DIRECTIVE_ID = "ČD/42-A"
+_VERSION_ID = "ČD/42-A:v1"
 _SOURCE_HASH = "a" * 64
 _PROCESSING_HASH = "b" * 64
 _GENERATION_ID = "c" * 64
@@ -93,13 +94,14 @@ def _bundle_and_items(
         model_deployment="test",
     )
     bundle = PublishedDirectiveVersion(
-        id=f"version:{_VERSION_ID}",
+        id=published_directive_version_item_id(_DIRECTIVE_ID, "1"),
         directive_id=_DIRECTIVE_ID,
         directive_version_id=_VERSION_ID,
         version_label="1",
         title="Test directive",
-        status="published",
+        status="Current",
         is_current=True,
+        is_valid=True,
         effective_from="2026-01-01",
         source_filename="test.pdf",
         source_hash=_SOURCE_HASH,
@@ -169,7 +171,7 @@ class DirectiveCatalogBundleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, bundle)
         self.assertEqual(
             container.reads,
-            [(f"version:{_VERSION_ID}", _DIRECTIVE_ID)],
+            [(published_directive_version_item_id(_DIRECTIVE_ID, "1"), _DIRECTIVE_ID)],
         )
 
     async def test_legacy_version_is_rejected_without_fallback(self) -> None:
@@ -191,6 +193,28 @@ class DirectiveCatalogBundleTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(len(container.reads), 1)
+
+    async def test_catalog_rejects_returned_human_identity_mismatch(self) -> None:
+        bundle, _ = _bundle_and_items(["content"])
+        item = bundle.model_dump(mode="json")
+        item["directive_version_id"] = "ČD/42-A:v2"
+        container = _CatalogContainer(item)
+        repository = DirectiveCatalogRepository()
+        repository._container = container
+
+        result = await repository.get_published_version(
+            _DIRECTIVE_ID, _VERSION_ID
+        )
+
+        self.assertIsNone(result)
+
+    def test_public_catalog_metadata_omits_internal_hashes(self) -> None:
+        bundle, _ = _bundle_and_items(["content"])
+
+        public = DirectiveCatalogRepository.public_version(bundle)
+
+        self.assertNotIn("source_hash", public)
+        self.assertNotIn("processing_hash", public)
 
 
 class DirectiveContentRepositoryTests(unittest.IsolatedAsyncioTestCase):

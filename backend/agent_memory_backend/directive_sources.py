@@ -14,11 +14,10 @@ from azure.core.exceptions import (
 )
 from azure.storage.blob import ContentSettings
 from directive_contracts import (
-    DIRECTIVE_SOURCE_FILENAME_PATTERN,
     normalize_directive_source_prefix,
-    parse_directive_source_filename,
+    validate_directive_source_basename,
 )
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .config import get_settings
 from .directive_errors import DirectiveDataUnavailable
@@ -46,9 +45,14 @@ class DirectiveSourceTooLarge(ValueError):
 class DirectiveSourceItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    filename: str = Field(pattern=DIRECTIVE_SOURCE_FILENAME_PATTERN)
+    filename: str = Field(max_length=255)
     size_bytes: int = Field(ge=1)
     last_modified: datetime
+
+    @field_validator("filename")
+    @classmethod
+    def validate_filename(cls, value: str) -> str:
+        return validate_directive_source_basename(value)
 
 
 class DirectiveSourcePage(BaseModel):
@@ -141,8 +145,8 @@ class DirectiveSourceRepository:
                     if source_name is None:
                         continue
                     try:
-                        parse_directive_source_filename(source_name)
-                    except ValueError:
+                        validate_directive_source_basename(source_name)
+                    except (TypeError, ValueError):
                         continue
                     size = getattr(blob, "size", None)
                     last_modified = getattr(blob, "last_modified", None)
@@ -184,13 +188,13 @@ class DirectiveSourceRepository:
         size_bytes: int,
     ) -> DirectiveSourceItem:
         try:
-            identity = parse_directive_source_filename(filename)
-        except ValueError as exc:
+            source_filename = validate_directive_source_basename(filename)
+        except (TypeError, ValueError) as exc:
             raise DirectiveSourceInvalid(str(exc)) from exc
         if size_bytes < 1:
             raise DirectiveSourceInvalid("Directive source PDF is empty")
         blob = self._require_container().get_blob_client(
-            f"{self._prefix}{identity.filename}"
+            f"{self._prefix}{source_filename}"
         )
         try:
             await blob.upload_blob(
@@ -217,19 +221,19 @@ class DirectiveSourceRepository:
                 "Directive source upload metadata is invalid"
             )
         return DirectiveSourceItem(
-            filename=identity.filename,
+            filename=source_filename,
             size_bytes=size_bytes,
             last_modified=last_modified,
         )
 
     async def delete_source(self, filename: str) -> None:
         try:
-            identity = parse_directive_source_filename(filename)
-        except ValueError as exc:
+            source_filename = validate_directive_source_basename(filename)
+        except (TypeError, ValueError) as exc:
             raise DirectiveSourceInvalid(str(exc)) from exc
         try:
             await self._require_container().delete_blob(
-                f"{self._prefix}{identity.filename}",
+                f"{self._prefix}{source_filename}",
                 delete_snapshots="include",
             )
             self._cursor_tokens.clear()

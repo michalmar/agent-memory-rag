@@ -12,6 +12,7 @@ from urllib.parse import quote
 import httpx
 from azure.core.exceptions import ClientAuthenticationError
 from azure.identity import CredentialUnavailableError
+from directive_contracts import normalize_directive_id, validate_directive_version_id
 
 from .config import get_settings
 from .directive_errors import DirectiveDataUnavailable
@@ -34,6 +35,7 @@ _SELECT_FIELDS = (
     "version_label",
     "title",
     "is_current",
+    "is_valid",
     "effective_from",
     "effective_to",
     "section_id",
@@ -41,7 +43,6 @@ _SELECT_FIELDS = (
     "section_title",
     "page_from",
     "page_to",
-    "source_hash",
 )
 _SOURCE_DATA_FIELDS = _SELECT_FIELDS[2:]
 
@@ -124,11 +125,28 @@ class DirectiveSearchRepository:
         include_references: bool = True,
     ) -> dict[str, Any]:
         normalized_intents = [intent.strip() for intent in intents]
+        try:
+            normalized_ids = [
+                normalize_directive_id(value) for value in directive_ids or []
+            ]
+            if directive_version_id is not None and len(normalized_ids) != 1:
+                raise ValueError(
+                    "Exact directive version search requires one directive ID"
+                )
+            normalized_version_id = (
+                validate_directive_version_id(
+                    directive_version_id, normalized_ids[0]
+                )
+                if directive_version_id is not None
+                else None
+            )
+        except (TypeError, ValueError) as exc:
+            raise DirectiveDataUnavailable("Directive search identity is invalid") from exc
         bounded_results = min(max_results, self._max_results)
         filter_expression = _build_filter(
             current_only=current_only,
-            directive_ids=directive_ids or [],
-            directive_version_id=directive_version_id,
+            directive_ids=normalized_ids,
+            directive_version_id=normalized_version_id,
             section_ids=section_ids or [],
         )
         started = perf_counter()
@@ -175,8 +193,8 @@ class DirectiveSearchRepository:
             "intents": normalized_intents,
             "filter": {
                 "current_only": current_only,
-                "directive_ids": directive_ids or [],
-                "directive_version_id": directive_version_id,
+                "directive_ids": normalized_ids,
+                "directive_version_id": normalized_version_id,
                 "section_ids": section_ids or [],
             },
             "retrieval_output": [
@@ -327,7 +345,7 @@ def _build_filter(
     directive_version_id: str | None,
     section_ids: list[str],
 ) -> str:
-    filters = ["publication_state eq 'published'"]
+    filters = ["publication_state eq 'published'", "is_valid eq true"]
     if current_only:
         filters.append("is_current eq true")
     if directive_ids:

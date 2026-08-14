@@ -7,12 +7,12 @@ import os
 import re
 import tempfile
 from contextlib import asynccontextmanager
-from typing import Annotated, BinaryIO
+from typing import BinaryIO
 from urllib.parse import quote
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Path, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -24,8 +24,9 @@ from agent_contracts import (
     render_instructions,
 )
 from directive_contracts import (
-    DIRECTIVE_SOURCE_FILENAME_PATTERN,
-    parse_directive_source_filename,
+    normalize_directive_id,
+    validate_directive_source_basename,
+    validate_directive_version_id,
 )
 from .agent_mcp import application_tools_mcp_app
 from .agent_tool_gateway import (
@@ -156,19 +157,16 @@ async def me(user: User = Depends(get_current_user)):
     return result
 
 
-DirectiveSourceFilename = Annotated[
-    str,
-    Path(
-        pattern=DIRECTIVE_SOURCE_FILENAME_PATTERN,
-        max_length=255,
-    ),
-]
 _CORRELATION_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 @app.get(
     "/directive-sources",
     response_model=DirectiveSourcePage,
+    description=(
+        "Lists managed PDF sources. Directive identity is extracted from the "
+        "first two pages during ingestion, not from the filename."
+    ),
 )
 async def list_directive_sources(
     request: Request,
@@ -203,12 +201,23 @@ async def list_directive_sources(
     "/directive-sources/upload/{filename}",
     response_model=DirectiveSourceItem,
     status_code=201,
+    description=(
+        "Uploads one PDF without triggering ingestion. Directive identity is "
+        "extracted from the first two pages, not from the filename."
+    ),
 )
 async def upload_directive_source(
-    filename: DirectiveSourceFilename,
+    filename: str,
     request: Request,
     user: User = Depends(require_directive_source_manager),
 ):
+    try:
+        filename = validate_directive_source_basename(filename)
+    except (TypeError, ValueError) as exc:
+        _record_source_audit(
+            request, user, "upload", filename=filename, result="invalid"
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     settings = get_settings()
     with tempfile.SpooledTemporaryFile(
         max_size=min(
@@ -282,12 +291,34 @@ async def upload_directive_source(
     return result
 
 
-@app.delete("/directive-sources/{filename}")
+@app.delete(
+    "/directive-sources/{filename}",
+    description=(
+        "Deletes one named source PDF after explicit confirmation. This never "
+        "triggers ingestion; identity remains derived from the first two pages."
+    ),
+)
 async def delete_directive_source(
-    filename: DirectiveSourceFilename,
+    filename: str,
     request: Request,
+    confirm: bool = Query(
+        False,
+        description="Set true to explicitly confirm deletion.",
+    ),
     user: User = Depends(require_directive_source_manager),
 ):
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Set confirm=true to delete a directive source",
+        )
+    try:
+        filename = validate_directive_source_basename(filename)
+    except (TypeError, ValueError) as exc:
+        _record_source_audit(
+            request, user, "delete", filename=filename, result="invalid"
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
         await services.directive_sources.delete_source(filename)
     except DirectiveSourceInvalid as exc:
@@ -396,10 +427,10 @@ def _record_source_audit(
     }
     if filename is not None:
         try:
-            attributes["audit.filename"] = (
-                parse_directive_source_filename(filename).filename
+            attributes["audit.filename"] = validate_directive_source_basename(
+                filename
             )
-        except ValueError:
+        except (TypeError, ValueError):
             attributes["audit.filename"] = "invalid"
     if size_bytes is not None:
         attributes["audit.byte_size"] = size_bytes
@@ -407,22 +438,22 @@ def _record_source_audit(
         pass
 
 
-DirectiveId = Annotated[str, Path(pattern=r"^\d{8}$")]
-DirectiveVersionId = Annotated[
-    str,
-    Path(pattern=r"^\d{8}:v\d+(?:\.\d+)?$"),
-]
-
-
 @app.get(
-    "/directives/{directive_id}/versions/{directive_version_id}/document",
+    "/directives/document",
     response_model=DirectiveDocumentResponse,
+    description=(
+        "Returns canonical Markdown for an exact directive version. Both "
+        "identities are query parameters so slash-bearing IDs are safe."
+    ),
 )
 async def get_directive_document(
-    directive_id: DirectiveId,
-    directive_version_id: DirectiveVersionId,
+    directive_id: str = Query(..., min_length=1, max_length=128),
+    directive_version_id: str = Query(..., min_length=1, max_length=200),
     _user: User = Depends(get_current_user),
 ):
+    directive_id, directive_version_id = _normalize_directive_query(
+        directive_id, directive_version_id
+    )
     try:
         document = await services.directive_documents.get_document(
             directive_id,
@@ -439,13 +470,20 @@ async def get_directive_document(
 
 
 @app.get(
-    "/directives/{directive_id}/versions/{directive_version_id}/source",
+    "/directives/source",
+    description=(
+        "Streams the exact source PDF for a directive version. Both identities "
+        "are query parameters so slash-bearing IDs are safe."
+    ),
 )
 async def get_directive_source(
-    directive_id: DirectiveId,
-    directive_version_id: DirectiveVersionId,
+    directive_id: str = Query(..., min_length=1, max_length=128),
+    directive_version_id: str = Query(..., min_length=1, max_length=200),
     _user: User = Depends(get_current_user),
 ):
+    directive_id, directive_version_id = _normalize_directive_query(
+        directive_id, directive_version_id
+    )
     try:
         source = await services.directive_documents.get_source(
             directive_id,
@@ -466,13 +504,28 @@ async def get_directive_source(
         headers={
             "Cache-Control": "private, max-age=3600, immutable",
             "Content-Disposition": (
-                f'inline; filename="{directive_id}.pdf"; '
+                'inline; filename="directive.pdf"; '
                 f"filename*=UTF-8''{encoded_filename}"
             ),
             "ETag": f'"{source.source_hash}"',
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+def _normalize_directive_query(
+    directive_id: str, directive_version_id: str
+) -> tuple[str, str]:
+    try:
+        normalized_id = normalize_directive_id(directive_id)
+        return normalized_id, validate_directive_version_id(
+            directive_version_id, normalized_id
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Directive identity query parameters are invalid",
+        ) from exc
 
 
 @app.get("/prompts/customer-support")

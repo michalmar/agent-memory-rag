@@ -123,14 +123,14 @@ async def test_source_list_is_metadata_only_and_paginated() -> None:
     container = _Container(
         [
             SimpleNamespace(
-                name="12345678-alpha-v1.pdf",
+                name="Řízení kvality 2026.PDF",
                 size=100,
                 last_modified=datetime(2026, 7, 24, tzinfo=UTC),
                 etag="private",
                 version_id="private",
             ),
             SimpleNamespace(
-                name="12345678-zeta-v2.pdf",
+                name="pravidla_pro-voz.v2.pdf",
                 size=200,
                 last_modified=datetime(2026, 7, 25, tzinfo=UTC),
                 etag="private",
@@ -146,9 +146,9 @@ async def test_source_list_is_metadata_only_and_paginated() -> None:
         limit=1,
     )
 
-    assert first.items[0].filename == "12345678-alpha-v1.pdf"
+    assert first.items[0].filename == "Řízení kvality 2026.PDF"
     assert first.next_cursor == "1"
-    assert second.items[0].filename == "12345678-zeta-v2.pdf"
+    assert second.items[0].filename == "pravidla_pro-voz.v2.pdf"
     assert second.next_cursor is None
     assert container.page_sizes == [1, 1]
     assert set(first.items[0].model_dump()) == {
@@ -176,7 +176,7 @@ async def test_source_upload_is_create_only() -> None:
 
     with pytest.raises(DirectiveSourceConflict):
         await repository.upload_source(
-            "12345678-policy-v1.pdf",
+            "Zásady provozu.pdf",
             io.BytesIO(b"%PDF-test"),
             9,
         )
@@ -194,7 +194,7 @@ async def test_source_delete_maps_missing_blob() -> None:
     repository._container = container
 
     with pytest.raises(DirectiveSourceNotFound):
-        await repository.delete_source("12345678-policy-v1.pdf")
+        await repository.delete_source("Zásady provozu.pdf")
 
 
 @pytest.mark.asyncio
@@ -253,3 +253,48 @@ async def test_manage_role_is_separate_from_general_auth() -> None:
 
     assert rejected.value.status_code == 403
     assert accepted is manager
+
+
+@pytest.mark.asyncio
+async def test_source_list_keeps_only_safe_direct_child_pdf_basenames() -> None:
+    repository = DirectiveSourceRepository()
+    repository._prefix = "incoming/"
+    repository._container = _Container(
+        [
+            SimpleNamespace(
+                name="incoming/Směrnice č. 42.PDF",
+                size=100,
+                last_modified=datetime(2026, 7, 25, tzinfo=UTC),
+            ),
+            SimpleNamespace(
+                name="incoming/nested/ignored.pdf",
+                size=100,
+                last_modified=datetime(2026, 7, 25, tzinfo=UTC),
+            ),
+            SimpleNamespace(
+                name="incoming/not-a-pdf.txt",
+                size=100,
+                last_modified=datetime(2026, 7, 25, tzinfo=UTC),
+            ),
+        ]
+    )
+
+    page = await repository.list_sources(cursor=None, limit=10)
+
+    assert [item.filename for item in page.items] == ["Směrnice č. 42.PDF"]
+
+
+@pytest.mark.asyncio
+async def test_source_upload_rejects_unsafe_basename_before_blob_access() -> None:
+    repository = DirectiveSourceRepository()
+    container = _Container()
+    repository._container = container
+
+    with pytest.raises(DirectiveSourceInvalid):
+        await repository.upload_source(
+            "../escape.pdf",
+            io.BytesIO(b"%PDF-test"),
+            9,
+        )
+
+    container.blob.upload_blob.assert_not_awaited()
