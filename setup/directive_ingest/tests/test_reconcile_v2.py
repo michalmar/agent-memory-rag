@@ -131,6 +131,24 @@ async def test_state_snapshot_reads_bytes_and_etag_from_one_download_response() 
 
 
 @pytest.mark.asyncio
+async def test_source_artifact_snapshot_reads_bytes_metadata_and_etag_together() -> None:
+    stream = SimpleNamespace(
+        properties=SimpleNamespace(
+            etag="snapshot-etag",
+            metadata={"content_sha256": "a" * 64},
+        ),
+        readall=AsyncMock(return_value=b"snapshot"),
+    )
+    blob = SimpleNamespace(download_blob=AsyncMock(return_value=stream))
+    repository = object.__new__(BlobArtifactRepository)
+    repository._container = SimpleNamespace(get_blob_client=lambda _: blob)
+
+    assert await repository.read_bytes_with_metadata_and_etag(
+        "directives/test/source.pdf"
+    ) == (b"snapshot", {"content_sha256": "a" * 64}, "snapshot-etag")
+
+
+@pytest.mark.asyncio
 async def test_state_rollback_uses_only_the_candidate_write_etag() -> None:
     blob = SimpleNamespace(upload_blob=AsyncMock())
     container = SimpleNamespace(
@@ -141,11 +159,17 @@ async def test_state_rollback_uses_only_the_candidate_write_etag() -> None:
     repository._container = container
 
     await repository.restore_bytes(
-        "source-state/test.json", b"previous", "candidate-etag"
+        "source-state/test.json",
+        b"previous",
+        "candidate-etag",
+        metadata={"restored": "metadata"},
     )
     await repository.delete_if_etag("source-state/test.json", "candidate-etag")
 
     assert blob.upload_blob.await_args.kwargs["etag"] == "candidate-etag"
+    assert blob.upload_blob.await_args.kwargs["metadata"] == {
+        "restored": "metadata"
+    }
     assert container.delete_blob.await_args.kwargs["etag"] == "candidate-etag"
 
 
@@ -218,7 +242,13 @@ async def test_catalog_slot_rollback_refuses_etag_conflict() -> None:
 
 
 @pytest.mark.asyncio
-async def test_source_artifact_repair_uses_snapshot_etag_not_immutable_write() -> None:
+@pytest.mark.parametrize(
+    "metadata",
+    [{}, {"content_sha256": "not-a-sha256"}],
+)
+async def test_source_artifact_repair_rewrites_invalid_metadata_with_same_bytes(
+    metadata: dict[str, str],
+) -> None:
     source = _source()
     item = SimpleNamespace(
         source=source,
@@ -241,7 +271,10 @@ async def test_source_artifact_repair_uses_snapshot_etag_not_immutable_write() -
     candidate = await runner._publish_artifacts(
         item,
         SourceArtifactSnapshot(
-            item.bundle.artifacts.source_blob_name, b"corrupt", "before"
+            item.bundle.artifacts.source_blob_name,
+            source.content,
+            metadata,
+            "before",
         ),
     )
 
@@ -291,7 +324,7 @@ async def test_source_artifact_rollback_propagates_etag_conflict() -> None:
         previous_current_bundle=None,
         previous_source_state=None,
         previous_source_artifact=SourceArtifactSnapshot(
-            "source.pdf", b"old", "before"
+            "source.pdf", b"old", {"content_sha256": "bad"}, "before"
         ),
         candidate_source_artifact_etag="candidate",
     )
@@ -304,6 +337,57 @@ async def test_source_artifact_rollback_propagates_etag_conflict() -> None:
         b"old",
         "candidate",
         content_type="application/pdf",
+        metadata={"content_sha256": "bad"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_source_artifact_failure_restores_snapshot_bytes_and_metadata() -> None:
+    item = SimpleNamespace(
+        bundle=SimpleNamespace(
+            directive_id="directive",
+            directive_version_id="directive:v1",
+            artifact_generation_id="candidate",
+            artifacts=SimpleNamespace(source_blob_name="source.pdf"),
+        ),
+        canonical=SimpleNamespace(
+            metadata=SimpleNamespace(processing_hash="a" * 64)
+        ),
+        search_chunks=[],
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.catalog = SimpleNamespace(
+        restore_current=AsyncMock(),
+        snapshot_version=AsyncMock(),
+        restore_version=AsyncMock(),
+    )
+    runner.source_states = SimpleNamespace()
+    runner.blobs = SimpleNamespace(restore_bytes=AsyncMock())
+    snapshot = PublicationSnapshot(
+        item=item,
+        previous_version=None,
+        previous_catalog_slot=None,
+        previous_current=None,
+        previous_current_bundle=None,
+        previous_source_state=None,
+        previous_source_artifact=SourceArtifactSnapshot(
+            "source.pdf",
+            b"previous",
+            {"preserved": "metadata"},
+            "before",
+        ),
+        preserve_candidate_generation=True,
+        candidate_source_artifact_etag="candidate",
+    )
+
+    await runner._rollback_publication([snapshot], None)
+
+    runner.blobs.restore_bytes.assert_awaited_once_with(
+        "source.pdf",
+        b"previous",
+        "candidate",
+        content_type="application/pdf",
+        metadata={"preserved": "metadata"},
     )
 
 

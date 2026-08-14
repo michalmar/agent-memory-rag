@@ -178,6 +178,32 @@ class BlobArtifactRepository:
         except ResourceNotFoundError:
             return None
 
+    async def read_bytes_with_metadata_and_etag(
+        self, blob_name: str
+    ) -> tuple[bytes, dict[str, str], str] | None:
+        """Read one artifact's bytes, metadata, and ETag from one response."""
+        blob = self._container.get_blob_client(blob_name)
+        try:
+            stream = await blob.download_blob()
+            properties = getattr(stream, "properties", None)
+            etag = getattr(properties, "etag", None)
+            if not isinstance(etag, str) or not etag:
+                raise RuntimeError(f"State artifact is missing an ETag: {blob_name}")
+            raw_metadata = getattr(properties, "metadata", None)
+            metadata = (
+                dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+            )
+            if not all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in metadata.items()
+            ):
+                raise RuntimeError(
+                    f"Artifact has invalid metadata: {blob_name}"
+                )
+            return await stream.readall(), metadata, etag
+        except ResourceNotFoundError:
+            return None
+
     async def restore_bytes(
         self,
         blob_name: str,
@@ -185,6 +211,7 @@ class BlobArtifactRepository:
         candidate_etag: str,
         *,
         content_type: str = "application/json",
+        metadata: dict[str, str] | None = None,
     ) -> None:
         blob = self._container.get_blob_client(blob_name)
         await blob.upload_blob(
@@ -192,7 +219,9 @@ class BlobArtifactRepository:
             overwrite=True,
             etag=candidate_etag,
             match_condition=MatchConditions.IfNotModified,
-            metadata={"content_sha256": hashlib.sha256(content).hexdigest()},
+            metadata=metadata
+            if metadata is not None
+            else {"content_sha256": hashlib.sha256(content).hexdigest()},
             content_settings=ContentSettings(content_type=content_type),
         )
 
