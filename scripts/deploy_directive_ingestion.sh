@@ -78,7 +78,6 @@ if [[ "$PHASE" == all && -z "$VALIDATION_EVIDENCE_FILE" ]]; then
   GENERATED_VALIDATION_EVIDENCE=true
 fi
 
-SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
 RG="$(tf resource_group)"
 ACR_NAME="$(tf acr_name)"
 ACR_LOGIN="$(tf acr_login_server)"
@@ -96,7 +95,6 @@ SEARCH_NAME="$(tf search_service_name)"
 FOUNDRY_SCOPE="$(tf foundry_agents_account_id)"
 TAG="${1:-$(date +%Y%m%d%H%M%S)}"
 REPOSITORY="directive-ingestion"
-IMAGE_TAG="$ACR_LOGIN/$REPOSITORY:$TAG"
 IMAGE=""
 IMAGE_DIGEST=""
 JOB_CONTAINER="directive-ingestion"
@@ -111,6 +109,7 @@ VERIFY_SUMMARY_FILE="$(mktemp)"
 SOURCE_INVENTORY_FILE="$(mktemp)"
 VALIDATION_RECORD_DIGEST=""
 SOURCE_INVENTORY_DIGEST=""
+STARTED_EXECUTIONS=()
 
 ACR_SCOPE="$(
   az acr show --name "$ACR_NAME" --resource-group "$RG" --query id --output tsv
@@ -153,6 +152,9 @@ COSMOS_ROLE_SNAPSHOT="$(mktemp)"
 cleanup() {
   local status=$?
   trap - EXIT
+  if [[ "$status" -ne 0 && -n "${JOB_NAME:-}" ]]; then
+    stop_started_executions
+  fi
   rm -f \
     "$ARM_ROLE_SNAPSHOT" \
     "$COSMOS_ROLE_SNAPSHOT" \
@@ -176,6 +178,35 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+
+stop_started_executions() {
+  local execution_name status
+  for execution_name in "${STARTED_EXECUTIONS[@]}"; do
+    status="$(
+      az containerapp job execution show \
+        --name "$JOB_NAME" \
+        --resource-group "$RG" \
+        --job-execution-name "$execution_name" \
+        --query properties.status \
+        --output tsv 2>/dev/null || true
+    )"
+    case "$status" in
+      Succeeded|Failed|Stopped|Degraded|Canceled|"") continue ;;
+    esac
+    echo "==> Stopping failed-run execution $execution_name" >&2
+    az containerapp job stop \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --job-execution-name "$execution_name" \
+      --output none || true
+  done
+  for ((attempt = 1; attempt <= 30; attempt++)); do
+    assert_no_active_execution && return 0
+    sleep 2
+  done
+  echo "ERROR: started executions did not drain after failure cleanup" >&2
+  return 1
+}
 
 EXPECTED_ARM_ROLES=(
   "AcrPull|$ACR_SCOPE"
@@ -248,24 +279,13 @@ safe_summary_lines() {
   while IFS= read -r line; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
     [[ "${trimmed:0:1}" == "{" ]] || continue
+    if printf '%s\n' "$trimmed" |
+      grep -Eiq '"(content|markdown|prompt|document_text|administrative_content|raw_response)"[[:space:]]*:'; then
+      continue
+    fi
     sanitized="$(
-      printf '%s\n' "$trimmed" | jq -ce '
-        if type != "object" then empty else
-          {
-            status, run_id, source_count, directive_count, mandate_count,
-            mandate_user_count, changed_count, skipped_count, chunk_count,
-            published_chunks, published_directives, published_versions,
-            current_directives, current_versions, mandate_assignment_count,
-            acr_pull, document_intelligence, success, normalized_directive_ids,
-            directive_version_ids, warnings, processing_version,
-            processing_hash, search_index, source_count,
-            source_inventory_digest, validation_execution_id,
-            validation_digest, verify_execution_id, source_versions, directive_ids,
-            accepted_relations, required_artifacts, content_sections,
-            content_parts, split_sections
-          } | with_entries(select(.value != null))
-        end
-      ' 2>/dev/null || true
+      printf '%s\n' "$trimmed" |
+        jq -ce 'if type == "object" then . else empty end' 2>/dev/null || true
     )"
     [[ -n "$sanitized" ]] && printf '%s\n' "$sanitized" >>"$output_file"
   done <<<"$raw_logs"
@@ -457,6 +477,7 @@ start_job_execution() {
     echo "ERROR: Container Apps did not return an execution name" >&2
     return 1
   }
+  STARTED_EXECUTIONS+=("$execution_name")
   assert_execution_mode "$execution_name" "$expected_argument"
   assert_execution_image "$execution_name"
   printf '%s\n' "$execution_name"
@@ -538,7 +559,7 @@ $SOURCE_INVENTORY_DIGEST" | cut -c1-24)"
 }
 
 refresh_source_inventory() {
-  local source_count blob_name relative source_hash extension source_prefix
+  local source_count blob_name relative source_hash extension source_prefix prefix_length
   source_prefix="$(tf directive_source_prefix)"
   : >"$SOURCE_INVENTORY_FILE"
   az storage blob list \
@@ -551,7 +572,12 @@ refresh_source_inventory() {
     while IFS= read -r blob_name; do
       extension="$(printf '%s' "${blob_name##*.}" | tr '[:upper:]' '[:lower:]')"
       [[ "$extension" == pdf ]] || continue
-      relative="${blob_name#$source_prefix}"
+      prefix_length=${#source_prefix}
+      [[ "${blob_name:0:prefix_length}" == "$source_prefix" ]] || {
+        echo "ERROR: source blob is outside the literal configured prefix: $blob_name" >&2
+        return 1
+      }
+      relative="${blob_name:prefix_length}"
       [[ "$relative" != */* && -n "$relative" ]] || {
         echo "ERROR: source blob is not a direct PDF child: $blob_name" >&2
         return 1
@@ -602,11 +628,11 @@ load_validation_evidence() {
     echo "ERROR: validation evidence is stale or timestamped in the future" >&2
     return 1
   }
-  IMAGE_DIGEST="$(jq -r '.image_digest // empty' "$VALIDATION_EVIDENCE_FILE")"
+  IMAGE_DIGEST="$(jq -r '.wrapper.image_digest // empty' "$VALIDATION_EVIDENCE_FILE")"
   IMAGE="$ACR_LOGIN/$REPOSITORY@$IMAGE_DIGEST"
-  VALIDATE_EXECUTION="$(jq -r '.validation_execution_id // empty' "$VALIDATION_EVIDENCE_FILE")"
-  SOURCE_INVENTORY_DIGEST="$(jq -r '.source_inventory_digest // empty' "$VALIDATION_EVIDENCE_FILE")"
-  VALIDATION_RECORD_DIGEST="$(jq -r '.validation_record_digest // empty' "$VALIDATION_EVIDENCE_FILE")"
+  VALIDATE_EXECUTION="$(jq -r '.wrapper.validation_execution_id // empty' "$VALIDATION_EVIDENCE_FILE")"
+  SOURCE_INVENTORY_DIGEST="$(jq -r '.wrapper.source_inventory_digest // empty' "$VALIDATION_EVIDENCE_FILE")"
+  VALIDATION_RECORD_DIGEST="$(jq -r '.wrapper.validation_record_digest // empty' "$VALIDATION_EVIDENCE_FILE")"
   [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
     echo "ERROR: validation evidence image digest is not immutable" >&2
     return 1
@@ -626,7 +652,7 @@ write_validation_evidence() {
     echo "ERROR: validation phase requires DIRECTIVE_VALIDATE_EVIDENCE_FILE" >&2
     return 1
   }
-  local canonical_record record_digest created_at evidence_nonce processing_hash
+  local canonical_record record_digest created_at evidence_nonce
   processing_hash="$(jq -r '.processing_hash // empty' "$VALIDATION_SUMMARY_FILE")"
   [[ "$processing_hash" =~ ^[0-9a-f]{64}$ ]] || {
     echo "ERROR: validation summary processing_hash is invalid" >&2
@@ -634,28 +660,20 @@ write_validation_evidence() {
   }
   canonical_record="$(
     jq -S -c \
-      --arg subscription "$SUBSCRIPTION_ID" \
-      --arg resource_group "$RG" \
-      --arg job "$JOB_NAME" \
       --arg image_digest "$IMAGE_DIGEST" \
       --arg image_reference "$IMAGE" \
       --arg execution "$VALIDATE_EXECUTION" \
       --arg source_digest "$SOURCE_INVENTORY_DIGEST" \
-      --arg processing_hash "$processing_hash" \
       '
-        . + {
-          environment: {
-            subscription_id: $subscription,
-            resource_group: $resource_group,
-            job_name: $job
-          },
-          image_digest: $image_digest,
-          image_reference: $image_reference,
-          processing_hash: $processing_hash,
-          source_inventory_digest: $source_digest,
-          validation_execution_id: $execution
+        {
+          producer_record: .,
+          wrapper: {
+            image_digest: $image_digest,
+            image_reference: $image_reference,
+            source_inventory_digest: $source_digest,
+            validation_execution_id: $execution
+          }
         }
-      }
     ' "$VALIDATION_SUMMARY_FILE"
   )"
   record_digest="$(sha256_text "$canonical_record")"
@@ -665,7 +683,8 @@ write_validation_evidence() {
     --arg digest "$record_digest" \
     --argjson created_at "$created_at" \
     --arg nonce "$evidence_nonce" \
-    '. + {validation_record_digest: $digest, evidence_created_at: $created_at, evidence_nonce: $nonce}' \
+    '.wrapper.validation_record_digest = $digest |
+     . + {evidence_created_at: $created_at, evidence_nonce: $nonce}' \
     <(printf '%s\n' "$canonical_record") >"$VALIDATION_EVIDENCE_FILE"
   VALIDATION_RECORD_DIGEST="$record_digest"
   echo "validation_record_digest=$VALIDATION_RECORD_DIGEST"
@@ -687,6 +706,7 @@ validate_metadata_summary() {
       .search_index == $search_index and
       (.source_count | type == "number" and . > 0) and
       (.source_inventory_digest | test("^[0-9a-f]{64}$")) and
+      (.validation_execution_id | type == "string" and length > 0) and
       (.validation_digest | test("^[0-9a-f]{64}$"))
     ' "$VALIDATION_SUMMARY_FILE" >/dev/null || {
     echo "ERROR: validation summary does not match the complete v2 contract" >&2
@@ -711,34 +731,28 @@ revalidate_validation_evidence() {
   validate_metadata_summary
   [[ "$(jq -r '.source_inventory_digest' "$VALIDATION_SUMMARY_FILE")" == "$SOURCE_INVENTORY_DIGEST" ]] || \
     die "Validation execution source inventory differs from its evidence"
-  [[ "$(jq -r '.source_inventory_digest' "$VALIDATION_EVIDENCE_FILE")" == "$SOURCE_INVENTORY_DIGEST" ]] || \
+  [[ "$(jq -r '.producer_record.source_inventory_digest' "$VALIDATION_EVIDENCE_FILE")" == "$SOURCE_INVENTORY_DIGEST" ]] || \
     die "Validation evidence source inventory differs from the live corpus"
   canonical_record="$(
+    jq -S -c '{producer_record: .}' "$VALIDATION_SUMMARY_FILE"
+  )"
+  canonical_record="$(
     jq -S -c \
-      --arg subscription "$SUBSCRIPTION_ID" \
-      --arg resource_group "$RG" \
-      --arg job "$JOB_NAME" \
       --arg image_digest "$IMAGE_DIGEST" \
       --arg image_reference "$IMAGE" \
       --arg execution "$VALIDATE_EXECUTION" \
       --arg source_digest "$SOURCE_INVENTORY_DIGEST" \
-      '
-        . + {
-          environment: {
-            subscription_id: $subscription,
-            resource_group: $resource_group,
-            job_name: $job
-          },
+      '. + {
+        wrapper: {
           image_digest: $image_digest,
           image_reference: $image_reference,
           source_inventory_digest: $source_digest,
           validation_execution_id: $execution
         }
-      }
-    ' "$VALIDATION_SUMMARY_FILE"
+      }' <(printf '%s\n' "$canonical_record")
   )"
   actual_digest="$(sha256_text "$canonical_record")"
-  evidence_digest="$(jq -r '.validation_record_digest' "$VALIDATION_EVIDENCE_FILE")"
+  evidence_digest="$(jq -r '.wrapper.validation_record_digest' "$VALIDATION_EVIDENCE_FILE")"
   [[ "$actual_digest" == "$evidence_digest" ]] || die \
     "Validation evidence does not match the pinned Azure execution output"
   VALIDATION_RECORD_DIGEST="$actual_digest"
@@ -751,32 +765,21 @@ write_verification_evidence() {
   local canonical_record record_digest
   canonical_record="$(
     jq -S -c \
-      --arg subscription "$SUBSCRIPTION_ID" \
-      --arg resource_group "$RG" \
-      --arg job "$JOB_NAME" \
-      --arg search_index "$EXPECTED_SEARCH_INDEX" \
-      --arg processing "$EXPECTED_PROCESSING_VERSION" \
-      --arg execution "$VERIFY_EXECUTION" \
-      --arg validation_execution "$VALIDATE_EXECUTION" \
-      --arg validation_digest "$VALIDATION_RECORD_DIGEST" \
       --arg image_digest "$IMAGE_DIGEST" \
       --arg source_digest "$SOURCE_INVENTORY_DIGEST" \
+      --arg validation_execution "$VALIDATE_EXECUTION" \
+      --arg validation_digest "$VALIDATION_RECORD_DIGEST" \
+      --arg execution "$VERIFY_EXECUTION" \
       '
         {
-          verify_record: .,
-          environment: {
-            subscription_id: $subscription,
-            resource_group: $resource_group,
-            job_name: $job
-          },
-          search_index: $search_index,
-          processing_version: $processing,
-          processing_hash: (.processing_hash // ""),
-          image_digest: $image_digest,
-          source_inventory_digest: $source_digest,
-          validation_execution_id: $validation_execution,
-          validation_record_digest: $validation_digest,
-          verification_execution_id: $execution
+          producer_record: .,
+          wrapper: {
+            image_digest: $image_digest,
+            source_inventory_digest: $source_digest,
+            validation_execution_id: $validation_execution,
+            validation_record_digest: $validation_digest,
+            verification_execution_id: $execution
+          }
         }
       ' "$source_record"
   )"
@@ -785,19 +788,20 @@ write_verification_evidence() {
     --arg digest "$record_digest" \
     --arg verify_digest "$(sha256_text "$canonical_record")" \
     '
-      .verify_record.success == true and
-      (.verify_record | type == "object") and
-      (.verify_record.verify_execution_id | type == "string" and length > 0) and
-      (.verify_record.processing_hash | test("^[0-9a-f]{64}$")) and
-      (.verify_record.source_versions | type == "number") and
-      (.verify_record.directive_ids | type == "number") and
-      (.verify_record.current_versions | type == "number") and
-      (.verify_record.published_chunks | type == "number") and
-      (.verify_record.mandate_assignment_count | type == "number") and
-      .verification_execution_id != "" and
-      .validation_execution_id != "" and
-      .image_digest != "" and
-      .source_inventory_digest != "" and
+      (.producer_record | type == "object") and
+      .producer_record.success == true and
+      (.producer_record.verify_execution_id | type == "string" and length > 0) and
+      (.producer_record.environment | type == "object") and
+      .producer_record.search_index == "directive-chunks-v2" and
+      .producer_record.processing_version == "directive-v2-czech-layout" and
+      (.producer_record.processing_hash | test("^[0-9a-f]{64}$")) and
+      (.producer_record.source_inventory_digest | test("^[0-9a-f]{64}$")) and
+      (.producer_record.verify_digest | type == "string" and length > 0) and
+      (.producer_record.cross_store | type == "object") and
+      .wrapper.verification_execution_id != "" and
+      .wrapper.validation_execution_id != "" and
+      .wrapper.image_digest != "" and
+      .wrapper.source_inventory_digest != "" and
       $digest == $verify_digest
     ' <(printf '%s\n' "$canonical_record") >/dev/null || {
     echo "ERROR: verification summary is incomplete for v2 finalization" >&2
@@ -805,14 +809,12 @@ write_verification_evidence() {
   }
   jq -S -c \
     --arg digest "$record_digest" \
-    '. + {verification_record_digest: $digest}' \
+    '.wrapper.verification_record_digest = $digest | .' \
     <(printf '%s\n' "$canonical_record") >"$VERIFY_EVIDENCE_FILE"
   jq -e \
-    --arg subscription "$SUBSCRIPTION_ID" \
     '
-      .environment.subscription_id == $subscription and
-      .search_index == "directive-chunks-v2" and
-      .processing_version == "directive-v2-czech-layout"
+      .producer_record.search_index == "directive-chunks-v2" and
+      .producer_record.processing_version == "directive-v2-czech-layout"
     ' "$VERIFY_EVIDENCE_FILE" >/dev/null || {
     echo "ERROR: verification evidence environment or v2 configuration mismatch" >&2
     return 1
@@ -970,7 +972,7 @@ else
   [[ "$(jq -r '.confirmation_token // empty' "$VALIDATION_EVIDENCE_FILE")" == "" ]] || \
     die "Validation evidence must not contain a reusable confirmation token"
   refresh_source_inventory
-  [[ "$SOURCE_INVENTORY_DIGEST" == "$(jq -r '.source_inventory_digest' "$VALIDATION_EVIDENCE_FILE")" ]] || \
+  [[ "$SOURCE_INVENTORY_DIGEST" == "$(jq -r '.producer_record.source_inventory_digest' "$VALIDATION_EVIDENCE_FILE")" ]] || \
     die "Source inventory changed since validation evidence was issued"
   status="$(
     az containerapp job execution show \
@@ -997,7 +999,7 @@ assert_live_v2_config
 assert_live_maintenance_mode
 assert_v2_search_schema
 refresh_source_inventory
-[[ "$SOURCE_INVENTORY_DIGEST" == "$(jq -r '.source_inventory_digest' "$VALIDATION_EVIDENCE_FILE")" ]] || \
+[[ "$SOURCE_INVENTORY_DIGEST" == "$(jq -r '.producer_record.source_inventory_digest' "$VALIDATION_EVIDENCE_FILE")" ]] || \
   die "Source inventory changed immediately before publication"
 
 echo "==> Starting approved publication through a per-execution override"
@@ -1010,7 +1012,7 @@ VERIFY_EXECUTION="$(start_job_execution verify)"
 echo "==> Verification execution: $VERIFY_EXECUTION"
 wait_for_execution "$VERIFY_EXECUTION" "Directive verification" 120 10
 refresh_source_inventory
-[[ "$SOURCE_INVENTORY_DIGEST" == "$(jq -r '.source_inventory_digest' "$VALIDATION_EVIDENCE_FILE")" ]] || \
+[[ "$SOURCE_INVENTORY_DIGEST" == "$(jq -r '.producer_record.source_inventory_digest' "$VALIDATION_EVIDENCE_FILE")" ]] || \
   die "Source inventory changed before verification evidence was captured"
 write_verification_evidence "$VERIFY_SUMMARY_FILE"
 

@@ -25,6 +25,7 @@ INVENTORY_EVIDENCE_FILE=""
 SOURCE_INVENTORY_FILE=""
 SOURCE_INVENTORY_DIGEST=""
 SOURCE_COUNT=0
+STARTED_EXECUTIONS=()
 
 read -r -a AZ_CMD <<<"$AZ_BIN"
 read -r -a TERRAFORM_CMD <<<"$TERRAFORM_BIN"
@@ -51,7 +52,13 @@ die() {
 }
 
 cleanup() {
-  rm -f "$SOURCE_INVENTORY_FILE"
+  local status=$?
+  trap - EXIT
+  if [[ "$status" -ne 0 && -n "${JOB_NAME:-}" ]]; then
+    stop_started_executions || true
+  fi
+  [[ -z "$SOURCE_INVENTORY_FILE" ]] || rm -f "$SOURCE_INVENTORY_FILE"
+  exit "$status"
 }
 trap cleanup EXIT
 
@@ -74,6 +81,29 @@ sha256_file() {
   else
     die "shasum or sha256sum is required to bind the confirmation token"
   fi
+}
+
+stop_started_executions() {
+  local execution_name status
+  for execution_name in "${STARTED_EXECUTIONS[@]}"; do
+    status="$(
+      "${AZ_CMD[@]}" containerapp job execution show \
+        --name "$JOB_NAME" \
+        --resource-group "$RG" \
+        --job-execution-name "$execution_name" \
+        --query properties.status \
+        --output tsv 2>/dev/null || true
+    )"
+    case "$status" in
+      Succeeded|Failed|Stopped|Degraded|Canceled|"") continue ;;
+    esac
+    "${AZ_CMD[@]}" containerapp job stop \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --job-execution-name "$execution_name" \
+      --output none || true
+  done
+  wait_for_active_executions_to_drain || true
 }
 
 tf_output() {
@@ -144,13 +174,14 @@ parse_args() {
 
 load_inventory() {
   SUBSCRIPTION_ID="$("${AZ_CMD[@]}" account show --query id --output tsv)"
-  local blob_name relative source_hash extension
+  local blob_name relative source_hash extension source_prefix_length
   SUBSCRIPTION_NAME="$("${AZ_CMD[@]}" account show --query name --output tsv)"
   RG="$(tf_output resource_group)"
   STORAGE_ACCOUNT="$(tf_output directive_artifacts_storage_account)"
   ARTIFACT_CONTAINER="$(tf_output directive_artifacts_container)"
   SOURCE_CONTAINER="$(tf_output directive_source_container)"
   SOURCE_PREFIX="$(tf_output directive_source_prefix)"
+  source_prefix_length=${#SOURCE_PREFIX}
   rm -f "$SOURCE_INVENTORY_FILE"
   SOURCE_INVENTORY_FILE="$(mktemp)"
   "${AZ_CMD[@]}" storage blob list \
@@ -163,7 +194,9 @@ load_inventory() {
     while IFS= read -r blob_name; do
       extension="$(printf '%s' "${blob_name##*.}" | tr '[:upper:]' '[:lower:]')"
       [[ "$extension" == pdf ]] || continue
-      relative="${blob_name#$SOURCE_PREFIX}"
+      [[ "${blob_name:0:source_prefix_length}" == "$SOURCE_PREFIX" ]] || die \
+        "Source listing returned a blob outside the literal source prefix"
+      relative="${blob_name:source_prefix_length}"
       [[ "$relative" != */* && -n "$relative" ]] || die \
         "Source blob is not a direct PDF child: $blob_name"
       source_hash="$(
@@ -240,38 +273,28 @@ token_inventory_text() {
   inventory_text | sed 's/^active_executions=.*/active_executions=<must-drain-before-delete>/'
 }
 
-inventory_token() {
-  local inventory
-  inventory="$(token_inventory_text)"
-  printf 'DIRECTIVE-RESET-V2-%s\n' "$(sha256_text "$inventory" | cut -c1-24)"
-}
-
-finalize_token() {
-  local inventory verification_hash validation_digest source_digest image_digest verify_digest
-  verification_hash="$(sha256_file "$VERIFICATION_FILE")"
-  validation_digest="$(jq -r '.validation_record_digest' "$VERIFICATION_FILE")"
-  source_digest="$(jq -r '.source_inventory_digest' "$VERIFICATION_FILE")"
-  image_digest="$(jq -r '.image_digest' "$VERIFICATION_FILE")"
-  verify_digest="$(jq -r '.verification_record_digest' "$VERIFICATION_FILE")"
-  inventory="$(token_inventory_text)"
-  printf 'DIRECTIVE-FINALIZE-V2-%s\n' \
-    "$(sha256_text "$inventory
-verification_evidence_sha256=$verification_hash
-validation_record_digest=$validation_digest
-source_inventory_digest=$source_digest
-image_digest=$image_digest
-verification_record_digest=$verify_digest" | cut -c1-24)"
+confirmation_token_for() {
+  local kind="$1"
+  local created_at="$2"
+  local nonce="$3"
+  local verification_digest="${4:-}"
+  local prefix="DIRECTIVE-RESET-V2"
+  [[ "$kind" == finalize ]] && prefix="DIRECTIVE-FINALIZE-V2"
+  printf '%s-%s\n' "$prefix" "$(
+    sha256_text "$(token_inventory_text)
+evidence_created_at=$created_at
+evidence_nonce=$nonce
+verification_record_digest=$verification_digest" | cut -c1-24
+  )"
 }
 
 write_inventory_evidence() {
   local token="$1"
   local kind="$2"
-  local created_at nonce inventory_hash verification_hash=""
+  local created_at="$3"
+  local nonce="$4"
+  local inventory_hash verification_hash=""
   [[ -n "$INVENTORY_EVIDENCE_FILE" ]] || return 0
-  created_at="$(date +%s)"
-  nonce="$(
-    sha256_text "$created_at:$RANDOM:$$:$SOURCE_INVENTORY_DIGEST" | cut -c1-32
-  )"
   inventory_hash="$(sha256_text "$(token_inventory_text)")"
   if [[ "$kind" == finalize ]]; then
     verification_hash="$(sha256_file "$VERIFICATION_FILE")"
@@ -293,12 +316,13 @@ write_inventory_evidence() {
       inventory_hash: $inventory_hash,
       source_inventory_digest: $source_digest,
       v2_index: $v2,
-      verification_evidence_sha256: $verification_hash
+      verification_evidence_sha256: $verification_hash,
+      verification_record_digest: ($verification_hash | if . == "" then null else . end)
     }' >"$INVENTORY_EVIDENCE_FILE"
 }
 
 validate_inventory_evidence() {
-  local now created_at age expected_kind expected_token verification_hash=""
+  local now created_at age expected_kind expected_token verification_hash="" expected_derived_token
   [[ -s "$INVENTORY_EVIDENCE_FILE" ]] || die \
     "Execute requires a persisted fresh dry-run inventory evidence file"
   jq -e 'type == "object" and (.nonce | type == "string" and length > 0)' \
@@ -312,6 +336,12 @@ validate_inventory_evidence() {
   expected_kind="$1"
   expected_token="$2"
   [[ "$expected_kind" != finalize ]] || verification_hash="$(sha256_file "$VERIFICATION_FILE")"
+  expected_derived_token="$(confirmation_token_for \
+    "$expected_kind" "$created_at" \
+    "$(jq -r '.nonce' "$INVENTORY_EVIDENCE_FILE")" \
+    "$(jq -r '.verification_record_digest // empty' "$INVENTORY_EVIDENCE_FILE")")"
+  [[ "$expected_token" == "$expected_derived_token" ]] || die \
+    "Inventory evidence token is not bound to its timestamp, nonce, and inventory"
   jq -e \
     --arg kind "$expected_kind" \
     --arg token "$expected_token" \
@@ -334,17 +364,24 @@ validate_inventory_evidence() {
 }
 
 print_inventory() {
-  local token
+  local token created_at nonce verification_digest=""
   echo "==> Directive derived-data $MODE inventory"
   inventory_text
   echo "directive-source is PROTECTED and is never a reset target"
+  created_at="$(date +%s)"
+  nonce="$(sha256_text "$created_at:$RANDOM:$$:$SOURCE_INVENTORY_DIGEST" | cut -c1-32)"
   if [[ "$MODE" == "finalize" ]]; then
     verification_file_is_fresh
-    token="$(finalize_token)"
-  else
-    token="$(inventory_token)"
+    verification_digest="$(sha256_file "$VERIFICATION_FILE")"
   fi
-  write_inventory_evidence "$token" "$([[ "$MODE" == finalize ]] && echo finalize || echo reset)"
+  token="$(confirmation_token_for \
+    "$([[ "$MODE" == finalize ]] && echo finalize || echo reset)" \
+    "$created_at" "$nonce" "$verification_digest")"
+  write_inventory_evidence \
+    "$token" \
+    "$([[ "$MODE" == finalize ]] && echo finalize || echo reset)" \
+    "$created_at" \
+    "$nonce"
   echo "confirmation_token=$token"
   echo "No Azure data was changed."
 }
@@ -442,16 +479,30 @@ guard_artifact_target() {
 
 purge_prefix() {
   local prefix="$1"
-  local remaining
+  local blob_name prefix_length remaining
   guard_artifact_target "$prefix"
   echo "==> Purging $ARTIFACT_CONTAINER/$prefix"
-  "${AZ_CMD[@]}" storage blob delete-batch \
-    --account-name "$STORAGE_ACCOUNT" \
-    --source "$ARTIFACT_CONTAINER" \
-    --pattern "${prefix}*" \
-    --auth-mode login \
-    --delete-snapshots include \
-    --output none
+  prefix_length=${#prefix}
+  while IFS= read -r blob_name; do
+    [[ -n "$blob_name" ]] || continue
+    [[ "${blob_name:0:prefix_length}" == "$prefix" ]] || die \
+      "Storage listing returned a blob outside the literal purge prefix"
+    "${AZ_CMD[@]}" storage blob delete \
+      --account-name "$STORAGE_ACCOUNT" \
+      --container-name "$ARTIFACT_CONTAINER" \
+      --name "$blob_name" \
+      --auth-mode login \
+      --delete-snapshots include \
+      --output none
+  done < <(
+    "${AZ_CMD[@]}" storage blob list \
+      --account-name "$STORAGE_ACCOUNT" \
+      --container-name "$ARTIFACT_CONTAINER" \
+      --prefix "$prefix" \
+      --auth-mode login \
+      --query "[].name" \
+      --output tsv
+  )
   remaining="$(
     "${AZ_CMD[@]}" storage blob list \
       --account-name "$STORAGE_ACCOUNT" \
@@ -468,26 +519,26 @@ purge_prefix() {
 
 reset_derived_data() {
   local container
-  [[ "$CONFIRMATION_TOKEN" == "$(inventory_token)" ]] || die \
-    "Confirmation token is wrong or stale; run a fresh dry-run"
   [[ "$CONFIRMATION_TOKEN" == DIRECTIVE-RESET-V2-* ]] || die \
     "Reset requires a DIRECTIVE-RESET-V2 token"
   enter_maintenance_mode
   wait_for_active_executions_to_drain
   load_inventory
-  [[ "$CONFIRMATION_TOKEN" == "$(inventory_token)" ]] || die \
-    "Source inventory changed while entering maintenance; run a fresh dry-run"
+  validate_inventory_evidence reset "$CONFIRMATION_TOKEN"
   assert_no_active_execution
 
   for container in "$CATALOG_CONTAINER" "$CONTENT_CONTAINER" "$MANDATES_CONTAINER"; do
-    container_exists "$container" || die \
-      "Expected Cosmos container is missing before reset: $container"
+    if ! container_exists "$container"; then
+      echo "==> Cosmos container $container is already absent; recreation will restore it"
+      continue
+    fi
+    assert_container_partition "$container" \
+      "$([[ "$container" == "$CATALOG_CONTAINER" ]] && echo /directive_id || \
+        [[ "$container" == "$CONTENT_CONTAINER" ]] && echo /directive_version_id || echo /user_id)"
   done
-  assert_container_partition "$CATALOG_CONTAINER" "/directive_id"
-  assert_container_partition "$CONTENT_CONTAINER" "/directive_version_id"
-  assert_container_partition "$MANDATES_CONTAINER" "/user_id"
 
   for container in "$CATALOG_CONTAINER" "$CONTENT_CONTAINER" "$MANDATES_CONTAINER"; do
+    container_exists "$container" || continue
     echo "==> Deleting Cosmos container $COSMOS_DATABASE/$container"
     "${AZ_CMD[@]}" cosmosdb sql container delete \
       --account-name "$COSMOS_ACCOUNT" \
@@ -516,6 +567,7 @@ reset_derived_data() {
   purge_prefix "source-state/"
   purge_prefix "quarantine/"
   delete_v2_index
+  rm -f "$INVENTORY_EVIDENCE_FILE"
   echo "==> Reset complete; v1 Search remains and v2 bootstrap is owned by the ingestion deployment"
 }
 
@@ -537,39 +589,26 @@ verification_file_is_fresh() {
     '
       length == 1 and
       (.[0] | type == "object") and
-      .[0].verify_record.success == true and
-      .[0].environment.subscription_id == $subscription and
-      .[0].environment.resource_group == $resource_group and
-      .[0].environment.job_name == $job and
-      .[0].search_index == $search_index and
-      .[0].processing_version == "directive-v2-czech-layout" and
-      (.[0].processing_hash | test("^[0-9a-f]{64}$")) and
-      (.[0].image_digest | test("^sha256:[0-9a-f]{64}$")) and
-      (.[0].source_inventory_digest | test("^[0-9a-f]{64}$")) and
-      (.[0].validation_execution_id | type == "string" and length > 0) and
-      (.[0].validation_record_digest | test("^[0-9a-f]{64}$")) and
-      (.[0].verification_execution_id | type == "string" and length > 0) and
-      (.[0].verification_record_digest | test("^[0-9a-f]{64}$")) and
-      (.[0].verify_record.verify_execution_id | type == "string" and length > 0) and
-      (.[0].verify_record.source_versions | type == "number") and
-      (.[0].verify_record.directive_ids | type == "number") and
-      (.[0].verify_record.current_versions | type == "number") and
-      (.[0].verify_record.accepted_relations | type == "number") and
-      (.[0].verify_record.required_artifacts | type == "number") and
-      (.[0].verify_record.content_sections | type == "number") and
-      (.[0].verify_record.content_parts | type == "number") and
-      (.[0].verify_record.split_sections | type == "number") and
-      (.[0].verify_record.published_chunks | type == "number") and
-      (.[0].verify_record.published_directives | type == "number") and
-      (.[0].verify_record.published_versions | type == "number") and
-      (.[0].verify_record.current_directives | type == "number") and
-      (.[0].verify_record.current_versions | type == "number") and
-      (.[0].verify_record.mandate_assignment_count | type == "number")
+      (.[0] | (.producer_record // .)) as $record |
+      $record.success == true and
+      ($record.environment | type == "object") and
+      ($record.environment.subscription_id == $subscription) and
+      ($record.environment.resource_group == $resource_group) and
+      ($record.environment.job_name == $job) and
+      $record.search_index == $search_index and
+      $record.processing_version == "directive-v2-czech-layout" and
+      ($record.processing_hash | test("^[0-9a-f]{64}$")) and
+      ($record.source_inventory_digest | test("^[0-9a-f]{64}$")) and
+      ($record.verify_execution_id | type == "string" and length > 0) and
+      ($record.verify_digest | type == "string" and length > 0) and
+      ($record.cross_store | type == "object") and
+      (.[0].wrapper.image_digest // .[0].image_digest | test("^sha256:[0-9a-f]{64}$")) and
+      ((.[0].wrapper.verification_record_digest // .[0].verification_record_digest // "") | test("^[0-9a-f]{64}$"))
     ' "$VERIFICATION_FILE" >/dev/null || die \
       "Verification evidence is not one complete successful pinned v2 verify record"
-  record_without_digest="$(jq -S -c 'del(.verification_record_digest)' "$VERIFICATION_FILE")"
+  record_without_digest="$(jq -S -c 'del(.wrapper.verification_record_digest, .verification_record_digest)' "$VERIFICATION_FILE")"
   calculated_digest="$(sha256_text "$record_without_digest")"
-  [[ "$calculated_digest" == "$(jq -r '.verification_record_digest' "$VERIFICATION_FILE")" ]] || die \
+  [[ "$calculated_digest" == "$(jq -r '.wrapper.verification_record_digest // .verification_record_digest' "$VERIFICATION_FILE")" ]] || die \
     "Verification evidence digest does not match its complete record"
   mtime="$(stat -f %m "$VERIFICATION_FILE" 2>/dev/null || stat -c %Y "$VERIFICATION_FILE")"
   now="$(date +%s)"
@@ -615,33 +654,150 @@ delete_v2_index() {
   fi
 }
 
-finalize_v1() {
-  validate_index_names
-  verification_file_is_fresh
+start_fresh_verify() {
+  local execution_name status log_file live_image record_digest
+  if [[ -s "$VERIFICATION_FILE" ]]; then
+    execution_name="$(jq -r '.wrapper.verification_execution_id // .producer_record.verify_execution_id // .verify_execution_id // empty' "$VERIFICATION_FILE")"
+    [[ -n "$execution_name" ]] || die "Verification evidence is not bound to an Azure execution"
+    status="$(
+      "${AZ_CMD[@]}" containerapp job execution show \
+        --name "$JOB_NAME" \
+        --resource-group "$RG" \
+        --job-execution-name "$execution_name" \
+        --query properties.status \
+        --output tsv
+    )"
+    [[ "$status" == Succeeded ]] || die "Pinned verify execution is not currently successful"
+    live_image="$(
+      "${AZ_CMD[@]}" containerapp job execution show \
+        --name "$JOB_NAME" \
+        --resource-group "$RG" \
+        --job-execution-name "$execution_name" \
+        --query "properties.template.containers[?name=='directive-ingestion'].image | [0]" \
+        --output tsv
+    )"
+    [[ "$live_image" == *@sha256:* ]] || die "Pinned verify execution is not immutable"
+    [[ "$(jq -r '.wrapper.image_digest // empty' "$VERIFICATION_FILE")" == "${live_image#*@}" ]] || \
+      die "Verification evidence image digest does not match the live execution"
+    log_file="$(mktemp)"
+    "${AZ_CMD[@]}" containerapp job logs show \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --container-name directive-ingestion \
+      --execution-name "$execution_name" \
+      --tail 2000 >"$log_file"
+    jq -s -e '
+      map(select(type == "object" and has("success"))) | length == 1
+    ' < <(sed -n '/^[[:space:]]*{.*}[[:space:]]*$/p' "$log_file") >/dev/null || {
+      rm -f "$log_file"
+      die "Pinned verify execution did not emit exactly one producer record"
+    }
+    sed -n '/^[[:space:]]*{.*}[[:space:]]*$/p' "$log_file" |
+      jq -s 'map(select(type == "object" and has("success"))) | .[0]' >"$log_file.record"
+    jq -e --slurpfile expected "$log_file.record" \
+      '(.producer_record // .) == $expected[0]' "$VERIFICATION_FILE" >/dev/null || {
+      rm -f "$log_file" "$log_file.record"
+      die "Pinned verify log differs from the supplied complete producer record"
+    }
+    rm -f "$log_file" "$log_file.record"
+    echo "==> Revalidated the exact pinned verify execution $execution_name and producer log"
+    return 0
+  fi
   enter_maintenance_mode
   wait_for_active_executions_to_drain
+  execution_name="$(
+    "${AZ_CMD[@]}" containerapp job start \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --command directive-ingest \
+      --args verify \
+      --query name \
+      --output tsv
+  )"
+  [[ -n "$execution_name" ]] || die "Fresh verify did not return an execution name"
+  STARTED_EXECUTIONS+=("$execution_name")
+  status=""
+  for ((attempt = 1; attempt <= MAINTENANCE_DRAIN_ATTEMPTS; attempt++)); do
+    status="$(
+      "${AZ_CMD[@]}" containerapp job execution show \
+        --name "$JOB_NAME" \
+        --resource-group "$RG" \
+        --job-execution-name "$execution_name" \
+        --query properties.status \
+        --output tsv
+    )"
+    case "$status" in
+      Succeeded) break ;;
+      Failed|Stopped|Canceled|Degraded) die "Fresh v2 verify execution $execution_name failed: $status" ;;
+      *) sleep "$MAINTENANCE_DRAIN_DELAY_SECONDS" ;;
+    esac
+  done
+  [[ "$status" == Succeeded ]] || die "Fresh v2 verify execution did not finish successfully"
+  log_file="$(mktemp)"
+  "${AZ_CMD[@]}" containerapp job logs show \
+    --name "$JOB_NAME" \
+    --resource-group "$RG" \
+    --container-name directive-ingestion \
+    --execution-name "$execution_name" \
+    --tail 2000 >"$log_file"
+  jq -s -e '
+    map(select(type == "object" and has("success"))) |
+    length == 1
+  ' < <(sed -n '/^[[:space:]]*{.*}[[:space:]]*$/p' "$log_file") >/dev/null || {
+    rm -f "$log_file"
+    die "Fresh v2 verify did not emit exactly one complete producer record"
+  }
+  sed -n '/^[[:space:]]*{.*}[[:space:]]*$/p' "$log_file" |
+    jq -s 'map(select(type == "object" and has("success"))) | .[0]' >"$log_file.record"
+  live_image="$(
+    "${AZ_CMD[@]}" containerapp job execution show \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --job-execution-name "$execution_name" \
+      --query "properties.template.containers[?name=='directive-ingestion'].image | [0]" \
+      --output tsv
+  )"
+  [[ "$live_image" == *@sha256:* ]] || die "Fresh verify execution is not pinned to an immutable image"
+  jq -S -c \
+    --arg image "$live_image" \
+    --arg execution "$execution_name" \
+    '{producer_record: ., wrapper: {image_digest: ($image | split("@")[1]), verification_execution_id: $execution}}' \
+    "$log_file.record" >"$VERIFICATION_FILE"
+  [[ "$(jq -r '.producer_record.verify_execution_id' "$VERIFICATION_FILE")" == "$execution_name" ]] || \
+    die "Fresh verify producer record is not bound to the started execution"
+  record_digest="$(sha256_text "$(jq -S -c 'del(.wrapper.verification_record_digest)' "$VERIFICATION_FILE")")"
+  jq --arg digest "$record_digest" '.wrapper.verification_record_digest = $digest' \
+    "$VERIFICATION_FILE" >"$log_file.evidence"
+  mv "$log_file.evidence" "$VERIFICATION_FILE"
+  rm -f "$log_file.record"
+  rm -f "$log_file"
+}
+
+finalize_v1() {
+  validate_index_names
+  enter_maintenance_mode
+  wait_for_active_executions_to_drain
+  start_fresh_verify
+  verification_file_is_fresh
   load_inventory
-  local evidence_image evidence_source evidence_validation_digest evidence_processing_hash
-  local validation_execution verification_execution
-  evidence_image="$(jq -r '.image_digest' "$VERIFICATION_FILE")"
-  evidence_source="$(jq -r '.source_inventory_digest' "$VERIFICATION_FILE")"
-  evidence_validation_digest="$(jq -r '.validation_record_digest' "$VERIFICATION_FILE")"
-  evidence_processing_hash="$(jq -r '.processing_hash' "$VERIFICATION_FILE")"
-  validation_execution="$(jq -r '.validation_execution_id' "$VERIFICATION_FILE")"
-  verification_execution="$(jq -r '.verification_execution_id' "$VERIFICATION_FILE")"
+  validate_inventory_evidence finalize "$CONFIRMATION_TOKEN"
+  local evidence_image evidence_source evidence_processing_hash
+  local verification_execution
+  evidence_image="$(jq -r '.wrapper.image_digest // .image_digest' "$VERIFICATION_FILE")"
+  evidence_source="$(jq -r '.producer_record.source_inventory_digest // .source_inventory_digest' "$VERIFICATION_FILE")"
+  evidence_processing_hash="$(jq -r '.producer_record.processing_hash // .processing_hash' "$VERIFICATION_FILE")"
+  verification_execution="$(jq -r '.producer_record.verify_execution_id // .verify_execution_id' "$VERIFICATION_FILE")"
   [[ "$SOURCE_INVENTORY_DIGEST" == "$evidence_source" ]] || die \
     "Source inventory changed since v2 verification"
   [[ "$evidence_processing_hash" =~ ^[0-9a-f]{64}$ ]] || die \
     "Verification evidence processing hash is invalid"
-  [[ "$(jq -r '.verify_record.processing_hash' "$VERIFICATION_FILE")" == "$evidence_processing_hash" ]] || die \
+  [[ "$(jq -r '.producer_record.processing_hash // .processing_hash' "$VERIFICATION_FILE")" == "$evidence_processing_hash" ]] || die \
     "Verification evidence processing hash does not match the verify record"
-  [[ -n "$evidence_validation_digest" ]] || die \
-    "Verification evidence is missing the validation record digest"
   search_index_exists "$V2_INDEX" || die \
     "v2 Search index does not exist; refuse to finalize"
   search_index_exists "$V1_INDEX" || die \
     "v1 Search index is already absent; refuse stale or repeated finalize"
-  local live_image validation_status verification_status live_chunk_count expected_chunk_count
+  local live_image verification_status live_chunk_count expected_chunk_count
   live_image="$(
     "${AZ_CMD[@]}" containerapp job show \
       --name "$JOB_NAME" \
@@ -651,14 +807,6 @@ finalize_v1() {
   )"
   [[ "$live_image" == *"@$evidence_image" ]] || die \
     "Live job image does not match the pinned verification image"
-  validation_status="$(
-    "${AZ_CMD[@]}" containerapp job execution show \
-      --name "$JOB_NAME" \
-      --resource-group "$RG" \
-      --job-execution-name "$validation_execution" \
-      --query properties.status \
-      --output tsv
-  )"
   verification_status="$(
     "${AZ_CMD[@]}" containerapp job execution show \
       --name "$JOB_NAME" \
@@ -667,8 +815,8 @@ finalize_v1() {
       --query properties.status \
       --output tsv
   )"
-  [[ "$validation_status" == Succeeded && "$verification_status" == Succeeded ]] || die \
-    "Validation or verification execution is not currently successful"
+  [[ "$verification_status" == Succeeded ]] || die \
+    "Fresh verification execution is not currently successful"
   live_chunk_count="$(
     "${AZ_CMD[@]}" rest \
       --method get \
@@ -676,11 +824,9 @@ finalize_v1() {
       --resource "https://search.azure.com" \
       --output tsv
   )"
-  expected_chunk_count="$(jq -r '.verify_record.published_chunks' "$VERIFICATION_FILE")"
+  expected_chunk_count="$(jq -r '.producer_record.cross_store.search.count // .cross_store.search.count // empty' "$VERIFICATION_FILE")"
   [[ "$live_chunk_count" == "$expected_chunk_count" ]] || die \
     "Live v2 Search count does not match the pinned verification record"
-  [[ "$CONFIRMATION_TOKEN" == "$(finalize_token)" ]] || die \
-    "Finalize token is wrong or stale; run a fresh finalize dry-run"
   [[ "$CONFIRMATION_TOKEN" == DIRECTIVE-FINALIZE-V2-* ]] || die \
     "Finalize requires a DIRECTIVE-FINALIZE-V2 token"
   assert_no_active_execution
@@ -731,7 +877,6 @@ case "$MODE" in
     if [[ "$EXECUTE_FLAG" != true || -z "$CONFIRMATION_TOKEN" ]]; then
       print_inventory
     else
-      validate_inventory_evidence finalize "$CONFIRMATION_TOKEN"
       finalize_v1
     fi
     ;;

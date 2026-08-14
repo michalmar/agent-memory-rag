@@ -407,6 +407,10 @@ resource group, storage/Cosmos/Search/job inventory and copy the printed token:
   --confirm DIRECTIVE-RESET-V2-<token-from-fresh-dry-run>
 ```
 
+The dry-run evidence contains a short-lived random-nonce token bound to the
+sorted source name/content-hash inventory; source changes, replay, or expiry
+invalidate it. A successful reset consumes the evidence file.
+
 The reset deletes only the three derived Cosmos containers, recreates them with
 Terraform and the retained `/directive_id`, `/directive_version_id`, and
 `/user_id` partition keys, then purges only `directives/`, `source-state/`, and
@@ -458,8 +462,9 @@ verification evidence; only then may v1 be deleted:
 ```
 
 Finalize re-enters nonpublishing maintenance and drains executions before
-rechecking the pinned verify execution, source inventory, image, and v2 Search
-count. Recovery is rebuild-only: leave maintenance enabled, correct the
+starting (or refetch-equivalently revalidating) the exact pinned verify
+execution and producer log, then rechecking the source inventory, image, and
+v2 Search count. Recovery is rebuild-only: leave maintenance enabled, correct the
 deployment inputs, and rerun the guarded sequence.
 
 If a run fails, recovery is a rebuild: correct the parser, contract,
