@@ -783,6 +783,19 @@ class DirectiveToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.mandates,
         )
 
+    def assert_no_internal_fields(self, value: object) -> None:
+        serialized = str(value)
+        for field in (
+            "source_hash",
+            "processing_hash",
+            "artifact_generation_id",
+            "content_hash",
+            "chunk_ids",
+            "model_deployment",
+        ):
+            with self.subTest(field=field):
+                self.assertNotIn(field, serialized)
+
     async def test_search_defaults_to_current_and_emits_unknown_citation(self):
         with patch(
             "agent_memory_backend.directive_tools.get_settings",
@@ -841,6 +854,21 @@ class DirectiveToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.contents.requests,
             [("10000001:v2", ["s0", "s1"])],
         )
+        self.assertEqual(
+            set(result.data["sections"][0]),
+            {
+                "section_id",
+                "ordinal",
+                "number",
+                "title",
+                "path",
+                "page_from",
+                "page_to",
+                "token_count",
+                "content",
+            },
+        )
+        self.assert_no_internal_fields(result.to_dict())
 
     async def test_manifest_and_summary_each_use_one_bundle_read(self):
         with patch(
@@ -868,6 +896,32 @@ class DirectiveToolExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manifest.data["manifest"]["schema_version"], "3.0")
         self.assertEqual(summary.data["summary"]["summary"], "Summary")
         self.assertEqual(self.contents.requests, [])
+        self.assertEqual(
+            set(manifest.data["manifest"]),
+            {
+                "schema_version",
+                "directive_id",
+                "directive_version_id",
+                "total_pages",
+                "total_tokens",
+                "sections",
+            },
+        )
+        self.assertEqual(
+            set(summary.data["summary"]),
+            {
+                "schema_version",
+                "directive_id",
+                "directive_version_id",
+                "summary",
+                "covered_section_ids",
+                "total_section_count",
+                "input_token_count",
+                "strategy",
+            },
+        )
+        self.assert_no_internal_fields(manifest.to_dict())
+        self.assert_no_internal_fields(summary.to_dict())
 
     async def test_content_over_configured_budget_is_typed_error(self):
         with patch(

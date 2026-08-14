@@ -15,7 +15,9 @@ from agent_contracts import (
     directive_tool_definition,
 )
 from directive_contracts import (
+    DirectiveManifest,
     DirectiveSection,
+    DirectiveSummary,
     PublishedDirectiveVersion,
 )
 
@@ -254,7 +256,7 @@ class DirectiveToolExecutor:
         return _Outcome(
             data={
                 "directive": version,
-                "manifest": manifest.model_dump(mode="json"),
+                "manifest": _public_manifest(manifest),
                 "coverage": {
                     "total_sections": len(manifest.sections),
                     "total_pages": manifest.total_pages,
@@ -354,7 +356,7 @@ class DirectiveToolExecutor:
             }
         payload_sections = [
             {
-                **section.model_dump(mode="json"),
+                **_public_section(section),
                 "content": content,
             }
             for section, content in selected
@@ -490,7 +492,7 @@ class DirectiveToolExecutor:
         return _Outcome(
             data={
                 "directive": version,
-                "summary": summary.model_dump(mode="json"),
+                "summary": _public_summary(summary),
                 "coverage": {
                     "covered_section_count": len(
                         summary.covered_section_ids
@@ -567,6 +569,48 @@ def _bounded_results(
             "Requested Search result count exceeds the configured limit",
         )
     return requested
+
+
+def _public_section(section: DirectiveSection) -> dict[str, Any]:
+    """Project citation-relevant section fields without content-store internals."""
+    return {
+        "section_id": section.section_id,
+        "ordinal": section.ordinal,
+        "number": section.number,
+        "title": section.title,
+        "path": section.path,
+        "page_from": section.page_from,
+        "page_to": section.page_to,
+        "token_count": section.token_count,
+    }
+
+
+def _public_manifest(bundle_manifest: DirectiveManifest) -> dict[str, Any]:
+    """Project the published manifest without source or generation identities."""
+    return {
+        "schema_version": bundle_manifest.schema_version,
+        "directive_id": bundle_manifest.directive_id,
+        "directive_version_id": bundle_manifest.directive_version_id,
+        "total_pages": bundle_manifest.total_pages,
+        "total_tokens": bundle_manifest.total_tokens,
+        "sections": [
+            _public_section(section) for section in bundle_manifest.sections
+        ],
+    }
+
+
+def _public_summary(bundle_summary: DirectiveSummary) -> dict[str, Any]:
+    """Project the summary contract without source or model-processing details."""
+    return {
+        "schema_version": bundle_summary.schema_version,
+        "directive_id": bundle_summary.directive_id,
+        "directive_version_id": bundle_summary.directive_version_id,
+        "summary": bundle_summary.summary,
+        "covered_section_ids": bundle_summary.covered_section_ids,
+        "total_section_count": bundle_summary.total_section_count,
+        "input_token_count": bundle_summary.input_token_count,
+        "strategy": bundle_summary.strategy,
+    }
 
 
 def _not_found() -> _Outcome:
