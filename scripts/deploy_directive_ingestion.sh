@@ -27,6 +27,7 @@ fi
 
 tf() { terraform -chdir="$INFRA_DIR" output -raw "$1"; }
 
+SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
 RG="$(tf resource_group)"
 ACR_NAME="$(tf acr_name)"
 ACR_LOGIN="$(tf acr_login_server)"
@@ -48,6 +49,11 @@ IMAGE="$ACR_LOGIN/$REPOSITORY:$TAG"
 JOB_CONTAINER="directive-ingestion"
 VALIDATION_CONFIRMATION="${DIRECTIVE_VALIDATE_CONFIRMATION:-}"
 VERIFY_EVIDENCE_FILE="${DIRECTIVE_VERIFY_EVIDENCE_FILE:-}"
+EXPECTED_PROCESSING_VERSION="directive-v2-czech-layout"
+EXPECTED_SEARCH_INDEX="directive-chunks-v2"
+INDEX_SCHEMA_FILE="$(mktemp)"
+VALIDATION_SUMMARY_FILE="$(mktemp)"
+VERIFY_SUMMARY_FILE="$(mktemp)"
 
 ACR_SCOPE="$(
   az acr show --name "$ACR_NAME" --resource-group "$RG" --query id --output tsv
@@ -92,7 +98,12 @@ RESTORE_PUBLICATION_MODE=false
 cleanup() {
   local status=$?
   trap - EXIT
-  rm -f "$ARM_ROLE_SNAPSHOT" "$COSMOS_ROLE_SNAPSHOT"
+  rm -f \
+    "$ARM_ROLE_SNAPSHOT" \
+    "$COSMOS_ROLE_SNAPSHOT" \
+    "$INDEX_SCHEMA_FILE" \
+    "$VALIDATION_SUMMARY_FILE" \
+    "$VERIFY_SUMMARY_FILE"
   if [[ "$RESTORE_PUBLICATION_MODE" == true ]]; then
     echo "==> Restoring the directive ingestion job publication mode"
     az containerapp job update \
@@ -171,17 +182,35 @@ roles_are_ready() {
 }
 
 safe_summary_lines() {
-  awk '
-    { line = $0; sub(/^[[:space:]]*/, "", line) }
-    substr(line, 1, 1) == "{" && /"status"|"run_id"|"source_count"|"directive_count"|"mandate_count"|"mandate_user_count"|"changed_count"|"skipped_count"|"chunk_count"|"published_chunks"|"published_directives"|"published_versions"|"current_directives"|"current_versions"|"mandate_assignment_count"|"acr_pull"|"document_intelligence"/ {
-      print
-    }
-  '
+  local raw_logs="$1"
+  local output_file="$2"
+  local line trimmed sanitized
+  : >"$output_file"
+  while IFS= read -r line; do
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    [[ "${trimmed:0:1}" == "{" ]] || continue
+    sanitized="$(
+      printf '%s\n' "$trimmed" | jq -ce '
+        if type != "object" then empty else
+          {
+            status, run_id, source_count, directive_count, mandate_count,
+            mandate_user_count, changed_count, skipped_count, chunk_count,
+            published_chunks, published_directives, published_versions,
+            current_directives, current_versions, mandate_assignment_count,
+            acr_pull, document_intelligence, normalized_directive_ids,
+            warnings, processing_version, search_index, source_versions,
+            directive_ids
+          } | with_entries(select(.value != null))
+        end
+      ' 2>/dev/null || true
+    )"
+    [[ -n "$sanitized" ]] && printf '%s\n' "$sanitized" >>"$output_file"
+  done <<<"$raw_logs"
 }
 
 show_execution_logs() {
   local execution_name="$1"
-  local raw_logs safe_logs
+  local raw_logs
   raw_logs="$(
     az containerapp job logs show \
       --name "$JOB_NAME" \
@@ -191,23 +220,26 @@ show_execution_logs() {
       --tail 300 \
       --format text 2>/dev/null || true
   )"
-  safe_logs="$(printf '%s\n' "$raw_logs" | safe_summary_lines)"
-  if [[ -n "$safe_logs" ]]; then
-    printf '%s\n' "$safe_logs"
+  case "${CURRENT_EXECUTION_LABEL:-}" in
+    "Metadata validation") safe_summary_lines "$raw_logs" "$VALIDATION_SUMMARY_FILE" ;;
+    "Directive verification") safe_summary_lines "$raw_logs" "$VERIFY_SUMMARY_FILE" ;;
+    *) safe_summary_lines "$raw_logs" "$INDEX_SCHEMA_FILE" ;;
+  esac
+  if [[ -s "$VALIDATION_SUMMARY_FILE" && "${CURRENT_EXECUTION_LABEL:-}" == "Metadata validation" ]]; then
+    cat "$VALIDATION_SUMMARY_FILE"
+  elif [[ -s "$VERIFY_SUMMARY_FILE" && "${CURRENT_EXECUTION_LABEL:-}" == "Directive verification" ]]; then
+    cat "$VERIFY_SUMMARY_FILE"
   else
     echo "[redacted] no approved ingestion summary lines were emitted"
-  fi
-  if [[ -n "$VERIFY_EVIDENCE_FILE" && "${CURRENT_EXECUTION_LABEL:-}" == "Directive verification" ]]; then
-    printf '%s\n' "$safe_logs" >"$VERIFY_EVIDENCE_FILE"
   fi
 }
 
 confirm_validation() {
-  local expected="PUBLISH_VALIDATED_DIRECTIVE_V2"
+  local expected="$1"
   if [[ -n "$VALIDATION_CONFIRMATION" ]]; then
     [[ "$VALIDATION_CONFIRMATION" == "$expected" ]] || {
-      echo "ERROR: DIRECTIVE_VALIDATE_CONFIRMATION must equal $expected" >&2
-      return 1
+        echo "ERROR: DIRECTIVE_VALIDATE_CONFIRMATION must equal the token printed after validation" >&2
+        return 1
     }
     return 0
   fi
@@ -220,6 +252,188 @@ confirm_validation() {
   local answer
   read -r -p "Type $expected to publish the validated corpus: " answer
   [[ "$answer" == "$expected" ]]
+}
+
+assert_live_v2_config() {
+  local live_image live_processing live_index
+  live_image="$(
+    az containerapp job show \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --query "properties.template.containers[?name=='$JOB_CONTAINER'].image | [0]" \
+      --output tsv
+  )"
+  live_processing="$(
+    az containerapp job show \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --query "properties.template.containers[?name=='$JOB_CONTAINER'].env[?name=='DIRECTIVE_PROCESSING_VERSION'].value | [0]" \
+      --output tsv
+  )"
+  live_index="$(
+    az containerapp job show \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --query "properties.template.containers[?name=='$JOB_CONTAINER'].env[?name=='DIRECTIVE_SEARCH_INDEX'].value | [0]" \
+      --output tsv
+  )"
+  [[ "$live_image" == "$IMAGE" ]] || {
+    echo "ERROR: live job image is not the requested immutable image" >&2
+    return 1
+  }
+  [[ "$live_processing" == "$EXPECTED_PROCESSING_VERSION" ]] || {
+    echo "ERROR: live job processing version is not $EXPECTED_PROCESSING_VERSION" >&2
+    return 1
+  }
+  [[ "$live_index" == "$EXPECTED_SEARCH_INDEX" ]] || {
+    echo "ERROR: live job Search index is not $EXPECTED_SEARCH_INDEX" >&2
+    return 1
+  }
+}
+
+assert_v2_search_schema() {
+  az rest \
+    --method get \
+    --url "https://${SEARCH_NAME}.search.windows.net/indexes/${EXPECTED_SEARCH_INDEX}?api-version=2026-04-01" \
+    --resource "https://search.azure.com" \
+    --output json >"$INDEX_SCHEMA_FILE"
+  jq -e \
+    --arg expected_index "$EXPECTED_SEARCH_INDEX" \
+    '
+      .name == $expected_index and
+      ([.fields[]?.name] as $names |
+        (["id", "directive_id", "directive_version_id", "is_valid",
+          "content", "content_vector"] - $names | length) == 0) and
+      ([.fields[]? | select(.name == "content_vector") | .dimensions]
+        | any(. == 3072))
+    ' "$INDEX_SCHEMA_FILE" >/dev/null || {
+      echo "ERROR: v2 Search index schema is incompatible" >&2
+      return 1
+    }
+}
+
+run_image_cli_smoke() {
+  command -v jq >/dev/null 2>&1 || {
+    echo "ERROR: jq is required for safe summary and schema checks" >&2
+    return 1
+  }
+  echo "==> Running directive-ingest CLI smoke check from the built image"
+  az acr run \
+    --registry "$ACR_NAME" \
+    --cmd "$IMAGE directive-ingest --help" \
+    /dev/null \
+    --output none
+}
+
+require_one_summary_record() {
+  local file="$1"
+  local label="$2"
+  [[ -s "$file" ]] || {
+    echo "ERROR: $label did not emit a sanitized JSON summary" >&2
+    return 1
+  }
+  [[ "$(wc -l <"$file" | tr -d ' ')" == "1" ]] || {
+    echo "ERROR: $label emitted a partial or ambiguous summary" >&2
+    return 1
+  }
+  jq -s -e 'length == 1 and (.[0] | type == "object")' "$file" >/dev/null || {
+    echo "ERROR: $label summary is not a JSON object" >&2
+    return 1
+  }
+}
+
+validation_confirmation_token() {
+  local summary_hash
+  summary_hash="$(sha256_file "$VALIDATION_SUMMARY_FILE")"
+  printf 'DIRECTIVE-PUBLISH-V2-%s\n' \
+    "$(sha256_text "$VALIDATE_EXECUTION
+$summary_hash" | cut -c1-24)"
+}
+
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    echo "ERROR: shasum or sha256sum is required" >&2
+    return 1
+  fi
+}
+
+sha256_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  else
+    echo "ERROR: shasum or sha256sum is required" >&2
+    return 1
+  fi
+}
+
+validate_metadata_summary() {
+  require_one_summary_record "$VALIDATION_SUMMARY_FILE" "Metadata validation"
+  jq -e \
+    --arg processing "$EXPECTED_PROCESSING_VERSION" \
+    --arg search_index "$EXPECTED_SEARCH_INDEX" \
+    '
+      (.normalized_directive_ids | type == "array") and
+      (.warnings | type == "array") and
+      .processing_version == $processing and
+      .search_index == $search_index
+    ' "$VALIDATION_SUMMARY_FILE" >/dev/null || {
+    echo "ERROR: validation summary lacks normalized IDs, warnings, or exact v2 config" >&2
+    return 1
+  }
+}
+
+write_verification_evidence() {
+  local source_record="$1"
+  [[ -n "$VERIFY_EVIDENCE_FILE" ]] || return 0
+  require_one_summary_record "$source_record" "Directive verification"
+  jq -e \
+    --arg subscription "$SUBSCRIPTION_ID" \
+    --arg resource_group "$RG" \
+    --arg job "$JOB_NAME" \
+    --arg search_index "$EXPECTED_SEARCH_INDEX" \
+    --arg processing "$EXPECTED_PROCESSING_VERSION" \
+    --arg execution "$VERIFY_EXECUTION" \
+    '
+      {
+        status: "succeeded",
+        environment: {
+          subscription_id: $subscription,
+          resource_group: $resource_group,
+          job_name: $job
+        },
+        search_index: $search_index,
+        processing_version: $processing,
+        execution_name: $execution,
+        cross_store: {
+          source_versions: .source_versions,
+          directive_ids: .directive_ids,
+          current_versions: .current_versions,
+          published_chunks: .published_chunks,
+          published_directives: .published_directives,
+          published_versions: .published_versions,
+          mandate_assignment_count: .mandate_assignment_count
+        }
+      }
+    ' "$source_record" >"$VERIFY_EVIDENCE_FILE"
+  jq -e '
+    .status == "succeeded" and
+    .environment.subscription_id != "" and
+    .environment.resource_group != "" and
+    .environment.job_name != "" and
+    .search_index == "directive-chunks-v2" and
+    .processing_version == "directive-v2-czech-layout" and
+    .execution_name != "" and
+    (.cross_store | to_entries | all(.value != null))
+  ' "$VERIFY_EVIDENCE_FILE" >/dev/null || {
+    echo "ERROR: verification summary is incomplete for v2 finalization" >&2
+    return 1
+  }
 }
 
 wait_for_execution() {
@@ -298,6 +512,7 @@ az acr build \
   --image "$REPOSITORY:$TAG" \
   --file "$REPO_ROOT/setup/directive_ingest/Dockerfile" \
   "$REPO_ROOT"
+run_image_cli_smoke
 
 echo "==> Waiting for the job identity to be visible in Azure RBAC"
 for attempt in {1..30}; do
@@ -315,7 +530,6 @@ for attempt in {1..30}; do
   sleep 20
 done
 
-RESTORE_PUBLICATION_MODE=true
 echo "==> Updating the directive ingestion job image in preflight mode"
 az containerapp job update \
   --name "$JOB_NAME" \
@@ -325,6 +539,32 @@ az containerapp job update \
   --command directive-ingest \
   --args preflight \
   --output none
+assert_live_v2_config
+
+echo "==> Bootstrapping the v2 Search index explicitly"
+az containerapp job update \
+  --name "$JOB_NAME" \
+  --resource-group "$RG" \
+  --container-name "$JOB_CONTAINER" \
+  --command directive-ingest \
+  --args bootstrap \
+  --output none
+BOOTSTRAP_EXECUTION="$(
+  az containerapp job start \
+    --name "$JOB_NAME" \
+    --resource-group "$RG" \
+    --query name \
+    --output tsv
+)"
+if [[ -z "$BOOTSTRAP_EXECUTION" ]]; then
+  echo "Container Apps did not return a bootstrap execution name" >&2
+  exit 1
+fi
+echo "==> Bootstrap execution: $BOOTSTRAP_EXECUTION"
+assert_execution_mode "$BOOTSTRAP_EXECUTION" "bootstrap"
+wait_for_execution "$BOOTSTRAP_EXECUTION" "Search bootstrap" 120 10
+assert_live_v2_config
+assert_v2_search_schema
 
 echo "==> Running managed-identity data-plane preflight"
 PREFLIGHT_SUCCEEDED=false
@@ -378,8 +618,11 @@ fi
 echo "==> Validation execution: $VALIDATE_EXECUTION"
 assert_execution_mode "$VALIDATE_EXECUTION" "validate"
 wait_for_execution "$VALIDATE_EXECUTION" "Metadata validation" 120 10
-echo "==> Inspect the validation summary above before confirming publication"
-confirm_validation
+validate_metadata_summary
+VALIDATION_CONFIRMATION_TOKEN="$(validation_confirmation_token)"
+echo "==> Inspect the complete metadata summary above"
+echo "publication_confirmation_token=$VALIDATION_CONFIRMATION_TOKEN"
+confirm_validation "$VALIDATION_CONFIRMATION_TOKEN"
 
 if [[ -z "${DIRECTIVE_APPROVED_VALIDATION_DIGEST:-}" ]] \
   || [[ -z "${DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST:-}" ]] \
@@ -389,6 +632,8 @@ if [[ -z "${DIRECTIVE_APPROVED_VALIDATION_DIGEST:-}" ]] \
 fi
 
 echo "==> Switching the directive ingestion job to publication mode"
+assert_live_v2_config
+assert_v2_search_schema
 az containerapp job update \
   --name "$JOB_NAME" \
   --resource-group "$RG" \
@@ -396,6 +641,7 @@ az containerapp job update \
   --command directive-ingest \
   --args run-daily \
   --output none
+RESTORE_PUBLICATION_MODE=true
 
 echo "==> Starting directive ingestion"
 EXECUTION_NAME="$(
@@ -440,6 +686,7 @@ fi
 echo "==> Verification execution: $VERIFY_EXECUTION"
 assert_execution_mode "$VERIFY_EXECUTION" "verify"
 wait_for_execution "$VERIFY_EXECUTION" "Directive verification" 120 10
+write_verification_evidence "$VERIFY_SUMMARY_FILE"
 
 echo "==> Restoring the directive ingestion job publication mode"
 az containerapp job update \

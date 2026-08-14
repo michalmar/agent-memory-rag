@@ -412,10 +412,14 @@ obsolete `quarantine/` prefixes from the artifact container. It never edits
 Terraform state or touches source data. Deploy the compatible image with
 `scripts/deploy_directive_ingestion.sh`; the job runs preflight, metadata-only
 `validate`, an explicit operator confirmation, full ingestion (which bootstraps
-`directive-chunks-v2`), and cross-store `verify`. Set
-`DIRECTIVE_VALIDATE_CONFIRMATION=PUBLISH_VALIDATED_DIRECTIVE_V2` after reviewing
-the validation summary. Set `DIRECTIVE_VERIFY_EVIDENCE_FILE` to a file for the
-sanitized verification summary when preparing finalization.
+`directive-chunks-v2`), and cross-store `verify`. The deployment prints a
+fresh `DIRECTIVE-PUBLISH-V2-...` approval token bound to the exact
+metadata-only validation execution and its complete sanitized summary; set
+`DIRECTIVE_VALIDATE_CONFIRMATION` to that freshly printed token only after
+reviewing the summary. Set `DIRECTIVE_VERIFY_EVIDENCE_FILE` to a file for the
+sanitized verification summary when preparing finalization. Reset enters the
+job's nonpublishing maintenance mode before draining executions and leaves it
+there until this validated deployment deliberately switches to publication.
 
 Keep `directive-chunks-v1` until v2 verification is accepted. A separate,
 freshly guarded finalize dry-run binds its token to the recent sanitized v2

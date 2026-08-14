@@ -12,11 +12,16 @@ INFRA_DIR="$REPO_ROOT/infra"
 AZ_BIN="${AZ_BIN:-az}"
 TERRAFORM_BIN="${TERRAFORM_BIN:-terraform}"
 MAX_VERIFICATION_AGE_SECONDS="${DIRECTIVE_VERIFICATION_MAX_AGE_SECONDS:-86400}"
+MAINTENANCE_DRAIN_ATTEMPTS="${DIRECTIVE_MAINTENANCE_DRAIN_ATTEMPTS:-60}"
+MAINTENANCE_DRAIN_DELAY_SECONDS="${DIRECTIVE_MAINTENANCE_DRAIN_DELAY_SECONDS:-10}"
 V1_INDEX="${DIRECTIVE_SEARCH_V1_INDEX:-directive-chunks-v1}"
 V2_INDEX="${DIRECTIVE_SEARCH_V2_INDEX:-}"
 MODE="dry-run"
 CONFIRMATION_TOKEN=""
 VERIFICATION_FILE=""
+SOURCE_INVENTORY_FILE=""
+SOURCE_INVENTORY_DIGEST=""
+SOURCE_COUNT=0
 
 read -r -a AZ_CMD <<<"$AZ_BIN"
 read -r -a TERRAFORM_CMD <<<"$TERRAFORM_BIN"
@@ -39,6 +44,11 @@ die() {
   echo "ERROR: $*" >&2
   exit 1
 }
+
+cleanup() {
+  rm -f "$SOURCE_INVENTORY_FILE"
+}
+trap cleanup EXIT
 
 sha256_text() {
   if command -v shasum >/dev/null 2>&1; then
@@ -128,6 +138,21 @@ load_inventory() {
   ARTIFACT_CONTAINER="$(tf_output directive_artifacts_container)"
   SOURCE_CONTAINER="$(tf_output directive_source_container)"
   SOURCE_PREFIX="$(tf_output directive_source_prefix)"
+  rm -f "$SOURCE_INVENTORY_FILE"
+  SOURCE_INVENTORY_FILE="$(mktemp)"
+  "${AZ_CMD[@]}" storage blob list \
+    --account-name "$STORAGE_ACCOUNT" \
+    --container-name "$SOURCE_CONTAINER" \
+    --prefix "$SOURCE_PREFIX" \
+    --auth-mode login \
+    --query "sort_by([].{name:name,etag:properties.etag,size:properties.contentLength}, &name)[].{name:name,etag:etag,size:size}" \
+    --output tsv >"$SOURCE_INVENTORY_FILE"
+  SOURCE_COUNT="$(awk 'NF { count++ } END { print count + 0 }' "$SOURCE_INVENTORY_FILE")"
+  [[ "$SOURCE_COUNT" -gt 0 ]] || die \
+    "Protected directive-source corpus is empty; refusing reset or token generation"
+  SOURCE_INVENTORY_DIGEST="$(
+    sha256_text "$(LC_ALL=C sort "$SOURCE_INVENTORY_FILE")"
+  )"
   COSMOS_ENDPOINT="$(tf_output cosmos_endpoint)"
   COSMOS_ACCOUNT="$(account_name_from_endpoint "$COSMOS_ENDPOINT")"
   COSMOS_DATABASE="$(tf_output directive_cosmos_database)"
@@ -156,6 +181,8 @@ storage_account=$STORAGE_ACCOUNT
 artifact_container=$ARTIFACT_CONTAINER
 source_container=$SOURCE_CONTAINER
 source_prefix=${SOURCE_PREFIX:-<root>}
+source_count=$SOURCE_COUNT
+source_inventory_digest=$SOURCE_INVENTORY_DIGEST
 artifact_prefix=directives/
 artifact_prefix=source-state/
 artifact_prefix=quarantine/ (obsolete quarantine)
@@ -173,16 +200,20 @@ protected_source=$STORAGE_ACCOUNT/$SOURCE_CONTAINER (NEVER delete or mutate)
 EOF
 }
 
+token_inventory_text() {
+  inventory_text | sed 's/^active_executions=.*/active_executions=<must-drain-before-delete>/'
+}
+
 inventory_token() {
   local inventory
-  inventory="$(inventory_text)"
+  inventory="$(token_inventory_text)"
   printf 'DIRECTIVE-RESET-V2-%s\n' "$(sha256_text "$inventory" | cut -c1-24)"
 }
 
 finalize_token() {
   local inventory verification_hash
   verification_hash="$(sha256_file "$VERIFICATION_FILE")"
-  inventory="$(inventory_text)"
+  inventory="$(token_inventory_text)"
   printf 'DIRECTIVE-FINALIZE-V2-%s\n' \
     "$(sha256_text "$inventory
 verification_evidence_sha256=$verification_hash" | cut -c1-24)"
@@ -230,9 +261,44 @@ assert_container_partition() {
 }
 
 assert_no_active_execution() {
-  load_inventory
+  refresh_active_executions
   [[ -z "$ACTIVE_EXECUTIONS" ]] || die \
     "Container Apps job $JOB_NAME has active execution(s): $ACTIVE_EXECUTIONS"
+}
+
+refresh_active_executions() {
+  ACTIVE_EXECUTIONS="$(
+    "${AZ_CMD[@]}" containerapp job execution list \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --query "[?properties.status!='Succeeded' && properties.status!='Failed' && properties.status!='Stopped' && properties.status!='Degraded' && properties.status!='Canceled'].name" \
+      --output tsv
+  )"
+  ACTIVE_EXECUTIONS="${ACTIVE_EXECUTIONS//$'\n'/,}"
+}
+
+enter_maintenance_mode() {
+  echo "==> Putting directive ingestion job into nonpublishing maintenance mode"
+  "${AZ_CMD[@]}" containerapp job update \
+    --name "$JOB_NAME" \
+    --resource-group "$RG" \
+    --container-name directive-ingestion \
+    --command directive-ingest \
+    --args maintenance \
+    --output none
+}
+
+wait_for_active_executions_to_drain() {
+  local attempt
+  for ((attempt = 1; attempt <= MAINTENANCE_DRAIN_ATTEMPTS; attempt++)); do
+    refresh_active_executions
+    if [[ -z "$ACTIVE_EXECUTIONS" ]]; then
+      return 0
+    fi
+    echo "==> Waiting for active execution(s) to drain: $ACTIVE_EXECUTIONS"
+    sleep "$MAINTENANCE_DRAIN_DELAY_SECONDS"
+  done
+  die "Active execution(s) did not drain in maintenance mode: $ACTIVE_EXECUTIONS"
 }
 
 guard_artifact_target() {
@@ -273,11 +339,16 @@ purge_prefix() {
 
 reset_derived_data() {
   local container
-  assert_no_active_execution
   [[ "$CONFIRMATION_TOKEN" == "$(inventory_token)" ]] || die \
     "Confirmation token is wrong or stale; run a fresh dry-run"
   [[ "$CONFIRMATION_TOKEN" == DIRECTIVE-RESET-V2-* ]] || die \
     "Reset requires a DIRECTIVE-RESET-V2 token"
+  enter_maintenance_mode
+  wait_for_active_executions_to_drain
+  load_inventory
+  [[ "$CONFIRMATION_TOKEN" == "$(inventory_token)" ]] || die \
+    "Source inventory changed while entering maintenance; run a fresh dry-run"
+  assert_no_active_execution
 
   for container in "$CATALOG_CONTAINER" "$CONTENT_CONTAINER" "$MANDATES_CONTAINER"; do
     container_exists "$container" || die \
@@ -328,9 +399,31 @@ verification_file_is_fresh() {
   if grep -Eiq '"(content|markdown|prompt|document_text|administrative_content)"[[:space:]]*:' "$VERIFICATION_FILE"; then
     die "Verification evidence contains a raw content field; use sanitized verify output"
   fi
-  grep -Eq '"(published_chunks|directive_ids|current_versions|mandate_)' \
-    "$VERIFICATION_FILE" || die \
-    "Verification evidence does not contain the required v2 summary fields"
+  grep -Fq 'directive-chunks-v1' "$VERIFICATION_FILE" && die \
+    "Verification evidence references the retired v1 Search index"
+  jq -s -e \
+    --arg subscription "$SUBSCRIPTION_ID" \
+    --arg resource_group "$RG" \
+    --arg job "$JOB_NAME" \
+    --arg search_index "$V2_INDEX" \
+    '
+      length == 1 and
+      (.[0] | type == "object") and
+      .[0].status == "succeeded" and
+      .[0].environment.subscription_id == $subscription and
+      .[0].environment.resource_group == $resource_group and
+      .[0].environment.job_name == $job and
+      .[0].search_index == $search_index and
+      .[0].processing_version == "directive-v2-czech-layout" and
+      (.[0].execution_name | type == "string" and length > 0) and
+      (.[0].cross_store | type == "object") and
+      ([.[0].cross_store.source_versions, .[0].cross_store.directive_ids,
+        .[0].cross_store.current_versions, .[0].cross_store.published_chunks,
+        .[0].cross_store.published_directives, .[0].cross_store.published_versions,
+        .[0].cross_store.mandate_assignment_count] |
+        all(type == "number"))
+    ' "$VERIFICATION_FILE" >/dev/null || die \
+      "Verification evidence is not one complete successful v2 cross-store record"
   mtime="$(stat -f %m "$VERIFICATION_FILE" 2>/dev/null || stat -c %Y "$VERIFICATION_FILE")"
   now="$(date +%s)"
   age=$((now - mtime))
@@ -347,6 +440,7 @@ search_index_exists() {
 }
 
 finalize_v1() {
+  validate_index_names
   verification_file_is_fresh
   load_inventory
   search_index_exists "$V2_INDEX" || die \
@@ -372,8 +466,20 @@ finalize_v1() {
   echo "==> Search cutover finalized; v2 retained and v1 deleted"
 }
 
+validate_index_names() {
+  [[ -n "$V1_INDEX" && -n "$V2_INDEX" ]] || die \
+    "Both Search index names are required"
+  [[ "$V1_INDEX" != "$V2_INDEX" ]] || die \
+    "Search v1 and v2 index names must be different"
+  [[ "$V1_INDEX" != *[^a-z0-9-]* && "$V2_INDEX" != *[^a-z0-9-]* ]] || die \
+    "Search index names must contain only lowercase letters, digits, and hyphens"
+  [[ "$V2_INDEX" == directive-chunks-v2 ]] || die \
+    "Finalize is only permitted for directive-chunks-v2"
+}
+
 parse_args "$@"
 load_inventory
+validate_index_names
 
 case "$MODE" in
   dry-run)

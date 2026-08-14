@@ -98,6 +98,10 @@ job remains the only publication trigger. A maintenance-window cutover must
 run the guarded derived-data reset, image deployment, managed-identity
 preflight, metadata-only validation with operator confirmation, full ingestion,
 and cross-store verification in that order.
+The deployment approval token is freshly derived from the exact validation
+execution and its sanitized summary; reusable confirmation constants are
+rejected. Reset maintenance mode is nonpublishing until that validated flow
+deliberately restores publication.
 
 The reset automation is dry-run by default and protects the
 `directive-source` container. It deletes and recreates only the derived
