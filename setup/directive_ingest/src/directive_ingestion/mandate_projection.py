@@ -12,7 +12,12 @@ from uuid import UUID
 
 from azure.cosmos import exceptions
 from azure.cosmos.aio import CosmosClient
-from directive_contracts import MandateAssignment, MandateSnapshot
+from directive_contracts import (
+    MandateAssignment,
+    MandateSnapshot,
+    directive_storage_key,
+    normalize_directive_id,
+)
 
 _CONTROL_PARTITION = "_control"
 _ACTIVE_ID = "active-snapshot"
@@ -63,6 +68,7 @@ def parse_mandates(
                     f"Mandate CSV row {row_number} has unsupported flag "
                     f"{flag!r}"
                 )
+            directive_id = normalize_directive_id(directive_id)
             if directive_id not in known_directive_ids:
                 raise ValueError(
                     f"Mandate CSV row {row_number} references unknown "
@@ -146,7 +152,7 @@ class MandateRepository:
                 {
                     "id": (
                         f"assignment:{snapshot_id}:"
-                        f"{assignment.directive_id}"
+                        f"{directive_storage_key(assignment.directive_id)}"
                     ),
                     "type": "assignment",
                     "user_id": assignment.user_id,

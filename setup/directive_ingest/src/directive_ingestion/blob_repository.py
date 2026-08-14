@@ -4,19 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from typing import Any
 
-from azure.core.exceptions import ResourceExistsError
+from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.storage.blob import ContentSettings
 from azure.storage.blob.aio import BlobServiceClient
-
-
-_LEGACY_DIRECTIVE_ARTIFACT = re.compile(
-    r"^directives/\d+/[^/]+/[0-9a-f]{64}/generations/"
-    r"[0-9a-f]{64}/(?:manifest\.json|summary\.json|"
-    r"sections/[^/]+\.md)$"
-)
 
 
 class BlobArtifactRepository:
@@ -42,31 +34,6 @@ class BlobArtifactRepository:
         async for blob in self._container.list_blobs(name_starts_with=prefix):
             names.add(blob.name)
         return names
-
-    async def list_legacy_directive_artifacts(self) -> list[str]:
-        return sorted(
-            name
-            for name in await self.list_names("directives/")
-            if _is_legacy_directive_artifact(name)
-        )
-
-    async def delete_legacy_directive_artifacts(
-        self, blob_names: list[str]
-    ) -> None:
-        invalid = [
-            name
-            for name in blob_names
-            if not _is_legacy_directive_artifact(name)
-        ]
-        if invalid:
-            raise ValueError(
-                "Refusing to delete non-legacy directive artifacts: "
-                + ", ".join(invalid)
-            )
-        for blob_name in blob_names:
-            await self._container.delete_blob(
-                blob_name, delete_snapshots="include"
-            )
 
     async def put_immutable(
         self,
@@ -100,6 +67,20 @@ class BlobArtifactRepository:
             default=str,
         ).encode()
         await self.put_immutable(blob_name, content, "application/json")
+
+    async def get_json(self, blob_name: str) -> dict[str, Any] | None:
+        """Point-read an internal JSON artifact without enumerating its prefix."""
+        blob = self._container.get_blob_client(blob_name)
+        try:
+            stream = await blob.download_blob()
+            value = json.loads((await stream.readall()).decode("utf-8"))
+        except ResourceNotFoundError:
+            return None
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Invalid JSON artifact: {blob_name}") from exc
+        if not isinstance(value, dict):
+            raise RuntimeError(f"JSON artifact must be an object: {blob_name}")
+        return value
 
     async def content_hash(self, blob_name: str) -> str:
         properties = await self._container.get_blob_client(
@@ -141,7 +122,3 @@ class BlobArtifactRepository:
 
     async def exists(self, blob_name: str) -> bool:
         return await self._container.get_blob_client(blob_name).exists()
-
-
-def _is_legacy_directive_artifact(blob_name: str) -> bool:
-    return _LEGACY_DIRECTIVE_ARTIFACT.fullmatch(blob_name) is not None

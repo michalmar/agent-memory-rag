@@ -10,7 +10,7 @@ from directive_ingestion.search_repository import DirectiveSearchRepository
 def _repository() -> DirectiveSearchRepository:
     repository = object.__new__(DirectiveSearchRepository)
     repository._config = SimpleNamespace(
-        search_index="directive-chunks-v1",
+        search_index="directive-chunks-v2",
         openai_resource_uri="https://example.openai.azure.com",
         embedding_deployment="text-embedding-3-large",
         embedding_model="text-embedding-3-large",
@@ -49,6 +49,14 @@ def test_processing_hash_is_filterable_for_generation_cleanup() -> None:
     }
 
     assert fields["processing_hash"]["filterable"] is True
+    assert fields["is_valid"] == {
+        "name": "is_valid",
+        "type": "Edm.Boolean",
+        "filterable": True,
+        "retrievable": True,
+    }
+    assert fields["title"]["analyzer"] == "cs.microsoft"
+    assert fields["content"]["analyzer"] == "cs.microsoft"
 
 
 def test_index_supports_direct_hybrid_semantic_queries() -> None:
@@ -83,18 +91,18 @@ async def test_verification_exercises_direct_hybrid_query() -> None:
             {
                 "@odata.count": 7,
                 "@search.facets": {
-                    "directive_id": [{"value": "10000001", "count": 7}],
+                    "directive_id": [{"value": "Č/12", "count": 7}],
                     "directive_version_id": [
-                        {"value": "10000001-v1", "count": 7}
+                        {"value": "Č/12:v1", "count": 7}
                     ],
                 },
             },
             {
                 "@odata.count": 4,
                 "@search.facets": {
-                    "directive_id": [{"value": "10000001", "count": 4}],
+                    "directive_id": [{"value": "Č/12", "count": 4}],
                     "directive_version_id": [
-                        {"value": "10000001-v1", "count": 4}
+                        {"value": "Č/12:v1", "count": 4}
                     ],
                 },
             },
@@ -107,12 +115,15 @@ async def test_verification_exercises_direct_hybrid_query() -> None:
     direct_call = repository._request.await_args_list[-1]
     assert direct_call.args == (
         "POST",
-        "/indexes/directive-chunks-v1/docs/search",
+        "/indexes/directive-chunks-v2/docs/search",
     )
     assert direct_call.kwargs["api_version"] == "2026-04-01"
     assert direct_call.kwargs["payload"] == {
         "search": "directive verification",
-        "filter": "publication_state eq 'published'",
+        "filter": (
+            "publication_state eq 'published' and is_current eq true "
+            "and is_valid eq true"
+        ),
         "vectorFilterMode": "preFilter",
         "vectorQueries": [
             {

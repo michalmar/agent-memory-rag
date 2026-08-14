@@ -93,7 +93,7 @@ class IngestionConfig:
             ),
             search_endpoint=_required("AZURE_SEARCH_ENDPOINT").rstrip("/"),
             search_index=os.getenv(
-                "DIRECTIVE_SEARCH_INDEX", "directive-chunks-v1"
+                "DIRECTIVE_SEARCH_INDEX", "directive-chunks-v2"
             ),
             search_api_version=os.getenv(
                 "AZURE_SEARCH_API_VERSION", "2026-04-01"
@@ -145,7 +145,7 @@ class IngestionConfig:
                 )
             ),
             processing_version=os.getenv(
-                "DIRECTIVE_PROCESSING_VERSION", "directive-v1"
+                "DIRECTIVE_PROCESSING_VERSION", "directive-v2-czech-layout"
             ),
             chunk_token_limit=_integer(
                 "DIRECTIVE_CHUNK_TOKEN_LIMIT", 800, 128

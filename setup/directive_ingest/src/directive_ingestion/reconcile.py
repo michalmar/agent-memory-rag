@@ -30,6 +30,8 @@ from directive_contracts import (
     build_section_content_items,
     calculate_artifact_generation_id,
     canonical_json_hash,
+    directive_storage_key,
+    directive_version_storage_key,
     serialized_json_size,
 )
 from openai import APIError
@@ -44,6 +46,7 @@ from .content_repository import DirectiveContentRepository
 from .document_intelligence import DocumentIntelligenceExtractor
 from .mandate_projection import MandateRepository, parse_mandates
 from .search_repository import DirectiveSearchRepository
+from .source_state_repository import PublishedSourceState, SourceStateRepository
 from .source import (
     BlobDirectiveSource,
     DirectiveSource,
@@ -62,6 +65,20 @@ class PreparedDirective:
     bundle: PublishedDirectiveVersion
     content_items: tuple[DirectiveSectionContent, ...]
     findings: tuple[ReviewFinding, ...]
+
+
+@dataclass(frozen=True)
+class SourceMetadata:
+    """Metadata-pass result; changed sources retain extraction for pass two."""
+
+    source: SourceDocument
+    metadata: DirectiveMetadata
+    extraction: Any | None
+    source_state: PublishedSourceState | None
+
+    @property
+    def changed(self) -> bool:
+        return self.source_state is None
 
 
 @dataclass(frozen=True)
@@ -101,6 +118,7 @@ class DirectiveIngestionRunner:
             config.blob_container,
             credential,
         )
+        self.source_states = SourceStateRepository(self.blobs)
         self.catalog = DirectiveCatalogRepository(
             config.cosmos_endpoint,
             config.cosmos_database,
@@ -195,7 +213,21 @@ class DirectiveIngestionRunner:
         }
 
     async def verify(self) -> dict[str, object]:
-        sources = await self._discover_sources()
+        run_id = _run_id()
+        sources = await self.discover_sources()
+        source_states: list[PublishedSourceState] = []
+        for source in sources:
+            state = await self.source_states.load(
+                source, self.config.processing_hash
+            )
+            if state is None or not await self._state_has_live_publication(
+                source, state
+            ):
+                raise RuntimeError(
+                    "Source-state does not match a live published bundle: "
+                    f"{source.source_name}"
+                )
+            source_states.append(state)
         directive_ids = await self.catalog.list_published_directive_ids()
         bundles = await self.catalog.list_published_versions()
         current = await self.catalog.list_current_pointers()
@@ -209,11 +241,11 @@ class DirectiveIngestionRunner:
             relation.relation_id for relation, _, _ in relations
         }
         source_directive_ids = {
-            source.directive_id_hint for source in sources
+            state.directive_metadata.directive_id for state in source_states
         }
-        if not source_directive_ids.issubset(directive_ids):
+        if source_directive_ids != directive_ids:
             raise RuntimeError(
-                "The source corpus contains unpublished directive IDs"
+                "Source-state directive IDs do not match published directives"
             )
         if {bundle.directive_id for bundle in bundles} != directive_ids:
             raise RuntimeError(
@@ -235,10 +267,10 @@ class DirectiveIngestionRunner:
         }
         source_index = {
             (
-                source.directive_id_hint,
-                source.directive_version_id_hint,
-            ): source
-            for source in sources
+                state.directive_metadata.directive_id,
+                state.directive_metadata.directive_version_id,
+            ): state
+            for state in source_states
         }
         if len(bundle_index) != len(bundles):
             raise RuntimeError(
@@ -248,11 +280,13 @@ class DirectiveIngestionRunner:
             raise RuntimeError(
                 "The source corpus contains unpublished directive versions"
             )
-        for identity, source in source_index.items():
-            if bundle_index[identity].source_hash != source.source_hash:
+        for identity, state in source_index.items():
+            if (
+                bundle_index[identity].source_hash
+                != state.directive_metadata.source_hash
+            ):
                 raise RuntimeError(
-                    "Published source hash does not match the source corpus: "
-                    f"{source.source_name}"
+                    "Published source hash does not match source-state"
                 )
         for bundle in bundles:
             manifest = bundle.manifest
@@ -262,6 +296,7 @@ class DirectiveIngestionRunner:
                     bundle.artifacts.canonical_blob_name,
                 }
             )
+            _validate_safe_artifact_paths(bundle)
             source_hash = await self.blobs.content_hash(
                 bundle.artifacts.source_blob_name
             )
@@ -332,6 +367,12 @@ class DirectiveIngestionRunner:
             )
 
         return {
+            "success": True,
+            "execution_id": run_id,
+            "environment": _safe_environment(self.config),
+            "processing_version": self.config.processing_version,
+            "processing_hash": self.config.processing_hash,
+            "search_index": self.config.search_index,
             "source_versions": len(sources),
             "directive_ids": len(directive_ids),
             "current_versions": len(current),
@@ -346,62 +387,6 @@ class DirectiveIngestionRunner:
                 for key, value in mandates.items()
             },
         }
-
-    async def cleanup_legacy_artifacts(
-        self, confirmation_token: str | None = None
-    ) -> dict[str, object]:
-        if confirmation_token is not None:
-            await self.verify()
-
-        blob_names = await self.blobs.list_legacy_directive_artifacts()
-        catalog_artifacts = await self.catalog.list_legacy_artifacts()
-        inventory = {
-            "blob_names": blob_names,
-            "catalog_items": [
-                artifact.as_dict() for artifact in catalog_artifacts
-            ],
-        }
-        inventory_token = _cleanup_confirmation_token(inventory)
-        result: dict[str, object] = {
-            "mode": (
-                "execute"
-                if confirmation_token is not None
-                else "dry_run"
-            ),
-            "confirmation_token": inventory_token,
-            "blob_count": len(blob_names),
-            "catalog_item_count": len(catalog_artifacts),
-            **inventory,
-        }
-        if confirmation_token is None:
-            return result
-        if confirmation_token != inventory_token:
-            raise RuntimeError(
-                "Cleanup inventory changed; run a new dry-run and confirm "
-                "its token"
-            )
-
-        await self.blobs.delete_legacy_directive_artifacts(blob_names)
-        await self.catalog.delete_legacy_artifacts(catalog_artifacts)
-
-        remaining_blobs = (
-            await self.blobs.list_legacy_directive_artifacts()
-        )
-        remaining_catalog = await self.catalog.list_legacy_artifacts()
-        if remaining_blobs or remaining_catalog:
-            raise RuntimeError(
-                "Legacy directive artifacts remain after cleanup"
-            )
-        await self.verify()
-        result.update(
-            {
-                "deleted_blob_count": len(blob_names),
-                "deleted_catalog_item_count": len(catalog_artifacts),
-                "remaining_blob_count": 0,
-                "remaining_catalog_item_count": 0,
-            }
-        )
-        return result
 
     async def _preflight_response_model(
         self, deployment: str, label: str
@@ -421,20 +406,50 @@ class DirectiveIngestionRunner:
         self,
         source_directory: Path | None = None,
         mandate_csv: Path | None = None,
-    ) -> dict[str, int]:
-        sources = await self._discover_sources(source_directory)
-        known_ids = {source.directive_id_hint for source in sources}
+    ) -> dict[str, object]:
+        execution_id = _run_id()
+        sources = await self.discover_sources(source_directory)
+        metadata = await self.extract_or_load_metadata(sources, execution_id)
+        await self._validate_and_quarantine(metadata, execution_id)
+        known_ids = {item.metadata.directive_id for item in metadata}
         mandates = parse_mandates(
             mandate_csv or self.config.mandate_csv,
             self.config.azure_tenant_id,
             known_ids,
         )
-        return {
+        warning_codes = sorted(
+            {
+                finding.code
+                for item in metadata
+                if item.extraction is not None
+                for finding in parse_canonical(
+                    item.source,
+                    item.extraction,
+                    self.config.processing_hash,
+                ).findings
+                if finding.severity == "warning"
+            }
+        )
+        payload = {
+            "execution_id": execution_id,
+            "environment": _safe_environment(self.config),
+            "processing_version": self.config.processing_version,
+            "processing_hash": self.config.processing_hash,
+            "search_index": self.config.search_index,
             "source_count": len(sources),
             "directive_count": len(known_ids),
+            "directive_ids": sorted(known_ids),
+            "directive_version_ids": sorted(
+                item.metadata.directive_version_id for item in metadata
+            ),
             "mandate_count": len(mandates.assignments),
             "mandate_user_count": mandates.user_count,
+            "warning_codes": warning_codes,
+            "warning_count": len(warning_codes),
+            "failures": [],
         }
+        payload["validation_digest"] = _public_record_digest(payload)
+        return payload
 
     async def run_daily(
         self,
@@ -442,23 +457,30 @@ class DirectiveIngestionRunner:
         mandate_csv: Path | None = None,
     ) -> ReconcileResult:
         run_id = _run_id()
-        sources = await self._discover_sources(source_directory)
-        await self.search.ensure_resources()
-        prepared, metadata = await self._prepare(sources, run_id)
-        await self._validate_source_set(metadata)
-        known_ids = {
-            item.directive_id for item in metadata
-        } | await self.catalog.list_published_directive_ids()
-        await self._validate_relations(prepared, metadata, known_ids)
+        sources = await self.discover_sources(source_directory)
+        metadata = await self.extract_or_load_metadata(sources, run_id)
+        await self._validate_and_quarantine(metadata, run_id)
+        known_ids = {item.metadata.directive_id for item in metadata}
         parsed_mandates = parse_mandates(
             mandate_csv or self.config.mandate_csv,
             self.config.azure_tenant_id,
             known_ids,
         )
-        await self._publish_documents(prepared, metadata, run_id)
+        prepared = await self.prepare_changed_documents(metadata, run_id)
+        await self._validate_relations(
+            prepared,
+            [item.metadata for item in metadata],
+            known_ids,
+        )
+        if prepared:
+            await self.search.ensure_resources()
+            await self.stage_documents(prepared)
+            await self.publish_documents(prepared)
         snapshot, mandate_changed = await self.mandates.publish(
             parsed_mandates, run_id
         )
+        if prepared:
+            await self.record_source_states(prepared)
         result = ReconcileResult(
             run_id=run_id,
             source_count=len(sources),
@@ -470,6 +492,7 @@ class DirectiveIngestionRunner:
             mandate_snapshot_id=snapshot.snapshot_id,
             mandate_changed=mandate_changed,
         )
+        await self.verify()
         await self.catalog.record_run(
             run_id,
             status="succeeded",
@@ -485,15 +508,20 @@ class DirectiveIngestionRunner:
         self, source_directory: Path | None = None
     ) -> ReconcileResult:
         run_id = _run_id()
-        sources = await self._discover_sources(source_directory)
-        await self.search.ensure_resources()
-        prepared, metadata = await self._prepare(sources, run_id)
-        await self._validate_source_set(metadata)
-        known_ids = {
-            item.directive_id for item in metadata
-        } | await self.catalog.list_published_directive_ids()
-        await self._validate_relations(prepared, metadata, known_ids)
-        await self._publish_documents(prepared, metadata, run_id)
+        sources = await self.discover_sources(source_directory)
+        metadata = await self.extract_or_load_metadata(sources, run_id)
+        await self._validate_and_quarantine(metadata, run_id)
+        prepared = await self.prepare_changed_documents(metadata, run_id)
+        await self._validate_relations(
+            prepared,
+            [item.metadata for item in metadata],
+            {item.metadata.directive_id for item in metadata},
+        )
+        if prepared:
+            await self.search.ensure_resources()
+            await self.stage_documents(prepared)
+            await self.publish_documents(prepared)
+            await self.record_source_states(prepared)
         result = ReconcileResult(
             run_id=run_id,
             source_count=len(sources),
@@ -529,7 +557,7 @@ class DirectiveIngestionRunner:
             mandate_csv or self.config.mandate_csv, known_ids, run_id
         )
 
-    async def _discover_sources(
+    async def discover_sources(
         self,
         source_directory: Path | None = None,
     ) -> list[SourceDocument]:
@@ -541,39 +569,123 @@ class DirectiveIngestionRunner:
             )
         return await LocalDirectiveSource(source_directory).discover()
 
-    async def _prepare(
+    async def _discover_sources(
+        self, source_directory: Path | None = None
+    ) -> list[SourceDocument]:
+        """Compatibility alias for callers that used the v1 private method."""
+        return await self.discover_sources(source_directory)
+
+    async def extract_or_load_metadata(
         self, sources: list[SourceDocument], run_id: str
-    ) -> tuple[list[PreparedDirective], list[DirectiveMetadata]]:
-        prepared: list[PreparedDirective] = []
-        all_metadata: list[DirectiveMetadata] = []
+    ) -> list[SourceMetadata]:
+        """Complete pass one without summary, embedding, staging, or publication."""
+        from .metadata import extract_metadata
+
+        results: list[SourceMetadata] = []
         failures: list[tuple[SourceDocument, str]] = []
-        for index, source in enumerate(sources, 1):
-            if await self.catalog.is_unchanged(
-                source, self.config.processing_hash
-            ):
-                item = await self.catalog.get_version(
-                    source.directive_id_hint,
-                    source.directive_version_id_hint,
-                )
-                if item is None:
-                    raise RuntimeError(
-                        "Catalog version disappeared during unchanged check"
-                    )
-                all_metadata.append(_metadata_from_catalog(item))
-                print(
-                    f"[{index}/{len(sources)}] unchanged: "
-                    f"{source.source_name}",
-                    flush=True,
-                )
-                continue
-            print(
-                f"[{index}/{len(sources)}] extracting: {source.source_name}",
-                flush=True,
-            )
+        for source in sources:
             try:
+                state = await self.source_states.load(
+                    source, self.config.processing_hash
+                )
+                if state is not None and await self._state_has_live_publication(
+                    source, state
+                ):
+                    results.append(
+                        SourceMetadata(
+                            source=source,
+                            metadata=state.directive_metadata,
+                            extraction=None,
+                            source_state=state,
+                        )
+                    )
+                    continue
                 extraction = await self.extractor.extract(source.content)
-                canonical = parse_canonical(
+                candidate = extract_metadata(
                     source, extraction, self.config.processing_hash
+                )
+                results.append(
+                    SourceMetadata(
+                        source=source,
+                        metadata=candidate.metadata,
+                        extraction=extraction,
+                        source_state=None,
+                    )
+                )
+            except (httpx.HTTPError, RuntimeError, TimeoutError, ValueError) as exc:
+                failures.append((source, _safe_failure_code(exc)))
+        if failures:
+            for source, error in failures:
+                await self.blobs.quarantine(
+                    run_id, source.source_name, source.content, [error]
+                )
+            raise RuntimeError(
+                "Metadata validation failed for "
+                f"{len(failures)} directive source(s)"
+            )
+        return results
+
+    def validate_source_set(self, metadata: list[SourceMetadata]) -> None:
+        """Validate all source identities before any expensive model work."""
+        failures: list[tuple[SourceDocument, str]] = []
+        by_id: dict[str, SourceMetadata] = {}
+        versions: set[str] = set()
+        for item in metadata:
+            value = item.metadata
+            if not (value.is_current and value.is_valid and value.status == "Current"):
+                failures.append((item.source, "metadata_invalid_current_state"))
+            if value.directive_id in by_id:
+                failures.extend(
+                    [
+                        (item.source, "metadata_duplicate_directive_id"),
+                        (
+                            by_id[value.directive_id].source,
+                            "metadata_duplicate_directive_id",
+                        ),
+                    ]
+                )
+            else:
+                by_id[value.directive_id] = item
+            if value.directive_version_id in versions:
+                failures.append((item.source, "metadata_duplicate_version_id"))
+            versions.add(value.directive_version_id)
+        if failures:
+            raise _SourceSetValidationError(failures)
+
+    async def _validate_and_quarantine(
+        self, metadata: list[SourceMetadata], run_id: str
+    ) -> None:
+        try:
+            self.validate_source_set(metadata)
+        except _SourceSetValidationError as exc:
+            await self._quarantine_source_set_failures(run_id, exc.failures)
+            raise RuntimeError("Source-set validation failed") from exc
+
+    async def _quarantine_source_set_failures(
+        self,
+        run_id: str,
+        failures: list[tuple[SourceDocument, str]],
+    ) -> None:
+        handled: set[str] = set()
+        for source, code in failures:
+            if source.source_hash in handled:
+                continue
+            handled.add(source.source_hash)
+            await self.blobs.quarantine(
+                run_id, source.source_name, source.content, [code]
+            )
+
+    async def prepare_changed_documents(
+        self, metadata: list[SourceMetadata], run_id: str
+    ) -> list[PreparedDirective]:
+        """Pass two: model work is permitted only after corpus validation."""
+        prepared: list[PreparedDirective] = []
+        for item in metadata:
+            if not item.changed:
+                continue
+            try:
+                canonical = parse_canonical(
+                    item.source, item.extraction, self.config.processing_hash
                 )
                 text_chunks, chunk_findings = chunk_sections(
                     canonical.metadata.directive_version_id,
@@ -615,7 +727,8 @@ class DirectiveIngestionRunner:
                         findings=tuple(findings),
                     )
                 )
-                all_metadata.append(canonical.metadata)
+                if canonical.metadata != item.metadata:
+                    raise RuntimeError("Canonical metadata changed after validation")
             except (
                 APIError,
                 httpx.HTTPError,
@@ -623,24 +736,18 @@ class DirectiveIngestionRunner:
                 TimeoutError,
                 ValueError,
             ) as exc:
-                failures.append((source, str(exc)))
+                failures.append((item.source, _safe_failure_code(exc)))
         if failures:
             for source, error in failures:
                 await self.blobs.quarantine(
                     run_id, source.source_name, source.content, [error]
                 )
-            names = ", ".join(source.source_name for source, _ in failures)
             raise RuntimeError(
-                f"Preflight failed for {len(failures)} directive(s): {names}"
+                f"Document preparation failed for {len(failures)} directive(s)"
             )
-        return prepared, all_metadata
+        return prepared
 
-    async def _publish_documents(
-        self,
-        prepared: list[PreparedDirective],
-        metadata: list[DirectiveMetadata],
-        run_id: str,
-    ) -> None:
+    async def stage_documents(self, prepared: list[PreparedDirective]) -> None:
         for item in prepared:
             await self._publish_artifacts(item)
             for content_item in item.content_items:
@@ -652,6 +759,8 @@ class DirectiveIngestionRunner:
                 item.canonical.relations,
                 item.findings,
             )
+
+    async def publish_documents(self, prepared: list[PreparedDirective]) -> None:
         for item in prepared:
             try:
                 await self.search.publish_chunks(item.search_chunks)
@@ -673,12 +782,73 @@ class DirectiveIngestionRunner:
             except RuntimeError:
                 await self.search.retire_chunks(item.search_chunks)
                 raise
-        for item in metadata:
-            await self.catalog.activate_current(item, run_id)
-        for item in metadata:
-            await self.search.reconcile_current(item)
-        for item in metadata:
-            await self.search.reconcile_generation(item)
+        for item in prepared:
+            await self.catalog.activate_current(item.canonical.metadata, item.bundle.run_id)
+            await self.search.reconcile_current(item.canonical.metadata)
+            await self.search.reconcile_generation(item.canonical.metadata)
+
+    async def record_source_states(
+        self, prepared: list[PreparedDirective]
+    ) -> None:
+        """Commit private idempotency records only after live publication checks."""
+        for item in prepared:
+            await self.catalog.validate_published(item.bundle)
+            await self.content.validate_bundle(item.bundle)
+            await self.search.validate_published(
+                item.canonical, len(item.search_chunks)
+            )
+            await self.source_states.record(
+                item.source,
+                item.canonical.metadata,
+                item.bundle.artifact_generation_id,
+            )
+
+    async def _state_has_live_publication(
+        self,
+        source: SourceDocument,
+        state: PublishedSourceState,
+    ) -> bool:
+        """A state record is insufficient unless its published bundle is live."""
+        metadata = state.directive_metadata
+        bundle = await self.catalog.get_published_version(
+            metadata.directive_id, metadata.directive_version_id
+        )
+        if bundle is None:
+            return False
+        if (
+            bundle.source_hash != source.source_hash
+            or bundle.processing_hash != metadata.processing_hash
+            or bundle.artifact_generation_id != state.artifact_generation_id
+        ):
+            return False
+        _validate_safe_artifact_paths(bundle)
+        return (
+            await self.blobs.exists(bundle.artifacts.source_blob_name)
+            and await self.blobs.exists(bundle.artifacts.canonical_blob_name)
+        )
+
+    async def _prepare(
+        self, sources: list[SourceDocument], run_id: str
+    ) -> tuple[list[PreparedDirective], list[DirectiveMetadata]]:
+        """Compatibility wrapper preserving the v1 private test seam."""
+        metadata = await self.extract_or_load_metadata(sources, run_id)
+        try:
+            self.validate_source_set(metadata)
+        except _SourceSetValidationError as exc:
+            await self._quarantine_source_set_failures(run_id, exc.failures)
+            raise RuntimeError("Source-set validation failed") from exc
+        prepared = await self.prepare_changed_documents(metadata, run_id)
+        return prepared, [item.metadata for item in metadata]
+
+    async def _publish_documents(
+        self,
+        prepared: list[PreparedDirective],
+        metadata: list[DirectiveMetadata],
+        run_id: str,
+    ) -> None:
+        """Compatibility wrapper preserving staged publication rollback semantics."""
+        await self.stage_documents(prepared)
+        await self.publish_documents(prepared)
 
     async def _publish_artifacts(self, item: PreparedDirective) -> None:
         artifacts = item.bundle.artifacts
@@ -871,7 +1041,12 @@ def _build_published_bundle(
     for item in content_items:
         part_counts[item.section_id] = item.part_count
     bundle = PublishedDirectiveVersion(
-        id=f"version:{metadata.directive_version_id}",
+        id=(
+            "version:"
+            + directive_version_storage_key(
+                metadata.directive_id, metadata.version_label
+            )
+        ),
         **metadata.model_dump(mode="json"),
         artifact_generation_id=manifest.artifact_generation_id,
         manifest=manifest,
@@ -904,8 +1079,9 @@ def _build_artifact_locators(
 ) -> DirectiveArtifactLocators:
     metadata = directive.metadata
     source_base = (
-        f"directives/{metadata.directive_id}/"
-        f"{metadata.directive_version_id}/{metadata.source_hash}"
+        f"directives/{directive_storage_key(metadata.directive_id)}/"
+        f"{directive_version_storage_key(metadata.directive_id, metadata.version_label)}/"
+        f"{metadata.source_hash}"
     )
     return DirectiveArtifactLocators(
         canonical_blob_name=(
@@ -923,6 +1099,56 @@ def _metadata_from_catalog(item: dict[str, Any]) -> DirectiveMetadata:
         if name in item
     }
     return DirectiveMetadata.model_validate(values)
+
+
+class _SourceSetValidationError(ValueError):
+    def __init__(self, failures: list[tuple[SourceDocument, str]]) -> None:
+        super().__init__("Source-set validation failed")
+        self.failures = failures
+
+
+def _validate_safe_artifact_paths(bundle: PublishedDirectiveVersion) -> None:
+    metadata = bundle
+    source_base = (
+        f"directives/{directive_storage_key(metadata.directive_id)}/"
+        f"{directive_version_storage_key(metadata.directive_id, metadata.version_label)}/"
+        f"{metadata.source_hash}"
+    )
+    if bundle.artifacts.source_blob_name != f"{source_base}/source.pdf":
+        raise RuntimeError("Published source artifact locator is unsafe")
+    if bundle.artifacts.canonical_blob_name != (
+        f"{source_base}/generations/{bundle.artifact_generation_id}/document.md"
+    ):
+        raise RuntimeError("Published canonical artifact locator is unsafe")
+
+
+def _safe_environment(config: IngestionConfig) -> dict[str, str]:
+    return {
+        "source_kind": config.source_kind,
+        "source_container": config.source_container,
+        "artifact_container": config.blob_container,
+        "catalog_container": config.catalog_container,
+        "content_container": config.content_container,
+        "mandate_container": config.mandate_container,
+    }
+
+
+def _safe_failure_code(exc: BaseException) -> str:
+    if isinstance(exc, TimeoutError):
+        return "metadata_timeout"
+    if isinstance(exc, httpx.HTTPError):
+        return "metadata_transport_error"
+    if isinstance(exc, APIError):
+        return "metadata_service_error"
+    if isinstance(exc, ValueError):
+        return "metadata_invalid"
+    return "metadata_processing_error"
+
+
+def _public_record_digest(value: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()
 
 
 def _validate_relation_records(
@@ -1062,17 +1288,3 @@ def format_result(value: object) -> str:
     if hasattr(value, "as_dict"):
         value = value.as_dict()
     return json.dumps(value, sort_keys=True, default=str)
-
-
-def _cleanup_confirmation_token(inventory: dict[str, object]) -> str:
-    payload = {
-        "schema": "legacy-directive-cleanup-v1",
-        **inventory,
-    }
-    return hashlib.sha256(
-        json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()

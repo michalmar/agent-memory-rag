@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -17,28 +16,12 @@ from directive_contracts import (
     PublishedDirectiveVersion,
     ReviewFinding,
     canonical_json_hash,
+    published_directive_version_item_id,
     serialized_json_size,
 )
 
-from .source import SourceDocument
-
-
-def version_item_id(directive_version_id: str) -> str:
-    return f"version:{directive_version_id}"
-
-
-@dataclass(frozen=True, order=True)
-class LegacyCatalogArtifact:
-    item_type: str
-    directive_id: str
-    item_id: str
-
-    def as_dict(self) -> dict[str, str]:
-        return {
-            "id": self.item_id,
-            "directive_id": self.directive_id,
-            "type": self.item_type,
-        }
+def version_item_id(directive_id: str, version_label: str) -> str:
+    return published_directive_version_item_id(directive_id, version_label)
 
 
 class DirectiveCatalogRepository:
@@ -64,7 +47,7 @@ class DirectiveCatalogRepository:
     ) -> dict[str, Any] | None:
         try:
             return await self._container.read_item(
-                item=version_item_id(directive_version_id),
+                item=version_item_id(directive_id, directive_version_id.rsplit(":v", 1)[1]),
                 partition_key=directive_id,
             )
         except exceptions.CosmosResourceNotFoundError:
@@ -88,26 +71,6 @@ class DirectiveCatalogRepository:
             return None
         return _validate_published_bundle(item)
 
-    async def is_unchanged(
-        self, source: SourceDocument, processing_hash: str
-    ) -> bool:
-        item = await self.get_version(
-            source.directive_id_hint, source.directive_version_id_hint
-        )
-        if not (
-            item
-            and item.get("publication_state") == "published"
-            and item.get("artifact_schema_version") == "2.0"
-            and item.get("source_hash") == source.source_hash
-            and item.get("processing_hash") == processing_hash
-        ):
-            return False
-        try:
-            _validate_published_bundle(item)
-        except RuntimeError:
-            return False
-        return True
-
     async def stage_version(
         self,
         bundle: PublishedDirectiveVersion,
@@ -118,7 +81,7 @@ class DirectiveCatalogRepository:
         await self._container.upsert_item(
             {
                 "id": (
-                    f"staging:{bundle.directive_version_id}:"
+                    f"staging:{bundle.id.removeprefix('version:')}:"
                     f"{bundle.artifact_generation_id}"
                 ),
                 "type": "staging",
@@ -136,7 +99,7 @@ class DirectiveCatalogRepository:
         await self._container.upsert_item(
             {
                 "id": (
-                    f"review:{bundle.directive_version_id}:"
+                    f"review:{bundle.id.removeprefix('version:')}:"
                     f"{bundle.artifact_generation_id}"
                 ),
                 "type": "review",
@@ -306,7 +269,7 @@ class DirectiveCatalogRepository:
             "c.type = 'version' AND c.publication_state = 'published'"
         )
         async for value in self._container.query_items(query=query):
-            if isinstance(value, str) and value.isdigit():
+            if isinstance(value, str):
                 values.add(value)
         return values
 
@@ -328,54 +291,6 @@ class DirectiveCatalogRepository:
             bundle.manifest
             for bundle in await self.list_published_versions()
         ]
-
-    async def list_legacy_artifacts(self) -> list[LegacyCatalogArtifact]:
-        artifacts: list[LegacyCatalogArtifact] = []
-        query = (
-            "SELECT c.id, c.directive_id, c.type FROM c "
-            "WHERE c.type = 'manifest' OR c.type = 'summary'"
-        )
-        async for value in self._container.query_items(query=query):
-            item_id = value.get("id")
-            directive_id = value.get("directive_id")
-            item_type = value.get("type")
-            if not (
-                isinstance(item_id, str)
-                and isinstance(directive_id, str)
-                and directive_id.isdigit()
-                and item_type in {"manifest", "summary"}
-                and item_id.startswith(f"{item_type}:")
-            ):
-                raise RuntimeError(
-                    "Legacy catalog artifact has an unsafe identity"
-                )
-            artifacts.append(
-                LegacyCatalogArtifact(
-                    item_type=item_type,
-                    directive_id=directive_id,
-                    item_id=item_id,
-                )
-            )
-        return sorted(artifacts)
-
-    async def delete_legacy_artifacts(
-        self, artifacts: list[LegacyCatalogArtifact]
-    ) -> None:
-        for artifact in artifacts:
-            if (
-                artifact.item_type not in {"manifest", "summary"}
-                or not artifact.directive_id.isdigit()
-                or not artifact.item_id.startswith(
-                    f"{artifact.item_type}:"
-                )
-            ):
-                raise ValueError(
-                    "Refusing to delete a non-legacy catalog artifact"
-                )
-            await self._container.delete_item(
-                item=artifact.item_id,
-                partition_key=artifact.directive_id,
-            )
 
     async def list_published_version_labels(self) -> set[tuple[str, str]]:
         values: set[tuple[str, str]] = set()

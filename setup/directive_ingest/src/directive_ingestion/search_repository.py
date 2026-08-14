@@ -55,7 +55,7 @@ class DirectiveSearchRepository:
             "publication_state eq 'published'"
         )
         current = await self._count_and_facet(
-            "publication_state eq 'published' and is_current eq true"
+            _published_current_valid_filter()
         )
         direct_query = await self._request(
             "POST",
@@ -63,7 +63,7 @@ class DirectiveSearchRepository:
             api_version=self._config.search_api_version,
             payload={
                 "search": "directive verification",
-                "filter": "publication_state eq 'published'",
+                "filter": _published_current_valid_filter(),
                 "vectorFilterMode": "preFilter",
                 "vectorQueries": [
                     {
@@ -178,6 +178,7 @@ class DirectiveSearchRepository:
                     title=directive.metadata.title,
                     aliases=directive.metadata.aliases,
                     is_current=False,
+                    is_valid=directive.metadata.is_valid,
                     status=directive.metadata.status,
                     effective_from=directive.metadata.effective_from,
                     effective_to=directive.metadata.effective_to,
@@ -503,6 +504,21 @@ class DirectiveSearchRepository:
                 "Existing directive index must make directive_id searchable "
                 "for semantic keyword prioritization"
             )
+        for name in ("title", "content"):
+            if fields[name].get("analyzer") != "cs.microsoft":
+                raise RuntimeError(
+                    "Existing directive index requires the Czech cs.microsoft "
+                    f"analyzer for {name}"
+                )
+        is_valid = fields.get("is_valid") or {}
+        if (
+            is_valid.get("type") != "Edm.Boolean"
+            or is_valid.get("filterable") is not True
+            or is_valid.get("retrievable") is not True
+        ):
+            raise RuntimeError(
+                "Existing directive index requires filterable, retrievable is_valid"
+            )
         vector_search = index.get("vectorSearch") or {}
         algorithms = {
             algorithm.get("name"): algorithm
@@ -646,6 +662,7 @@ class DirectiveSearchRepository:
                 "searchable": True,
                 "filterable": True,
                 "retrievable": True,
+                "analyzer": "cs.microsoft",
             },
             {
                 "name": "aliases",
@@ -656,6 +673,12 @@ class DirectiveSearchRepository:
             },
             {
                 "name": "is_current",
+                "type": "Edm.Boolean",
+                "filterable": True,
+                "retrievable": True,
+            },
+            {
+                "name": "is_valid",
                 "type": "Edm.Boolean",
                 "filterable": True,
                 "retrievable": True,
@@ -703,6 +726,7 @@ class DirectiveSearchRepository:
                 "type": "Edm.String",
                 "searchable": True,
                 "retrievable": True,
+                "analyzer": "cs.microsoft",
             },
             {
                 "name": "content_vector",
@@ -729,6 +753,13 @@ def _search_date(value: date) -> str:
 
 def _odata_string(value: str) -> str:
     return value.replace("'", "''")
+
+
+def _published_current_valid_filter() -> str:
+    return (
+        "publication_state eq 'published' and is_current eq true "
+        "and is_valid eq true"
+    )
 
 
 def _batches(values: list[Any], size: int) -> Iterable[list[Any]]:
