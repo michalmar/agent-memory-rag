@@ -407,7 +407,10 @@ Agent changes required before deployment.
    the canonical environment and source-inventory digests, as
    `DIRECTIVE_APPROVED_VALIDATION_DIGEST`,
    `DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST`, and
-   `DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST`. Run
+   `DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST`. Before publication, write the
+   exact `directive.approval.v2` record at
+   `publication-approval/<validation_digest>.json`, binding those three values
+   and the processing hash. Run
    `scripts/deploy_directive_ingestion.sh <release>` to build the ingestion
    image, verify exact source-reader/artifact-contributor roles, run preflight,
    publish the approved source corpus, and verify the resulting state.

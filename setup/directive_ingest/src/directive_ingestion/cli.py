@@ -52,7 +52,18 @@ async def _run(args: argparse.Namespace) -> None:
         if args.command == "preflight":
             print(format_result(await runner.preflight()))
         elif args.command == "verify":
-            print(format_result(await runner.verify()))
+            expected_validation_digest = (
+                _verify_validation_digest_from_environment()
+                if config.source_kind == "azure_blob"
+                else None
+            )
+            print(
+                format_result(
+                    await runner.verify(
+                        expected_validation_digest=expected_validation_digest
+                    )
+                )
+            )
         elif args.command == "bootstrap":
             await runner.bootstrap()
             print('{"status":"ready"}')
@@ -118,6 +129,15 @@ def _daily_run_approval_from_environment() -> DailyRunApproval:
         environment_digest=values[names[1]],
         source_inventory_digest=values[names[2]],
     )
+
+
+def _verify_validation_digest_from_environment() -> str:
+    value = os.getenv("DIRECTIVE_APPROVED_VALIDATION_DIGEST", "").strip()
+    if not value:
+        raise ValueError(
+            "verify requires nonempty DIRECTIVE_APPROVED_VALIDATION_DIGEST"
+        )
+    return value
 
 
 def main() -> None:

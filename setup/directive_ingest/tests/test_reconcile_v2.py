@@ -758,7 +758,7 @@ async def test_validate_output_has_finalize_guard_shape() -> None:
         {
             key: item
             for key, item in value.items()
-            if key != "validation_digest"
+            if key not in {"run_id", "validation_digest"}
         }
     )
 
@@ -1030,7 +1030,23 @@ async def test_run_daily_unchanged_corpus_performs_no_publication_writes() -> No
     )
     runner = object.__new__(DirectiveIngestionRunner)
     runner.config = SimpleNamespace(
-        mandate_csv=object(), azure_tenant_id="tenant"
+        mandate_csv=object(),
+        azure_tenant_id="tenant",
+        processing_hash=metadata.processing_hash,
+        processing_version="directive-v2-czech-layout",
+        search_index="directive-chunks-v2",
+        source_kind="local",
+        source_storage_account="source",
+        source_container="directive-source",
+        source_prefix="",
+        artifact_storage_account="artifacts",
+        blob_container="directive-artifacts",
+        cosmos_account="cosmos",
+        cosmos_database="directives",
+        catalog_container="catalog",
+        content_container="directive-content",
+        mandate_container="mandates",
+        search_service="search",
     )
     runner.discover_sources = AsyncMock(return_value=[source])
     runner.extract_or_load_metadata = AsyncMock(
@@ -1091,7 +1107,23 @@ async def test_mandate_only_activation_is_reported_as_a_change() -> None:
     )
     runner = object.__new__(DirectiveIngestionRunner)
     runner.config = SimpleNamespace(
-        mandate_csv=object(), azure_tenant_id="tenant"
+        mandate_csv=object(),
+        azure_tenant_id="tenant",
+        processing_hash=metadata.processing_hash,
+        processing_version="directive-v2-czech-layout",
+        search_index="directive-chunks-v2",
+        source_kind="local",
+        source_storage_account="source",
+        source_container="directive-source",
+        source_prefix="",
+        artifact_storage_account="artifacts",
+        blob_container="directive-artifacts",
+        cosmos_account="cosmos",
+        cosmos_database="directives",
+        catalog_container="catalog",
+        content_container="directive-content",
+        mandate_container="mandates",
+        search_service="search",
     )
     runner.discover_sources = AsyncMock(return_value=[source])
     runner.extract_or_load_metadata = AsyncMock(

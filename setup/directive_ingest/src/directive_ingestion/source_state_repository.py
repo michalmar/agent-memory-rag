@@ -28,6 +28,7 @@ class PublishedSourceState:
     artifact_generation_id: str
     publication_state: str
     pending_cleanup: tuple[PublishedDirectiveVersion, ...] = ()
+    validation_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,7 @@ class SourceStateRepository:
                     PublishedDirectiveVersion.model_validate(bundle)
                     for bundle in value.get("pending_cleanup", [])
                 ),
+                validation_digest=value.get("validation_digest"),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -90,6 +92,13 @@ class SourceStateRepository:
             or metadata.source_filename != source.source_name
             or metadata.source_hash != source.source_hash
             or metadata.processing_hash != processing_hash
+            or (
+                state.validation_digest is not None
+                and (
+                    not isinstance(state.validation_digest, str)
+                    or not state.validation_digest.strip()
+                )
+            )
         ):
             return None
         return state
@@ -101,26 +110,32 @@ class SourceStateRepository:
         artifact_generation_id: str,
         pending_cleanup: tuple[PublishedDirectiveVersion, ...] = (),
         *,
+        validation_digest: str | None = None,
         expected_etag: str | None = None,
         require_absent: bool = False,
     ) -> str:
+        if validation_digest is not None and not validation_digest.strip():
+            raise ValueError("Validation digest must not be empty")
+        payload: dict[str, Any] = {
+            "type": "source_state",
+            "source_filename": source.source_name,
+            "source_hash": source.source_hash,
+            "source_fingerprint": source_fingerprint(
+                source.source_name, source.source_hash
+            ),
+            "processing_hash": metadata.processing_hash,
+            "directive_metadata": metadata.model_dump(mode="json"),
+            "artifact_generation_id": artifact_generation_id,
+            "publication_state": "published",
+            "pending_cleanup": [
+                bundle.model_dump(mode="json") for bundle in pending_cleanup
+            ],
+        }
+        if validation_digest is not None:
+            payload["validation_digest"] = validation_digest
         return await self._blobs.replace_json(
             self.blob_name(source, metadata.processing_hash),
-            {
-                "type": "source_state",
-                "source_filename": source.source_name,
-                "source_hash": source.source_hash,
-                "source_fingerprint": source_fingerprint(
-                    source.source_name, source.source_hash
-                ),
-                "processing_hash": metadata.processing_hash,
-                "directive_metadata": metadata.model_dump(mode="json"),
-                "artifact_generation_id": artifact_generation_id,
-                "publication_state": "published",
-                "pending_cleanup": [
-                    bundle.model_dump(mode="json") for bundle in pending_cleanup
-                ],
-            },
+            payload,
             expected_etag=expected_etag,
             require_absent=require_absent,
         )
@@ -130,8 +145,14 @@ class SourceStateRepository:
         source: SourceDocument,
         metadata: DirectiveMetadata,
         artifact_generation_id: str,
+        validation_digest: str | None = None,
     ) -> None:
-        await self.record(source, metadata, artifact_generation_id)
+        await self.record(
+            source,
+            metadata,
+            artifact_generation_id,
+            validation_digest=validation_digest,
+        )
 
     async def prune(self, expected_names: set[str]) -> None:
         """Remove every state record outside exact source+processing identities."""

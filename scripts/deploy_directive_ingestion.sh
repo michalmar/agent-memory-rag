@@ -360,6 +360,8 @@ VERIFY_EXECUTION="$(
   az containerapp job start \
     --name "$JOB_NAME" \
     --resource-group "$RG" \
+    --env-vars \
+      "DIRECTIVE_APPROVED_VALIDATION_DIGEST=$DIRECTIVE_APPROVED_VALIDATION_DIGEST" \
     --query name \
     --output tsv
 )"
