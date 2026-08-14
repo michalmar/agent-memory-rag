@@ -101,7 +101,12 @@ and cross-store verification in that order.
 The deployment approval token is freshly derived from the exact validation
 execution and its sanitized summary; reusable confirmation constants are
 rejected. Reset maintenance mode is nonpublishing until that validated flow
-deliberately restores publication.
+deliberately starts the approved per-execution publication override.
+Terraform keeps the job template in `maintenance`; validate and publish are
+separate script phases, and only the approved publication execution receives a
+per-execution `run-daily` override. The inventory operator receives only
+source-container Blob Data Reader on the protected source container; artifact
+cleanup remains separately scoped.
 
 The reset automation is dry-run by default and protects the
 `directive-source` container. It deletes and recreates only the derived

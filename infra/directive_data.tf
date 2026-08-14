@@ -253,6 +253,12 @@ resource "azurerm_role_assignment" "deployer_directive_blob_contributor" {
   principal_id         = data.azurerm_client_config.current.object_id
 }
 
+resource "azurerm_role_assignment" "deployer_directive_source_reader" {
+  scope                = azapi_resource.directive_source_container.id
+  role_definition_name = "Storage Blob Data Reader"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
 resource "azurerm_role_assignment" "deployer_directive_document_intelligence" {
   scope                = azurerm_cognitive_account.directive_layout.id
   role_definition_name = "Cognitive Services User"

@@ -134,7 +134,7 @@ resource "azurerm_container_app_job" "directive_ingestion" {
       cpu     = 1
       memory  = "2Gi"
       command = ["directive-ingest"]
-      args    = ["run-daily"]
+      args    = ["maintenance"]
 
       dynamic "env" {
         for_each = local.directive_ingestion_env

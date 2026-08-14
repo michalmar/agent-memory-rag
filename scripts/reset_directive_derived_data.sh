@@ -12,13 +12,16 @@ INFRA_DIR="$REPO_ROOT/infra"
 AZ_BIN="${AZ_BIN:-az}"
 TERRAFORM_BIN="${TERRAFORM_BIN:-terraform}"
 MAX_VERIFICATION_AGE_SECONDS="${DIRECTIVE_VERIFICATION_MAX_AGE_SECONDS:-86400}"
+MAX_INVENTORY_EVIDENCE_AGE_SECONDS="${DIRECTIVE_RESET_EVIDENCE_MAX_AGE_SECONDS:-1800}"
 MAINTENANCE_DRAIN_ATTEMPTS="${DIRECTIVE_MAINTENANCE_DRAIN_ATTEMPTS:-60}"
 MAINTENANCE_DRAIN_DELAY_SECONDS="${DIRECTIVE_MAINTENANCE_DRAIN_DELAY_SECONDS:-10}"
 V1_INDEX="${DIRECTIVE_SEARCH_V1_INDEX:-directive-chunks-v1}"
-V2_INDEX="${DIRECTIVE_SEARCH_V2_INDEX:-}"
+V2_INDEX="directive-chunks-v2"
 MODE="dry-run"
+EXECUTE_FLAG=false
 CONFIRMATION_TOKEN=""
 VERIFICATION_FILE=""
+INVENTORY_EVIDENCE_FILE=""
 SOURCE_INVENTORY_FILE=""
 SOURCE_INVENTORY_DIGEST=""
 SOURCE_COUNT=0
@@ -30,13 +33,15 @@ usage() {
   cat <<'EOF'
 Usage:
   reset_directive_derived_data.sh [dry-run]
-  reset_directive_derived_data.sh reset --execute --confirm TOKEN
+  reset_directive_derived_data.sh dry-run --inventory-evidence FILE
+  reset_directive_derived_data.sh reset --execute --inventory-evidence FILE \
+    --confirm TOKEN
   reset_directive_derived_data.sh finalize --execute \
-    --verification-file FILE --confirm TOKEN
+    --verification-file FILE --inventory-evidence FILE --confirm TOKEN
 
 The reset and finalize commands are destructive. A dry-run is the default and
-prints the exact environment inventory and a confirmation token. The token is
-valid only while that inventory is unchanged.
+prints the exact environment inventory and a confirmation token. Execute
+requires the persisted dry-run evidence file and expires it after 30 minutes.
 EOF
 }
 
@@ -96,7 +101,7 @@ parse_args() {
     arg="$1"
     case "$arg" in
       --execute)
-        [[ "$MODE" != "dry-run" ]] || MODE="reset"
+        EXECUTE_FLAG=true
         shift
         ;;
       --confirm)
@@ -109,6 +114,11 @@ parse_args() {
         VERIFICATION_FILE="$2"
         shift 2
         ;;
+      --inventory-evidence)
+        [[ $# -ge 2 ]] || die "--inventory-evidence requires a path"
+        INVENTORY_EVIDENCE_FILE="$2"
+        shift 2
+        ;;
       --v1-index)
         [[ $# -ge 2 ]] || die "--v1-index requires a name"
         V1_INDEX="$2"
@@ -116,6 +126,8 @@ parse_args() {
         ;;
       --v2-index)
         [[ $# -ge 2 ]] || die "--v2-index requires a name"
+        [[ "$2" == "directive-chunks-v2" ]] || die \
+          "--v2-index must be the explicit target directive-chunks-v2"
         V2_INDEX="$2"
         shift 2
         ;;
@@ -132,6 +144,7 @@ parse_args() {
 
 load_inventory() {
   SUBSCRIPTION_ID="$("${AZ_CMD[@]}" account show --query id --output tsv)"
+  local blob_name relative source_hash extension
   SUBSCRIPTION_NAME="$("${AZ_CMD[@]}" account show --query name --output tsv)"
   RG="$(tf_output resource_group)"
   STORAGE_ACCOUNT="$(tf_output directive_artifacts_storage_account)"
@@ -145,13 +158,37 @@ load_inventory() {
     --container-name "$SOURCE_CONTAINER" \
     --prefix "$SOURCE_PREFIX" \
     --auth-mode login \
-    --query "sort_by([].{name:name,etag:properties.etag,size:properties.contentLength}, &name)[].{name:name,etag:etag,size:size}" \
-    --output tsv >"$SOURCE_INVENTORY_FILE"
+    --query "[].name" \
+    --output tsv |
+    while IFS= read -r blob_name; do
+      extension="$(printf '%s' "${blob_name##*.}" | tr '[:upper:]' '[:lower:]')"
+      [[ "$extension" == pdf ]] || continue
+      relative="${blob_name#$SOURCE_PREFIX}"
+      [[ "$relative" != */* && -n "$relative" ]] || die \
+        "Source blob is not a direct PDF child: $blob_name"
+      source_hash="$(
+        source_file="$(mktemp)"
+        trap 'rm -f "$source_file"' EXIT
+        "${AZ_CMD[@]}" storage blob download \
+          --account-name "$STORAGE_ACCOUNT" \
+          --container-name "$SOURCE_CONTAINER" \
+          --name "$blob_name" \
+          --file "$source_file" \
+          --auth-mode login \
+          --overwrite \
+          --output none
+        sha256_file "$source_file"
+      )"
+      printf '%s\t%s\n' "$relative" "$source_hash"
+    done >"$SOURCE_INVENTORY_FILE"
   SOURCE_COUNT="$(awk 'NF { count++ } END { print count + 0 }' "$SOURCE_INVENTORY_FILE")"
   [[ "$SOURCE_COUNT" -gt 0 ]] || die \
     "Protected directive-source corpus is empty; refusing reset or token generation"
   SOURCE_INVENTORY_DIGEST="$(
-    sha256_text "$(LC_ALL=C sort "$SOURCE_INVENTORY_FILE")"
+    sha256_text "$(
+      LC_ALL=C sort "$SOURCE_INVENTORY_FILE" |
+        jq -RnSc '[inputs | split("\t") | {source_name: .[0], source_hash: .[1]}] | sort_by(.source_name)'
+    )"
   )"
   COSMOS_ENDPOINT="$(tf_output cosmos_endpoint)"
   COSMOS_ACCOUNT="$(account_name_from_endpoint "$COSMOS_ENDPOINT")"
@@ -161,7 +198,6 @@ load_inventory() {
   MANDATES_CONTAINER="$(tf_output directive_mandates_container)"
   SEARCH_NAME="$(tf_output search_service_name)"
   JOB_NAME="$(tf_output directive_ingestion_job_name)"
-  [[ -n "$V2_INDEX" ]] || V2_INDEX="$(tf_output directive_search_index_name)"
   ACTIVE_EXECUTIONS="$(
     "${AZ_CMD[@]}" containerapp job execution list \
       --name "$JOB_NAME" \
@@ -211,12 +247,90 @@ inventory_token() {
 }
 
 finalize_token() {
-  local inventory verification_hash
+  local inventory verification_hash validation_digest source_digest image_digest verify_digest
   verification_hash="$(sha256_file "$VERIFICATION_FILE")"
+  validation_digest="$(jq -r '.validation_record_digest' "$VERIFICATION_FILE")"
+  source_digest="$(jq -r '.source_inventory_digest' "$VERIFICATION_FILE")"
+  image_digest="$(jq -r '.image_digest' "$VERIFICATION_FILE")"
+  verify_digest="$(jq -r '.verification_record_digest' "$VERIFICATION_FILE")"
   inventory="$(token_inventory_text)"
   printf 'DIRECTIVE-FINALIZE-V2-%s\n' \
     "$(sha256_text "$inventory
-verification_evidence_sha256=$verification_hash" | cut -c1-24)"
+verification_evidence_sha256=$verification_hash
+validation_record_digest=$validation_digest
+source_inventory_digest=$source_digest
+image_digest=$image_digest
+verification_record_digest=$verify_digest" | cut -c1-24)"
+}
+
+write_inventory_evidence() {
+  local token="$1"
+  local kind="$2"
+  local created_at nonce inventory_hash verification_hash=""
+  [[ -n "$INVENTORY_EVIDENCE_FILE" ]] || return 0
+  created_at="$(date +%s)"
+  nonce="$(
+    sha256_text "$created_at:$RANDOM:$$:$SOURCE_INVENTORY_DIGEST" | cut -c1-32
+  )"
+  inventory_hash="$(sha256_text "$(token_inventory_text)")"
+  if [[ "$kind" == finalize ]]; then
+    verification_hash="$(sha256_file "$VERIFICATION_FILE")"
+  fi
+  jq -S -n \
+    --arg kind "$kind" \
+    --argjson created_at "$created_at" \
+    --arg nonce "$nonce" \
+    --arg token "$token" \
+    --arg inventory_hash "$inventory_hash" \
+    --arg source_digest "$SOURCE_INVENTORY_DIGEST" \
+    --arg v2 "$V2_INDEX" \
+    --arg verification_hash "$verification_hash" \
+    '{
+      kind: $kind,
+      created_at: $created_at,
+      nonce: $nonce,
+      confirmation_token: $token,
+      inventory_hash: $inventory_hash,
+      source_inventory_digest: $source_digest,
+      v2_index: $v2,
+      verification_evidence_sha256: $verification_hash
+    }' >"$INVENTORY_EVIDENCE_FILE"
+}
+
+validate_inventory_evidence() {
+  local now created_at age expected_kind expected_token verification_hash=""
+  [[ -s "$INVENTORY_EVIDENCE_FILE" ]] || die \
+    "Execute requires a persisted fresh dry-run inventory evidence file"
+  jq -e 'type == "object" and (.nonce | type == "string" and length > 0)' \
+    "$INVENTORY_EVIDENCE_FILE" >/dev/null || die \
+    "Inventory evidence is malformed"
+  created_at="$(jq -r '.created_at // 0' "$INVENTORY_EVIDENCE_FILE")"
+  now="$(date +%s)"
+  age=$((now - created_at))
+  [[ "$age" -ge 0 && "$age" -le "$MAX_INVENTORY_EVIDENCE_AGE_SECONDS" ]] || die \
+    "Inventory evidence is stale or timestamped in the future"
+  expected_kind="$1"
+  expected_token="$2"
+  [[ "$expected_kind" != finalize ]] || verification_hash="$(sha256_file "$VERIFICATION_FILE")"
+  jq -e \
+    --arg kind "$expected_kind" \
+    --arg token "$expected_token" \
+    --arg digest "$SOURCE_INVENTORY_DIGEST" \
+    --arg inventory_hash "$(sha256_text "$(token_inventory_text)")" \
+    --arg v2 "$V2_INDEX" \
+    --arg verification_hash "$verification_hash" \
+    '
+      .kind == $kind and
+      .confirmation_token == $token and
+      .source_inventory_digest == $digest and
+      .inventory_hash == $inventory_hash and
+      .v2_index == $v2 and
+      (if $kind == "finalize"
+       then .verification_evidence_sha256 == $verification_hash
+       else .verification_evidence_sha256 == ""
+       end)
+    ' "$INVENTORY_EVIDENCE_FILE" >/dev/null || die \
+    "Inventory evidence does not match the current environment or token"
 }
 
 print_inventory() {
@@ -230,17 +344,32 @@ print_inventory() {
   else
     token="$(inventory_token)"
   fi
+  write_inventory_evidence "$token" "$([[ "$MODE" == finalize ]] && echo finalize || echo reset)"
   echo "confirmation_token=$token"
   echo "No Azure data was changed."
 }
 
 container_exists() {
-  "${AZ_CMD[@]}" cosmosdb sql container show \
+  local error_file status
+  error_file="$(mktemp)"
+  if "${AZ_CMD[@]}" cosmosdb sql container show \
     --account-name "$COSMOS_ACCOUNT" \
     --resource-group "$RG" \
     --database-name "$COSMOS_DATABASE" \
     --name "$1" \
-    --output none >/dev/null 2>&1
+    --output none >/dev/null 2>"$error_file"; then
+    rm -f "$error_file"
+    return 0
+  else
+    status="$?"
+  fi
+  if grep -Eiq '(^|[^0-9])404([^0-9]|$)|not.?found|resourcenotfound' "$error_file"; then
+    rm -f "$error_file"
+    return 1
+  fi
+  cat "$error_file" >&2
+  rm -f "$error_file"
+  die "Cosmos container existence check failed for $1 (status $status)"
 }
 
 assert_container_partition() {
@@ -386,44 +515,62 @@ reset_derived_data() {
   purge_prefix "directives/"
   purge_prefix "source-state/"
   purge_prefix "quarantine/"
+  delete_v2_index
   echo "==> Reset complete; v1 Search remains and v2 bootstrap is owned by the ingestion deployment"
 }
 
 verification_file_is_fresh() {
-  local mtime now age
+  local mtime now age calculated_digest record_without_digest
   [[ -f "$VERIFICATION_FILE" ]] || die \
     "A safe output file from the successful v2 verify execution is required"
   [[ -s "$VERIFICATION_FILE" ]] || die "Verification evidence file is empty"
   [[ "$(wc -c <"$VERIFICATION_FILE")" -le 65536 ]] || die \
     "Verification evidence file is unexpectedly large"
-  if grep -Eiq '"(content|markdown|prompt|document_text|administrative_content)"[[:space:]]*:' "$VERIFICATION_FILE"; then
+  if grep -Eiq '"(content|markdown|prompt|document_text|administrative_content|raw_response)"[[:space:]]*:' "$VERIFICATION_FILE"; then
     die "Verification evidence contains a raw content field; use sanitized verify output"
   fi
-  grep -Fq 'directive-chunks-v1' "$VERIFICATION_FILE" && die \
-    "Verification evidence references the retired v1 Search index"
   jq -s -e \
     --arg subscription "$SUBSCRIPTION_ID" \
     --arg resource_group "$RG" \
     --arg job "$JOB_NAME" \
-    --arg search_index "$V2_INDEX" \
+    --arg search_index "directive-chunks-v2" \
     '
       length == 1 and
       (.[0] | type == "object") and
-      .[0].status == "succeeded" and
+      .[0].verify_record.success == true and
       .[0].environment.subscription_id == $subscription and
       .[0].environment.resource_group == $resource_group and
       .[0].environment.job_name == $job and
       .[0].search_index == $search_index and
       .[0].processing_version == "directive-v2-czech-layout" and
-      (.[0].execution_name | type == "string" and length > 0) and
-      (.[0].cross_store | type == "object") and
-      ([.[0].cross_store.source_versions, .[0].cross_store.directive_ids,
-        .[0].cross_store.current_versions, .[0].cross_store.published_chunks,
-        .[0].cross_store.published_directives, .[0].cross_store.published_versions,
-        .[0].cross_store.mandate_assignment_count] |
-        all(type == "number"))
+      (.[0].processing_hash | test("^[0-9a-f]{64}$")) and
+      (.[0].image_digest | test("^sha256:[0-9a-f]{64}$")) and
+      (.[0].source_inventory_digest | test("^[0-9a-f]{64}$")) and
+      (.[0].validation_execution_id | type == "string" and length > 0) and
+      (.[0].validation_record_digest | test("^[0-9a-f]{64}$")) and
+      (.[0].verification_execution_id | type == "string" and length > 0) and
+      (.[0].verification_record_digest | test("^[0-9a-f]{64}$")) and
+      (.[0].verify_record.verify_execution_id | type == "string" and length > 0) and
+      (.[0].verify_record.source_versions | type == "number") and
+      (.[0].verify_record.directive_ids | type == "number") and
+      (.[0].verify_record.current_versions | type == "number") and
+      (.[0].verify_record.accepted_relations | type == "number") and
+      (.[0].verify_record.required_artifacts | type == "number") and
+      (.[0].verify_record.content_sections | type == "number") and
+      (.[0].verify_record.content_parts | type == "number") and
+      (.[0].verify_record.split_sections | type == "number") and
+      (.[0].verify_record.published_chunks | type == "number") and
+      (.[0].verify_record.published_directives | type == "number") and
+      (.[0].verify_record.published_versions | type == "number") and
+      (.[0].verify_record.current_directives | type == "number") and
+      (.[0].verify_record.current_versions | type == "number") and
+      (.[0].verify_record.mandate_assignment_count | type == "number")
     ' "$VERIFICATION_FILE" >/dev/null || die \
-      "Verification evidence is not one complete successful v2 cross-store record"
+      "Verification evidence is not one complete successful pinned v2 verify record"
+  record_without_digest="$(jq -S -c 'del(.verification_record_digest)' "$VERIFICATION_FILE")"
+  calculated_digest="$(sha256_text "$record_without_digest")"
+  [[ "$calculated_digest" == "$(jq -r '.verification_record_digest' "$VERIFICATION_FILE")" ]] || die \
+    "Verification evidence digest does not match its complete record"
   mtime="$(stat -f %m "$VERIFICATION_FILE" 2>/dev/null || stat -c %Y "$VERIFICATION_FILE")"
   now="$(date +%s)"
   age=$((now - mtime))
@@ -432,21 +579,106 @@ verification_file_is_fresh() {
 }
 
 search_index_exists() {
-  "${AZ_CMD[@]}" rest \
+  local error_file status
+  error_file="$(mktemp)"
+  if "${AZ_CMD[@]}" rest \
     --method get \
     --url "https://${SEARCH_NAME}.search.windows.net/indexes/$1?api-version=2026-04-01" \
     --resource "https://search.azure.com" \
-    --output none >/dev/null 2>&1
+    --output none >/dev/null 2>"$error_file"; then
+    rm -f "$error_file"
+    return 0
+  else
+    status="$?"
+  fi
+  if grep -Eiq '(^|[^0-9])404([^0-9]|$)|not.?found|resourcenotfound' "$error_file"; then
+    rm -f "$error_file"
+    return 1
+  fi
+  cat "$error_file" >&2
+  rm -f "$error_file"
+  die "Search index existence check failed for $1 (status $status)"
+}
+
+delete_v2_index() {
+  [[ "$V2_INDEX" == directive-chunks-v2 ]] || die \
+    "Refusing to delete a non-v2 Search index"
+  if search_index_exists "$V2_INDEX"; then
+    echo "==> Deleting derived Search v2 index $V2_INDEX"
+    "${AZ_CMD[@]}" rest \
+      --method delete \
+      --url "https://${SEARCH_NAME}.search.windows.net/indexes/$V2_INDEX?api-version=2026-04-01" \
+      --resource "https://search.azure.com" \
+      --output none
+    search_index_exists "$V2_INDEX" && die \
+      "Partial cleanup: Search v2 index still exists after delete"
+  fi
 }
 
 finalize_v1() {
   validate_index_names
   verification_file_is_fresh
+  enter_maintenance_mode
+  wait_for_active_executions_to_drain
   load_inventory
+  local evidence_image evidence_source evidence_validation_digest evidence_processing_hash
+  local validation_execution verification_execution
+  evidence_image="$(jq -r '.image_digest' "$VERIFICATION_FILE")"
+  evidence_source="$(jq -r '.source_inventory_digest' "$VERIFICATION_FILE")"
+  evidence_validation_digest="$(jq -r '.validation_record_digest' "$VERIFICATION_FILE")"
+  evidence_processing_hash="$(jq -r '.processing_hash' "$VERIFICATION_FILE")"
+  validation_execution="$(jq -r '.validation_execution_id' "$VERIFICATION_FILE")"
+  verification_execution="$(jq -r '.verification_execution_id' "$VERIFICATION_FILE")"
+  [[ "$SOURCE_INVENTORY_DIGEST" == "$evidence_source" ]] || die \
+    "Source inventory changed since v2 verification"
+  [[ "$evidence_processing_hash" =~ ^[0-9a-f]{64}$ ]] || die \
+    "Verification evidence processing hash is invalid"
+  [[ "$(jq -r '.verify_record.processing_hash' "$VERIFICATION_FILE")" == "$evidence_processing_hash" ]] || die \
+    "Verification evidence processing hash does not match the verify record"
+  [[ -n "$evidence_validation_digest" ]] || die \
+    "Verification evidence is missing the validation record digest"
   search_index_exists "$V2_INDEX" || die \
     "v2 Search index does not exist; refuse to finalize"
   search_index_exists "$V1_INDEX" || die \
     "v1 Search index is already absent; refuse stale or repeated finalize"
+  local live_image validation_status verification_status live_chunk_count expected_chunk_count
+  live_image="$(
+    "${AZ_CMD[@]}" containerapp job show \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --query "properties.template.containers[?name=='directive-ingestion'].image | [0]" \
+      --output tsv
+  )"
+  [[ "$live_image" == *"@$evidence_image" ]] || die \
+    "Live job image does not match the pinned verification image"
+  validation_status="$(
+    "${AZ_CMD[@]}" containerapp job execution show \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --job-execution-name "$validation_execution" \
+      --query properties.status \
+      --output tsv
+  )"
+  verification_status="$(
+    "${AZ_CMD[@]}" containerapp job execution show \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --job-execution-name "$verification_execution" \
+      --query properties.status \
+      --output tsv
+  )"
+  [[ "$validation_status" == Succeeded && "$verification_status" == Succeeded ]] || die \
+    "Validation or verification execution is not currently successful"
+  live_chunk_count="$(
+    "${AZ_CMD[@]}" rest \
+      --method get \
+      --url "https://${SEARCH_NAME}.search.windows.net/indexes/$V2_INDEX/docs/\$count?api-version=2026-04-01" \
+      --resource "https://search.azure.com" \
+      --output tsv
+  )"
+  expected_chunk_count="$(jq -r '.verify_record.published_chunks' "$VERIFICATION_FILE")"
+  [[ "$live_chunk_count" == "$expected_chunk_count" ]] || die \
+    "Live v2 Search count does not match the pinned verification record"
   [[ "$CONFIRMATION_TOKEN" == "$(finalize_token)" ]] || die \
     "Finalize token is wrong or stale; run a fresh finalize dry-run"
   [[ "$CONFIRMATION_TOKEN" == DIRECTIVE-FINALIZE-V2-* ]] || die \
@@ -473,6 +705,8 @@ validate_index_names() {
     "Search v1 and v2 index names must be different"
   [[ "$V1_INDEX" != *[^a-z0-9-]* && "$V2_INDEX" != *[^a-z0-9-]* ]] || die \
     "Search index names must contain only lowercase letters, digits, and hyphens"
+  [[ "$V1_INDEX" == directive-chunks-v1 ]] || die \
+    "Finalize is only permitted for directive-chunks-v1"
   [[ "$V2_INDEX" == directive-chunks-v2 ]] || die \
     "Finalize is only permitted for directive-chunks-v2"
 }
@@ -486,16 +720,18 @@ case "$MODE" in
     print_inventory
     ;;
   reset)
-    [[ -n "$CONFIRMATION_TOKEN" ]] || die \
-      "Reset is destructive; provide --execute --confirm TOKEN from a fresh dry-run"
+    [[ "$EXECUTE_FLAG" == true && -n "$CONFIRMATION_TOKEN" ]] || die \
+      "Reset requires explicit --execute, --inventory-evidence FILE, and --confirm TOKEN"
+    validate_inventory_evidence reset "$CONFIRMATION_TOKEN"
     reset_derived_data
     ;;
   finalize)
     [[ -n "$VERIFICATION_FILE" ]] || die \
       "Finalize requires --verification-file from a successful v2 verify execution"
-    if [[ -z "$CONFIRMATION_TOKEN" ]]; then
+    if [[ "$EXECUTE_FLAG" != true || -z "$CONFIRMATION_TOKEN" ]]; then
       print_inventory
     else
+      validate_inventory_evidence finalize "$CONFIRMATION_TOKEN"
       finalize_v1
     fi
     ;;
