@@ -7,12 +7,12 @@ name: directive-rag-maf-hosted
 services:
     ai-project:
         host: azure.ai.project
-        endpoint: https://agmem5df652aif2.services.ai.azure.com/api/projects/agmem-agents
+        endpoint: ${FOUNDRY_PROJECT_ENDPOINT}
     directive-rag-maf-hosted:
         project: src/directive-rag-maf
         host: azure.ai.agent
         language: docker
-        image: agmem5df652acr.azurecr.io/directive-rag-maf-hosted:directive-stateful-20260724-r1
+        image: ${DIRECTIVE_HOSTED_AGENT_IMAGE}
         docker:
             path: Dockerfile
             context: ../../../..

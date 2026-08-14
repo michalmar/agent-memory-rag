@@ -64,7 +64,7 @@ resource "azurerm_cognitive_deployment" "foundry_agents_chat" {
   }
 
   sku {
-    name     = "GlobalStandard"
+    name     = var.chat_model_sku
     capacity = var.chat_model_capacity
   }
 }
@@ -80,7 +80,7 @@ resource "azurerm_cognitive_deployment" "foundry_agents_embedding" {
   }
 
   sku {
-    name     = "Standard"
+    name     = var.embedding_model_sku
     capacity = var.embedding_model_capacity
   }
 

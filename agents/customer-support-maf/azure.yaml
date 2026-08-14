@@ -7,12 +7,12 @@ name: customer-support-maf-hosted
 services:
     ai-project:
         host: azure.ai.project
-        endpoint: https://agmem5df652aif2.services.ai.azure.com/api/projects/agmem-agents
+        endpoint: ${FOUNDRY_PROJECT_ENDPOINT}
     customer-support-maf-hosted:
         project: src/customer-support-maf
         host: azure.ai.agent
         language: docker
-        image: agmem5df652acr.azurecr.io/customer-support-maf-hosted:support-consolidation-20260724100108-r2
+        image: ${HOSTED_AGENT_IMAGE}
         docker:
             path: Dockerfile
             context: ../../../..

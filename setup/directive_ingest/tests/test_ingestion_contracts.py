@@ -33,6 +33,7 @@ from directive_contracts import (
 
 ROOT = Path(__file__).parents[3]
 FIXTURES = ROOT / "setup" / "directives"
+MANDATE_FIXTURE = Path(__file__).parent / "fixtures" / "mand.csv"
 PROCESSING_HASH = hashlib.sha256(b"test-processing").hexdigest()
 TENANT_ID = "a7b1484c-f66a-496a-b1cf-35631a50396c"
 
@@ -348,7 +349,7 @@ def test_published_bundle_is_strict_and_below_ceiling() -> None:
 
 def test_mandate_csv_is_complete_sparse_snapshot() -> None:
     parsed = parse_mandates(
-        FIXTURES / "mandatory" / "mand.csv",
+        MANDATE_FIXTURE,
         TENANT_ID,
         {"72403881", "95315332", "36269153", "30336958"},
     )

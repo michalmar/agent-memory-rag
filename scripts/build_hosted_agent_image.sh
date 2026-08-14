@@ -93,35 +93,6 @@ ensure_image_tag_available() {
   done <<<"$tags"
 }
 
-pin_manifest_image() {
-  local manifest="$1"
-  local image_ref="$2"
-  local rendered
-  rendered="$(mktemp)"
-
-  if ! awk -v image_ref="$image_ref" '
-    /^[[:space:]]*image:[[:space:]]*/ {
-      count += 1
-      match($0, /^[[:space:]]*/)
-      print substr($0, RSTART, RLENGTH) "image: " image_ref
-      next
-    }
-    { print }
-    END {
-      if (count != 1) {
-        exit 1
-      }
-    }
-  ' "$manifest" >"$rendered"; then
-    rm -f "$rendered"
-    echo "ERROR: expected exactly one image entry in $manifest" >&2
-    return 1
-  fi
-
-  cp "$rendered" "$manifest"
-  rm -f "$rendered"
-}
-
 ACR_NAME="$(tf acr_name)"
 ACR_LOGIN="$(tf acr_login_server)"
 
@@ -173,7 +144,6 @@ az acr build \
   "$REPO_ROOT"
 
 if [[ "$CONFIGURE_AZD" == true ]]; then
-  pin_manifest_image "$AZD_PROJECT_DIR/azure.yaml" "$IMAGE_REF"
   (
     cd "$AZD_PROJECT_DIR"
     azd env set AZD_AGENT_SKIP_ACR true
@@ -182,5 +152,5 @@ if [[ "$CONFIGURE_AZD" == true ]]; then
       azd env set DIRECTIVE_AGENT_RELEASE_ID "$DIRECTIVE_RELEASE_ID"
     fi
   )
-  echo "==> Configured azd and its manifest to deploy the prebuilt ${IMAGE_REF}"
+  echo "==> Configured azd to deploy the prebuilt ${IMAGE_REF}"
 fi

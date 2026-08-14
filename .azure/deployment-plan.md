@@ -2,9 +2,97 @@
 
 > **Status:** Deployed
 >
-> **Current release status:** Deployed
+> **Current release status:** Deployed; application readiness degraded by the pre-existing Hosted Agent check
 
 Generated: 2026-07-25T20:33:12Z
+
+## Current release: portable existing-environment Terraform
+
+Approved: 2026-08-14
+
+This release makes the repository the environment-neutral development master
+while preserving the currently deployed Azure environment. Model deployment
+SKUs become explicit Terraform inputs, existing directive-model adoption uses
+Terraform state rather than source-file mutation, new snapshots no longer track
+target mandate identities, and Hosted Agent manifests resolve endpoints and
+immutable images from each azd environment. Historical commits still contain
+the former demo mapping and require a separately approved history rewrite if
+the repository's sharing boundary changes.
+
+- [x] Read current model names, versions, SKUs, and capacities from live Azure.
+- [x] Make the current environment values explicit in ignored
+      `infra/terraform.tfvars`.
+- [x] Confirm the existing directive model is already managed in Terraform
+      state, so no import is needed for this environment.
+- [x] Remove committed Azure endpoints, image tags, and mandate identities.
+- [x] Add a target-local mandate workflow with missing, sample, and empty-file
+      safety gates.
+- [x] Run Terraform formatting and syntax validation.
+- [x] Run targeted directive-ingestion tests and package validation.
+- [x] Produce and review a saved zero-destruction Terraform plan.
+- [x] Apply the exact reviewed plan.
+- [x] Verify live model configuration, RBAC, frontend service, and post-apply
+      Terraform drift.
+- [x] Diagnose the application readiness failure as the existing
+      `foundry_hosted_maf` dependency, independent of the zero-change apply.
+- [x] Commit and push the portable source changes.
+
+### Validation steps
+
+- [x] Terraform and Azure CLI installations
+- [x] Azure authentication and confirmed subscription
+- [x] Terraform initialization and state access
+- [x] Recursive Terraform format check
+- [x] Terraform syntax validation
+- [x] Saved Terraform plan preview and integrity hash
+- [x] Azure policy assignment review
+- [x] No unresolved azd Go-template variables
+- [x] Static model and RBAC configuration review
+- [x] Directive-ingestion tests and handover package verification
+
+### Validation proof
+
+Validated at `2026-08-14T12:01:00Z`.
+
+| Check | Result |
+| --- | --- |
+| Toolchain and authentication | Terraform 1.13.3, Azure CLI 2.80.0, and confirmed subscription `7bc68c68-f434-49ad-ab3e-b883ec39da86` |
+| Existing target | `rg-agent-memory-rag` and Container Apps environment `cae-agmem-5df652` are healthy in East US 2 |
+| Live model configuration | Chat `GlobalStandard`/30, embedding `Standard`/30, and directive `GlobalStandard`/250 exactly match explicit local variables |
+| Terraform | Initialization, recursive formatting, syntax validation, and 97-resource state access passed |
+| Saved plan | No changes: 0 added, 0 changed, 0 destroyed |
+| Plan integrity | SHA-256 `b104f47511adb3b7b8188b250640007130bbe2f8e5db2ea25109f67c943077b1` |
+| Azure Policy | Six effective subscription policy assignments reviewed; no conflict with the no-change apply |
+| Template variables | No unresolved `{{ .Env.* }}` expressions |
+| Tests | 21 directive-ingestion tests passed; modified shell scripts passed syntax validation |
+| Package | Sanitized handover archive built, checksum-verified, and contained only environment placeholders |
+
+**Saved plan:**
+`/Users/mimarusa/.copilot/session-state/09c77802-79f9-4826-888c-c4bd3567d363/files/portable-env-validation.tfplan`
+
+**Validated by:** `azure-validate`
+
+### Deployment proof
+
+Deployed at `2026-08-14T12:02:00Z`.
+
+| Item | Result |
+| --- | --- |
+| Terraform apply | Exact reviewed plan applied: 0 added, 0 changed, 0 destroyed |
+| Post-apply drift | No changes |
+| Live model deployments | All three deployments remain `Succeeded` with the configured versions, SKUs, and capacities |
+| Live RBAC | Backend, frontend, and ingestion identities retain ACR-scoped `AcrPull` |
+| Frontend | Latest revision `ca-agmem-frontend--0000029` is running and serves HTTP 200 |
+| Readiness | Existing backend reports HTTP 503 because `foundry_hosted_maf` fails; Search and directive retrieval checks remain successful |
+| Causality | The readiness condition predates and is unchanged by this Terraform apply, which made no Azure changes |
+
+Frontend:
+`https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io/`
+
+Resource group:
+`https://portal.azure.com/#resource/subscriptions/7bc68c68-f434-49ad-ab3e-b883ec39da86/resourceGroups/rg-agent-memory-rag/overview`
+
+**Deployed by:** `azure-deploy`
 
 ## Current release: selective GitHub application deployment
 

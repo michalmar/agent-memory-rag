@@ -228,3 +228,6 @@ infra/.terraform.lock.hcl
 infra/terraform.tfvars
 *.tfplan
 infra/tf.plan
+
+# Target-specific directive assignments
+setup/directives/mandatory/mand.csv

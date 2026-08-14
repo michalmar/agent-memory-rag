@@ -21,3 +21,7 @@ directive_agent_visible = false
 hosted_agent_principal_ids           = []
 support_hosted_agent_principal_ids   = []
 directive_hosted_agent_principal_ids = []
+
+chat_model_sku      = "GlobalStandard"
+embedding_model_sku = "Standard"
+directive_model_sku = "GlobalStandard"

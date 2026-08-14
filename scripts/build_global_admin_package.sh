@@ -76,6 +76,7 @@ exclude_tracked_path() {
 }
 
 while IFS= read -r -d '' path; do
+  [[ -f "$REPO_ROOT/$path" ]] || continue
   include_tracked_path "$path" || continue
   exclude_tracked_path "$path" && continue
   copy_file "$path"
@@ -86,11 +87,13 @@ for path in \
   scripts/global_admin_access.sh \
   scripts/archive_deployment_evidence.sh \
   scripts/validate_global_admin_inputs.sh \
-  scripts/configure_directive_model_mode.sh \
-  scripts/configure_hosted_agent_endpoint.sh \
+  scripts/import_directive_model.sh \
   scripts/register_providers.sh; do
   copy_file "$path"
 done
+copy_file \
+  setup/directives/mandatory/mand.csv.example \
+  setup/directives/mandatory/mand.csv.example
 
 copy_file \
   docs/GLOBAL-ADMIN-CROSS-TENANT-PLAN.md \
@@ -104,47 +107,6 @@ copy_file \
 copy_file \
   docs/global-admin-package/global-admin-inputs.env.example \
   global-admin-inputs.env.example
-
-sanitize_manifest() {
-  local manifest="$1"
-  local image_name="$2"
-  local rendered
-  rendered="$(mktemp)"
-  if ! awk \
-    -v endpoint="https://replace-after-terraform.invalid/api/projects/replace-after-terraform" \
-    -v image="replace-after-build.invalid/${image_name}:replace-before-azd-deploy" '
-      /^[[:space:]]*endpoint:[[:space:]]*/ {
-        endpoint_count += 1
-        match($0, /^[[:space:]]*/)
-        print substr($0, RSTART, RLENGTH) "endpoint: " endpoint
-        next
-      }
-      /^[[:space:]]*image:[[:space:]]*/ {
-        image_count += 1
-        match($0, /^[[:space:]]*/)
-        print substr($0, RSTART, RLENGTH) "image: " image
-        next
-      }
-      { print }
-      END {
-        if (endpoint_count != 1 || image_count != 1) {
-          exit 1
-        }
-      }
-    ' "$manifest" >"$rendered"; then
-    rm -f "$rendered"
-    echo "ERROR: could not sanitize ${manifest#"$stage"/}" >&2
-    exit 1
-  fi
-  mv "$rendered" "$manifest"
-}
-
-sanitize_manifest \
-  "$stage/agents/customer-support-maf/azure.yaml" \
-  customer-support-maf-hosted
-sanitize_manifest \
-  "$stage/agents/directive-rag-maf/azure.yaml" \
-  directive-rag-maf-hosted
 
 chmod +x "$stage"/scripts/*.sh
 
@@ -169,12 +131,6 @@ if [[ -f "$REPO_ROOT/infra/terraform.tfvars" ]]; then
     "$REPO_ROOT/infra/terraform.tfvars" |
     sort -u >>"$blocklist" || true
 fi
-for manifest in \
-  "$REPO_ROOT/agents/customer-support-maf/azure.yaml" \
-  "$REPO_ROOT/agents/directive-rag-maf/azure.yaml"; do
-  awk '/^[[:space:]]*(endpoint|image):[[:space:]]*/ { print $2 }' \
-    "$manifest" >>"$blocklist"
-done
 sort -u "$blocklist" -o "$blocklist"
 
 while IFS= read -r value; do

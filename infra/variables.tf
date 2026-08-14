@@ -70,6 +70,17 @@ variable "chat_model_version" {
   default = "2024-07-18"
 }
 
+variable "chat_model_sku" {
+  type        = string
+  default     = "GlobalStandard"
+  description = "Azure OpenAI deployment SKU for the shared chat model."
+
+  validation {
+    condition     = trimspace(var.chat_model_sku) != ""
+    error_message = "chat_model_sku must not be empty."
+  }
+}
+
 variable "chat_model_capacity" {
   type        = number
   default     = 30
@@ -84,6 +95,17 @@ variable "embedding_model_name" {
 variable "embedding_model_version" {
   type    = string
   default = "1"
+}
+
+variable "embedding_model_sku" {
+  type        = string
+  default     = "Standard"
+  description = "Azure OpenAI deployment SKU for the embedding model."
+
+  validation {
+    condition     = trimspace(var.embedding_model_sku) != ""
+    error_message = "embedding_model_sku must not be empty."
+  }
 }
 
 variable "embedding_model_capacity" {
@@ -178,19 +200,30 @@ variable "foundry_application_tools_connection_name" {
 variable "directive_model_name" {
   type        = string
   default     = "gpt-5.6-sol"
-  description = "Existing GPT deployment adopted for the directive Hosted Agent."
+  description = "GPT deployment used by the directive Hosted Agent."
 }
 
 variable "directive_model_version" {
   type        = string
   default     = "2026-07-09"
-  description = "Exact model version of the existing directive deployment."
+  description = "Exact model version of the directive deployment."
+}
+
+variable "directive_model_sku" {
+  type        = string
+  default     = "GlobalStandard"
+  description = "Azure OpenAI deployment SKU for the directive model."
+
+  validation {
+    condition     = trimspace(var.directive_model_sku) != ""
+    error_message = "directive_model_sku must not be empty."
+  }
 }
 
 variable "directive_model_capacity" {
   type        = number
   default     = 250
-  description = "Existing Global Standard capacity, in thousands of tokens per minute."
+  description = "Directive model capacity, in thousands of tokens per minute."
 
   validation {
     condition     = var.directive_model_capacity > 0

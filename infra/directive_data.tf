@@ -21,8 +21,8 @@ locals {
   )
 }
 
-# This deployment already exists and was validated in Phase 0. The import block
-# adopts it without creating a duplicate or changing the support model.
+# Fresh environments create this deployment. Existing environments must import
+# the exact deployment into Terraform state before planning.
 resource "azurerm_cognitive_deployment" "directive" {
   name                 = var.directive_model_name
   cognitive_account_id = azapi_resource.foundry_agents.id
@@ -34,7 +34,7 @@ resource "azurerm_cognitive_deployment" "directive" {
   }
 
   sku {
-    name     = "GlobalStandard"
+    name     = var.directive_model_sku
     capacity = var.directive_model_capacity
   }
 
@@ -43,11 +43,6 @@ resource "azurerm_cognitive_deployment" "directive" {
   lifecycle {
     prevent_destroy = true
   }
-}
-
-import {
-  to = azurerm_cognitive_deployment.directive
-  id = "/subscriptions/${var.subscription_id}/resourceGroups/${var.resource_group_name}/providers/Microsoft.CognitiveServices/accounts/${local.names.foundry_agents}/deployments/${var.directive_model_name}"
 }
 
 resource "azurerm_storage_account" "directive_artifacts" {

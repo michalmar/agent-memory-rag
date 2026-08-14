@@ -115,6 +115,7 @@ The file contains no password, token, client secret, or Terraform state.
 | `TAG_ENVIRONMENT`, `TAG_OWNER` | Required target tags |
 | `VNET_ADDRESS_SPACE` | Non-overlapping CIDR; default design is `10.42.0.0/16` |
 | `DIRECTIVE_MODEL_MODE` | `fresh` for a new model deployment or `adopt` for the exact existing target deployment |
+| `DIRECTIVE_MODEL_IMPORT_ID` | Full existing deployment ARM resource ID in `adopt` mode; empty in `fresh` mode |
 | Model names, versions, capacities | Approved combinations and quota for chat, embedding, and directive models |
 | `SEARCH_SKU` | Approved Search SKU |
 | `DIRECTIVE_STORAGE_REPLICATION_TYPE` | Approved redundancy: `LRS`, `ZRS`, `GRS`, `GZRS`, `RAGRS`, or `RAGZRS` |
@@ -392,16 +393,13 @@ model name, version, deployment type, capacity, Search region, or network CIDR.
 
 ## 9. Phase 4 - target configuration
 
-Select exactly one directive-model path:
+Select exactly one directive-model path without modifying source files:
 
-```bash
-./scripts/configure_directive_model_mode.sh "$DIRECTIVE_MODEL_MODE"
-```
-
-- `fresh` removes only the target-sensitive Terraform import block and leaves
-  the resource so Terraform creates the deployment.
-- `adopt` retains the import block and requires that exact generated target
-  resource ID to exist.
+- `fresh` leaves `DIRECTIVE_MODEL_IMPORT_ID` empty and lets Terraform create
+  the deployment.
+- `adopt` records the exact existing deployment ARM resource ID in
+  `DIRECTIVE_MODEL_IMPORT_ID`. Import it after Terraform initialization and
+  before the first plan.
 
 Create the target variables:
 
@@ -432,13 +430,16 @@ vnet_address_space = "<VNET_ADDRESS_SPACE>"
 
 chat_model_name         = "<CHAT_MODEL_NAME>"
 chat_model_version      = "<CHAT_MODEL_VERSION>"
-chat_model_capacity     = 30
+chat_model_sku          = "<CHAT_MODEL_SKU>"
+chat_model_capacity     = <CHAT_MODEL_CAPACITY>
 embedding_model_name    = "<EMBEDDING_MODEL_NAME>"
 embedding_model_version = "<EMBEDDING_MODEL_VERSION>"
-embedding_model_capacity = 30
+embedding_model_sku      = "<EMBEDDING_MODEL_SKU>"
+embedding_model_capacity = <EMBEDDING_MODEL_CAPACITY>
 directive_model_name     = "<DIRECTIVE_MODEL_NAME>"
 directive_model_version  = "<DIRECTIVE_MODEL_VERSION>"
-directive_model_capacity = 250
+directive_model_sku      = "<DIRECTIVE_MODEL_SKU>"
+directive_model_capacity = <DIRECTIVE_MODEL_CAPACITY>
 search_sku                = "<SEARCH_SKU>"
 directive_storage_replication_type = "<DIRECTIVE_STORAGE_REPLICATION_TYPE>"
 
@@ -474,6 +475,14 @@ Initialize and validate:
 terraform -chdir=infra init -reconfigure
 terraform -chdir=infra fmt -check -recursive
 terraform -chdir=infra validate
+```
+
+In `adopt` mode, import the recorded deployment before planning:
+
+```bash
+if [[ "$DIRECTIVE_MODEL_MODE" == adopt ]]; then
+  ./scripts/import_directive_model.sh "$DIRECTIVE_MODEL_IMPORT_ID"
+fi
 ```
 
 Create a saved plan and reviewable text:
@@ -606,13 +615,9 @@ DIRECTIVE_AGENT_RELEASE_ID="$(tf directive_agent_release_id)"
 PROJECT_AGENT_PRINCIPAL_ID="$(tf foundry_agents_project_principal_id)"
 ```
 
-Record `PROJECT_AGENT_PRINCIPAL_ID` in `global-admin-inputs.env`.
-
-Pin both manifests to the target endpoint:
-
-```bash
-./scripts/configure_hosted_agent_endpoint.sh "$PROJECT_ENDPOINT"
-```
+Record `PROJECT_AGENT_PRINCIPAL_ID` in `global-admin-inputs.env`. The Hosted
+Agent manifests read their project endpoint and immutable image reference from
+each azd environment; they contain no committed target endpoint or image tag.
 
 Create the support environment:
 
@@ -699,8 +704,15 @@ does not start ingestion.
 Run the managed-identity preflight, publication, and verification:
 
 ```bash
+cp setup/directives/mandatory/mand.csv.example \
+  setup/directives/mandatory/mand.csv
+# Replace every sample identity with target-tenant assignments.
 ./scripts/deploy_directive_ingestion.sh "$INGESTION_RELEASE_ID"
 ```
+
+`mand.csv` is ignored by Git and must never be included in a source snapshot.
+An empty assignment snapshot requires the explicit
+`ALLOW_EMPTY_DIRECTIVE_MANDATES=true` override.
 
 Do not enable the Directive Assistant unless this command reports successful
 publication and verification.

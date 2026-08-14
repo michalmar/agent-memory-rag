@@ -8,6 +8,22 @@ export COPILOT_HOME="${COPILOT_HOME:-$HOME/.copilot}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INFRA_DIR="$REPO_ROOT/infra"
+MANDATE_FILE="$REPO_ROOT/setup/directives/mandatory/mand.csv"
+
+if [[ ! -f "$MANDATE_FILE" ]]; then
+  echo "ERROR: target mandate file is missing: $MANDATE_FILE" >&2
+  echo "Copy mand.csv.example to mand.csv and replace every sample identity." >&2
+  exit 2
+fi
+if cmp -s "$MANDATE_FILE" "${MANDATE_FILE}.example"; then
+  echo "ERROR: target mandate file still contains the sample assignment." >&2
+  exit 2
+fi
+if [[ ! -s "$MANDATE_FILE" && "${ALLOW_EMPTY_DIRECTIVE_MANDATES:-false}" != true ]]; then
+  echo "ERROR: target mandate file is empty." >&2
+  echo "Set ALLOW_EMPTY_DIRECTIVE_MANDATES=true only to publish an intentional empty snapshot." >&2
+  exit 2
+fi
 
 tf() { terraform -chdir="$INFRA_DIR" output -raw "$1"; }
 

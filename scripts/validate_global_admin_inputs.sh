@@ -83,12 +83,15 @@ bootstrap_values=(
   VNET_ADDRESS_SPACE
   CHAT_MODEL_NAME
   CHAT_MODEL_VERSION
+  CHAT_MODEL_SKU
   CHAT_MODEL_CAPACITY
   EMBEDDING_MODEL_NAME
   EMBEDDING_MODEL_VERSION
+  EMBEDDING_MODEL_SKU
   EMBEDDING_MODEL_CAPACITY
   DIRECTIVE_MODEL_NAME
   DIRECTIVE_MODEL_VERSION
+  DIRECTIVE_MODEL_SKU
   DIRECTIVE_MODEL_CAPACITY
   SEARCH_SKU
   DIRECTIVE_STORAGE_REPLICATION_TYPE
@@ -115,6 +118,13 @@ require_boolean RETAIN_TERRAFORM_DEPLOYER_DATA_ROLES
 [[ "$(value_of DIRECTIVE_MODEL_MODE)" == fresh \
   || "$(value_of DIRECTIVE_MODEL_MODE)" == adopt ]] ||
   fail "DIRECTIVE_MODEL_MODE must be fresh or adopt"
+if [[ "$(value_of DIRECTIVE_MODEL_MODE)" == adopt ]]; then
+  require_value DIRECTIVE_MODEL_IMPORT_ID
+  [[ "$(value_of DIRECTIVE_MODEL_IMPORT_ID)" =~ ^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[^/]+/providers/Microsoft\.CognitiveServices/accounts/[^/]+/deployments/[^/]+$ ]] ||
+    fail "DIRECTIVE_MODEL_IMPORT_ID must be a directive deployment ARM resource ID"
+elif [[ -n "$(value_of DIRECTIVE_MODEL_IMPORT_ID)" ]]; then
+  fail "DIRECTIVE_MODEL_IMPORT_ID must be empty in fresh mode"
+fi
 case "$(value_of DIRECTIVE_STORAGE_REPLICATION_TYPE)" in
   LRS|ZRS|GRS|GZRS|RAGRS|RAGZRS) ;;
   *) fail "DIRECTIVE_STORAGE_REPLICATION_TYPE is unsupported" ;;

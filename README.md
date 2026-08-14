@@ -366,6 +366,27 @@ component jobs. The required GitHub OIDC secrets and repository variables are
 documented in the
 [minimal GitHub deployment plan](docs/TEMP-plan-minimal-github-cicd.md).
 
+The repository is the environment-neutral development master. Promote a
+snapshot without copying target state into source control:
+
+1. Create `infra/terraform.tfvars` from the example and record the target's
+   approved model SKUs, capacities, regions, names, and identity IDs.
+2. For a fresh target, run Terraform normally. To adopt an existing directive
+   model, run `scripts/import_directive_model.sh <resource-id>` before the first
+   plan.
+3. Configure each Hosted Agent through its azd environment. The manifests read
+   `FOUNDRY_PROJECT_ENDPOINT`, `HOSTED_AGENT_IMAGE`, and
+   `DIRECTIVE_HOSTED_AGENT_IMAGE`; they do not contain target endpoints or tags.
+4. Create the ignored `setup/directives/mandatory/mand.csv` independently in
+   every tenant.
+5. Require a reviewed Terraform plan before applying a snapshot. Application-
+   only releases should use `.github/workflows/deploy-app.yml` and must not run
+   Terraform.
+
+The ignored assignment workflow prevents identity mappings from entering new
+snapshots. Historical commits contain the former demo mapping; purging shared
+Git history is a separate, disruptive operation and is not part of deployment.
+
 For a new Microsoft Entra tenant or subscription, follow the
 [cross-tenant Azure deployment runbook](docs/CROSS-TENANT-AZURE-DEPLOYMENT.md).
 It separates Contributor work from Microsoft Entra administration and Azure
@@ -378,10 +399,13 @@ Agent changes required before deployment.
 3. Create or update the Entra app roles, assign `DirectiveSource.Manage` to
    approved operators, and deploy the backend/frontend application images.
 4. Upload the initial PDFs through the **Sources** rail.
-5. Run `scripts/deploy_directive_ingestion.sh <release>` to build the ingestion
+5. Create the ignored target assignment file from
+   `setup/directives/mandatory/mand.csv.example`; never commit or share the
+   resulting `mand.csv`.
+6. Run `scripts/deploy_directive_ingestion.sh <release>` to build the ingestion
    image, verify exact source-reader/artifact-contributor roles, run preflight,
    publish the current source corpus, and verify the resulting state.
-6. Run `scripts/release_foundry_assets.sh all` to configure Search/Foundry IQ and
+7. Run `scripts/release_foundry_assets.sh all` to configure Search/Foundry IQ and
    publish the native Prompt Agent directly.
 7. Build and deploy each selected Hosted MAF image to the Foundry project through
    its azd project; local Docker is not required.

@@ -14,6 +14,7 @@ from directive_contracts import (
 from directive_ingestion.reconcile import DirectiveIngestionRunner
 
 _SETUP_DIR = Path(__file__).parents[2]
+_MANDATE_FIXTURE = Path(__file__).parent / "fixtures" / "mand.csv"
 
 
 @pytest.mark.asyncio
@@ -108,7 +109,7 @@ async def test_preflight_rejects_wrong_embedding_dimensions() -> None:
 async def test_verify_cross_checks_published_and_retained_surfaces() -> None:
     runner = object.__new__(DirectiveIngestionRunner)
     runner.config = SimpleNamespace(
-        mandate_csv=_SETUP_DIR / "directives" / "mandatory" / "mand.csv",
+        mandate_csv=_MANDATE_FIXTURE,
         azure_tenant_id="a7b1484c-f66a-496a-b1cf-35631a50396c",
     )
     from directive_ingestion.source import discover_pdfs

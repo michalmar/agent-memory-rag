@@ -105,24 +105,27 @@ environment-specific value.
 
 ### 3.2 Decide how the directive model is created
 
-`infra/directive_data.tf` contains an unconditional import block for
-`azurerm_cognitive_deployment.directive`. It assumes the directive model
-deployment already exists in the original subscription.
+Source files are identical for both deployment modes:
 
-Choose the applicable path before planning:
+- **Fresh deployment:** run Terraform normally. It creates
+  `azurerm_cognitive_deployment.directive`.
+- **Adoption:** after creating `infra/terraform.tfvars` and running
+  `terraform -chdir=infra init`, import the exact existing deployment before
+  the first plan:
 
-- **Fresh deployment:** remove only that import block in the target deployment
-  branch and keep the `azurerm_cognitive_deployment.directive` resource so
-  Terraform creates the deployment. This is the expected path for an empty
-  target subscription.
-- **Adoption:** retain the import block only when the exact target Foundry
-  account and directive deployment already exist at the generated import ID.
+  ```bash
+  ./scripts/import_directive_model.sh \
+    "/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.CognitiveServices/accounts/<account>/deployments/<deployment>"
+  ```
+
+Never edit `directive_data.tf` to switch environments. Review the first plan
+and confirm the imported deployment has no replacement or destructive changes.
 
 The model defaults are target-sensitive:
 
-- `gpt-4o-mini`, version `2024-07-18`, capacity 30;
-- `text-embedding-3-large`, version `1`, capacity 30;
-- `gpt-5.6-sol`, version `2026-07-09`, Global Standard capacity 250.
+- `gpt-4o-mini`, version `2024-07-18`, SKU `GlobalStandard`, capacity 30;
+- `text-embedding-3-large`, version `1`, SKU `Standard`, capacity 30;
+- `gpt-5.6-sol`, version `2026-07-09`, SKU `GlobalStandard`, capacity 250.
 
 Verify model availability and quota in the target subscription and region. Do
 not silently substitute a model or version; the directive behavior must be
@@ -614,8 +617,16 @@ rail. Upload does not start ingestion.
 Run the managed-identity preflight, ingestion, and verification:
 
 ```bash
+cp setup/directives/mandatory/mand.csv.example \
+  setup/directives/mandatory/mand.csv
+# Replace every sample identity with target-tenant assignments.
 ./scripts/deploy_directive_ingestion.sh "<unique-ingestion-release>"
 ```
+
+The target `mand.csv` is ignored by Git and must not be shared between
+environments. The deployment refuses a missing or accidentally empty file.
+Set `ALLOW_EMPTY_DIRECTIVE_MANDATES=true` only when intentionally publishing a
+complete snapshot with no mandatory assignments.
 
 Do not enable the Directive Assistant until this script reports successful
 publication and verification.
