@@ -128,6 +128,13 @@ def directive_version_storage_key(
     return hashlib.sha256(value).hexdigest()
 
 
+def mandate_assignment_item_id(snapshot_id: str, directive_id: str) -> str:
+    """Build the opaque mandate-assignment item ID shared by publisher and reader."""
+    if not isinstance(snapshot_id, str) or not snapshot_id:
+        raise ValueError("Mandate snapshot ID must be a non-empty string")
+    return f"assignment:{snapshot_id}:{directive_storage_key(directive_id)}"
+
+
 def source_fingerprint(source_filename: str, source_hash: str) -> str:
     """Return the source identity hash without exposing source internals."""
     from .source_files import validate_directive_source_basename

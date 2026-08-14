@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from directive_contracts import directive_storage_key
+from directive_contracts import directive_storage_key, mandate_assignment_item_id
 
 from agent_memory_backend.directive_mandates import DirectiveMandateRepository
 
@@ -42,7 +42,7 @@ class DirectiveV2IdentityTests(unittest.IsolatedAsyncioTestCase):
             [
                 ("active-snapshot", "_control"),
                 (
-                    f"assignment:snapshot-1:{directive_storage_key(normalized_id)}",
+                    mandate_assignment_item_id("snapshot-1", normalized_id),
                     "tenant:user",
                 ),
             ],

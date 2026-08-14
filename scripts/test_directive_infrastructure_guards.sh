@@ -32,6 +32,11 @@ if grep -REq 'reset-publication-guards|reconcile-documents|publish-mandates' \
   echo "removed publication CLI was referenced by infrastructure" >&2
   exit 1
 fi
+if grep -q 'Nonempty DIRECTIVE_APPROVED_\*_DIGEST' \
+  "$SCRIPT_DIR/deploy_directive_ingestion.sh"; then
+  echo "deployment retained the obsolete caller-controlled approval gate" >&2
+  exit 1
+fi
 
 cat >"$FIXTURE" <<'EOF'
 {"name":"directive-ingestion","command":["directive-ingest"],"args":["verify"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
@@ -351,7 +356,7 @@ chmod +x "$MOCK_AZ" "$MOCK_TERRAFORM"
 MOCK_LOG="$MOCK_LOG" AZ_BIN="$MOCK_AZ" TERRAFORM_BIN="$MOCK_TERRAFORM" \
   /bin/bash -u "$RESET_SCRIPT" dry-run --inventory-evidence "$EVIDENCE" >"$INVENTORY_OUTPUT"
 if MOCK_LOG="$MOCK_LOG" AZ_BIN="$MOCK_AZ" TERRAFORM_BIN="$MOCK_TERRAFORM" \
-  /bin/bash -u "$RESET_SCRIPT" finalize >"$INVENTORY_OUTPUT" 2>/dev/null; then
+  /bin/bash -u "$RESET_SCRIPT" finalize >/dev/null 2>/dev/null; then
   echo "finalize without evidence was accepted before execution" >&2
   exit 1
 fi

@@ -1336,13 +1336,6 @@ else
 fi
 
 confirm_validation "$VALIDATION_CONFIRMATION_TOKEN"
-if [[ -z "${DIRECTIVE_APPROVED_VALIDATION_DIGEST:-}" ]] \
-  || [[ -z "${DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST:-}" ]] \
-  || [[ -z "${DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST:-}" ]]; then
-  echo "Nonempty DIRECTIVE_APPROVED_*_DIGEST values are required before directive publication" >&2
-  exit 1
-fi
-
 assert_live_v2_config
 assert_live_maintenance_mode
 assert_v2_search_schema

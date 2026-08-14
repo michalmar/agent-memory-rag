@@ -12,6 +12,7 @@ from directive_contracts import (
     build_directive_version_id,
     directive_storage_key,
     directive_version_storage_key,
+    mandate_assignment_item_id,
     normalize_directive_id,
     normalize_directive_version,
     published_directive_version_item_id,
@@ -88,6 +89,9 @@ def test_storage_keys_are_full_deterministic_lowercase_hashes() -> None:
     assert key == directive_storage_key(" Č / 12 ")
     assert all(char in "0123456789abcdef" for char in version_key)
     assert "/" not in published_directive_version_item_id("č/12", "1")
+    assignment_id = mandate_assignment_item_id("snapshot-1", "č/12")
+    assert assignment_id == f"assignment:snapshot-1:{key}"
+    assert "Č/12" not in assignment_id
 
 
 def _metadata(**overrides: object) -> DirectiveMetadata:

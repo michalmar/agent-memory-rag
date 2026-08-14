@@ -16,7 +16,7 @@ from azure.cosmos.aio import CosmosClient
 from directive_contracts import (
     MandateAssignment,
     MandateSnapshot,
-    directive_storage_key,
+    mandate_assignment_item_id,
     normalize_directive_id,
 )
 
@@ -510,9 +510,9 @@ class MandateRepository:
     def _assignment_item_id(
         snapshot_id: str, assignment: MandateAssignment
     ) -> str:
-        return (
-            f"assignment:{snapshot_id}:"
-            f"{directive_storage_key(assignment.directive_id)}"
+        return mandate_assignment_item_id(
+            snapshot_id,
+            assignment.directive_id,
         )
 
     @classmethod

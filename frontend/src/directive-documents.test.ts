@@ -94,31 +94,48 @@ describe('directive document helpers', () => {
   });
 
   it('normalizes Unicode IDs and validates numeric version ownership', () => {
-    expect(normalizeDirectiveId('  číslo  /  7 ')).toBe('číslo/7');
-    expect(normalizeDirectiveId('İSTANBUL / ß')).toBe('İSTANBUL/ß');
-    expect(normalizeDirectiveId('cafe\u0301 _ 2')).toBe('café_2');
+    expect(normalizeDirectiveId('  číslo  /  7 ')).toBe('ČÍSLO/7');
+    expect(normalizeDirectiveId('İSTANBUL / ß')).toBe('İSTANBUL/SS');
+    expect(normalizeDirectiveId('cafe\u0301 _ 2')).toBe('CAFÉ_2');
+    expect(normalizeDirectiveId('ƛ/7')).toBe('ƛ/7');
+    expect(normalizeDirectiveId('ɤ/7')).toBe('ɤ/7');
+    expect(normalizeDirectiveId('ꟓ/7')).toBe('ꟓ/7');
+    expect(normalizeDirectiveId('ꟕ/7')).toBe('ꟕ/7');
+    expect(normalizeDirectiveId('𐞑/7')).toBe('ɤ/7');
+    expect(normalizeDirectiveId('ͺ/7')).toBe('Ι/7');
     expect(normalizeDirectiveVersion('0000.0100')).toBe('0.01');
     expect(
       toDirectiveDocumentReference({
         ref_id: 'unicode',
         source_name: 'Czech directive',
         directive_id: '  číslo  /  7 ',
-        directive_version_id: 'číslo/7:v1',
+        directive_version_id: 'ČÍSLO/7:v1',
         version_label: '01.0',
       }),
     ).toEqual({
-      directiveId: 'číslo/7',
-      directiveVersionId: 'číslo/7:v1',
+      directiveId: 'ČÍSLO/7',
+      directiveVersionId: 'ČÍSLO/7:v1',
       sourceName: 'Czech directive',
       versionLabel: '01.0',
     });
-    expect(validateDirectiveVersionId('číslo/7:v1', ' číslo/7 ')).toBe(
-      'číslo/7:v1',
+    expect(validateDirectiveVersionId('ČÍSLO/7:v1', ' číslo/7 ')).toBe(
+      'ČÍSLO/7:v1',
     );
+    expect(
+      toDirectiveDocumentReference({
+        ref_id: 'python-311-unicode',
+        source_name: 'Unicode directive',
+        directive_id: 'ƛ/7',
+        directive_version_id: 'ƛ/7:v1',
+      }),
+    ).toMatchObject({
+      directiveId: 'ƛ/7',
+      directiveVersionId: 'ƛ/7:v1',
+    });
   });
 
   it('preserves distinct long decimal versions without numeric rounding', () => {
-    const directiveId = 'číslo/7';
+    const directiveId = 'ČÍSLO/7';
     const firstVersion = '1234567890123456789012345678901234';
     const secondVersion = '1234567890123456789012345678901235';
 
@@ -138,6 +155,14 @@ describe('directive document helpers', () => {
       directiveVersionId: `${directiveId}:v${firstVersion}`,
       versionLabel: firstVersion,
     });
+    expect(
+      directiveSourcePath(
+        directiveId,
+        `${directiveId}:v${secondVersion}`,
+      ),
+    ).toBe(
+      `/directives/source?directive_id=%C4%8C%C3%8DSLO%2F7&directive_version_id=%C4%8C%C3%8DSLO%2F7%3Av${secondVersion}`,
+    );
     expect(
       toDirectiveDocumentReference({
         ref_id: 'long-version-b',
@@ -285,6 +310,12 @@ describe('directive document helpers', () => {
   });
 
   it('encodes exact-version query routes and targets the cited page', () => {
+    expect(directiveDocumentPath(' číslo / 7 ', 'ČÍSLO/7:v1')).toBe(
+      '/directives/document?directive_id=%C4%8C%C3%8DSLO%2F7&directive_version_id=%C4%8C%C3%8DSLO%2F7%3Av1',
+    );
+    expect(directiveDocumentPath('ƛ/7', 'ƛ/7:v1')).toBe(
+      '/directives/document?directive_id=%C6%9B%2F7&directive_version_id=%C6%9B%2F7%3Av1',
+    );
     expect(directiveDocumentPath('ČÍSLO/7', 'ČÍSLO/7:v1')).toBe(
       '/directives/document?directive_id=%C4%8C%C3%8DSLO%2F7&directive_version_id=%C4%8C%C3%8DSLO%2F7%3Av1',
     );

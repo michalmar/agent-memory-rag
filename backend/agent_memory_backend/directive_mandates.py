@@ -6,7 +6,10 @@ import logging
 from typing import Any
 
 from azure.cosmos import exceptions
-from directive_contracts import directive_storage_key, normalize_directive_id
+from directive_contracts import (
+    mandate_assignment_item_id,
+    normalize_directive_id,
+)
 
 from .config import get_settings
 from .cosmos_container import CosmosContainerLifecycle
@@ -89,10 +92,7 @@ class DirectiveMandateRepository(CosmosContainerLifecycle):
         for directive_id in ordered_ids:
             try:
                 assignment = await container.read_item(
-                    item=(
-                        f"assignment:{snapshot_id}:"
-                        f"{directive_storage_key(directive_id)}"
-                    ),
+                    item=mandate_assignment_item_id(snapshot_id, directive_id),
                     partition_key=user_id,
                 )
             except exceptions.CosmosResourceNotFoundError:
