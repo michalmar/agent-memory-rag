@@ -35,6 +35,7 @@ MAINTENANCE_TOUCHED=false
 APPROVED_VALIDATION_DIGEST=""
 APPROVED_ENVIRONMENT_DIGEST=""
 APPROVED_SOURCE_INVENTORY_DIGEST=""
+RECOVERED_EXECUTION_NAME=""
 
 read -r -a AZ_CMD <<<"$AZ_BIN"
 read -r -a TERRAFORM_CMD <<<"$TERRAFORM_BIN"
@@ -313,7 +314,10 @@ artifact_prefix=directives/
 artifact_prefix=source-state/
 artifact_prefix=quarantine/ (obsolete quarantine)
 artifact_prefix=publication-approval/
+artifact_prefix=publication-approval-provenance/
 artifact_prefix=publication-commit/
+artifact_prefix=publication-lock/
+artifact_prefix=publication-claims/
 cosmos_account=$COSMOS_ACCOUNT
 cosmos_database=$COSMOS_DATABASE
 cosmos_container=$CATALOG_CONTAINER partition_key=/directive_id
@@ -720,7 +724,10 @@ reset_derived_data() {
   purge_prefix "source-state/"
   purge_prefix "quarantine/"
   purge_prefix "publication-approval/"
+  purge_prefix "publication-approval-provenance/"
   purge_prefix "publication-commit/"
+  purge_prefix "publication-lock/"
+  purge_prefix "publication-claims/"
   delete_v2_index
   rm -f "$INVENTORY_EVIDENCE_FILE"
   echo "==> Reset complete; v1 Search remains and v2 bootstrap is owned by the ingestion deployment"
@@ -850,9 +857,40 @@ set_verify_approval_overrides() {
     "Fresh verify approval source inventory digest is stale"
 }
 
+recover_fresh_verify_execution() {
+  local execution_snapshot="$1"
+  local live_image="$2"
+  local current_executions candidates_file recovery_status=0 candidate
+  RECOVERED_EXECUTION_NAME=""
+  current_executions="$(
+    "${AZ_CMD[@]}" containerapp job execution list \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --output json
+  )"
+  candidates_file="$(mktemp)"
+  if directive_select_new_approved_execution_names \
+      "$execution_snapshot" "$current_executions" verify "$live_image" \
+      "$APPROVED_ENVIRONMENT_DIGEST" "$APPROVED_SOURCE_INVENTORY_DIGEST" \
+      "$APPROVED_VALIDATION_DIGEST" directive-v2-czech-layout "$V2_INDEX" \
+      >"$candidates_file"; then
+    recovery_status=0
+  else
+    recovery_status=$?
+  fi
+  mapfile -t recovery_candidates <"$candidates_file"
+  rm -f "$candidates_file"
+  for candidate in "${recovery_candidates[@]}"; do
+    [[ -n "$candidate" ]] || continue
+    STARTED_EXECUTIONS+=("$candidate")
+  done
+  [[ "$recovery_status" -eq 0 && "${#recovery_candidates[@]}" -eq 1 ]] || return 1
+  RECOVERED_EXECUTION_NAME="${recovery_candidates[0]}"
+}
+
 start_fresh_verify() {
   local execution_name status log_file live_image execution_image record_digest started_at
-  local execution_name_file
+  local execution_name_file execution_snapshot
   set_verify_approval_overrides
   enter_maintenance_mode
   wait_for_active_executions_to_drain
@@ -864,8 +902,15 @@ start_fresh_verify() {
       --output tsv
   )"
   [[ "$live_image" == *@sha256:* ]] || die "Fresh verify requires an immutable live job image"
+  execution_snapshot="$(
+    "${AZ_CMD[@]}" containerapp job execution list \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --output json
+  )"
   execution_name_file="$(mktemp)"
-  "${AZ_CMD[@]}" containerapp job start \
+  local dispatch_status=0
+  if "${AZ_CMD[@]}" containerapp job start \
       --name "$JOB_NAME" \
       --resource-group "$RG" \
       --command directive-ingest \
@@ -875,14 +920,22 @@ start_fresh_verify() {
       "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST=$APPROVED_ENVIRONMENT_DIGEST" \
       "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST=$APPROVED_SOURCE_INVENTORY_DIGEST" \
       --query name \
-      --output tsv >"$execution_name_file" || {
-    rm -f "$execution_name_file"
-    die "Fresh verify dispatch failed"
-  }
+      --output tsv >"$execution_name_file"; then
+    dispatch_status=0
+  else
+    dispatch_status=$?
+  fi
   execution_name="$(<"$execution_name_file")"
   rm -f "$execution_name_file"
+  if [[ "$dispatch_status" -ne 0 || -z "$execution_name" ]]; then
+    recover_fresh_verify_execution "$execution_snapshot" "$live_image" || die \
+      "Fresh verify dispatch response was ambiguous or unrecoverable"
+    execution_name="$RECOVERED_EXECUTION_NAME"
+  fi
   [[ -n "$execution_name" ]] || die "Fresh verify did not return an execution name"
-  STARTED_EXECUTIONS+=("$execution_name")
+  if [[ ! " ${STARTED_EXECUTIONS[*]} " == *" $execution_name "* ]]; then
+    STARTED_EXECUTIONS+=("$execution_name")
+  fi
   started_at="$(
     "${AZ_CMD[@]}" containerapp job execution show \
       --name "$JOB_NAME" \

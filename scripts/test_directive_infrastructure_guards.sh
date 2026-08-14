@@ -13,6 +13,7 @@ MOCK_AZ="$(mktemp)"
 MOCK_TERRAFORM="$(mktemp)"
 MOCK_LOG="$(mktemp)"
 EVIDENCE="$(mktemp)"
+INVENTORY_OUTPUT="$(mktemp)"
 ENVIRONMENT="$(mktemp)"
 VALIDATE_RECORD="$(mktemp)"
 VERIFY_RECORD="$(mktemp)"
@@ -20,13 +21,17 @@ NORMALIZED_RECORD="$(mktemp)"
 BAD_RECORD="$(mktemp)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/directive_infrastructure_guards.sh"
-trap 'rm -f "$FIXTURE" "$FIXTURE.verify" "$PLAN" "$BAD_PLAN" "$RAW_LOG" "$RECORD" "$OVERSIZE_LOG" "$MOCK_AZ" "$MOCK_TERRAFORM" "$MOCK_LOG" "$EVIDENCE" "$ENVIRONMENT" "$VALIDATE_RECORD" "$VERIFY_RECORD" "$NORMALIZED_RECORD" "$BAD_RECORD"' EXIT
+trap 'rm -f "$FIXTURE" "$FIXTURE.verify" "$PLAN" "$BAD_PLAN" "$RAW_LOG" "$RECORD" "$OVERSIZE_LOG" "$MOCK_AZ" "$MOCK_TERRAFORM" "$MOCK_LOG" "$EVIDENCE" "$INVENTORY_OUTPUT" "$ENVIRONMENT" "$VALIDATE_RECORD" "$VERIFY_RECORD" "$NORMALIZED_RECORD" "$BAD_RECORD"' EXIT
 
 cat >"$FIXTURE" <<'EOF'
 {"name":"directive-ingestion","command":["directive-ingest"],"args":["verify"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 EOF
 
 directive_assert_execution_mode_json "$(<"$FIXTURE")" verify
+cat >"$FIXTURE" <<'EOF'
+{"name":"directive-ingestion","command":["directive-ingest"],"args":["validate"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+EOF
+directive_assert_unapproved_execution_json "$(<"$FIXTURE")" validate
 
 cat >"$FIXTURE" <<'EOF'
 {"name":"directive-ingestion","command":["directive-ingest"],"args":["run-daily"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","env":[{"name":"DIRECTIVE_PROCESSING_VERSION","value":"directive-v2-czech-layout"},{"name":"DIRECTIVE_SEARCH_INDEX","value":"directive-chunks-v2"},{"name":"DIRECTIVE_APPROVED_VALIDATION_DIGEST","value":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},{"name":"DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST","value":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST","value":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}]}
@@ -39,6 +44,28 @@ directive_assert_approved_execution_json \
   ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
   dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
   directive-v2-czech-layout directive-chunks-v2
+BEFORE_EXECUTIONS='[{"name":"old-run"}]'
+NEW_EXECUTION='[{"name":"old-run"},{"name":"new-run","properties":{"template":{"containers":[{"name":"directive-ingestion","command":["directive-ingest"],"args":["run-daily"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","env":[{"name":"DIRECTIVE_PROCESSING_VERSION","value":"directive-v2-czech-layout"},{"name":"DIRECTIVE_SEARCH_INDEX","value":"directive-chunks-v2"},{"name":"DIRECTIVE_APPROVED_VALIDATION_DIGEST","value":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},{"name":"DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST","value":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST","value":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}]}]}}}]'
+ [[ "$(directive_select_new_approved_execution_names \
+  "$BEFORE_EXECUTIONS" "$NEW_EXECUTION" run-daily \
+  registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
+  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  directive-v2-czech-layout directive-chunks-v2)" == new-run ]]
+ AMBIGUOUS_EXECUTION="$(jq -c '. + [.[1] | .name = "new-run-2"]' <<<"$NEW_EXECUTION")"
+ if directive_select_new_approved_execution_names \
+  "$BEFORE_EXECUTIONS" \
+  "$AMBIGUOUS_EXECUTION" \
+  run-daily \
+  registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
+  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  directive-v2-czech-layout directive-chunks-v2 >/dev/null; then
+  echo "ambiguous new execution recovery was accepted" >&2
+  exit 1
+ fi
 sed 's/"run-daily"/"verify"/' "$FIXTURE" >"$FIXTURE.verify"
 directive_assert_approved_execution_json \
   "$(<"$FIXTURE.verify")" \
@@ -48,6 +75,14 @@ directive_assert_approved_execution_json \
   ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
   dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
   directive-v2-czech-layout directive-chunks-v2
+cat >"$FIXTURE" <<'EOF'
+{"record_schema":"directive.approval.v2","validation_digest":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","environment_digest":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","source_inventory_digest":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","processing_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mandate_checksum":"2222222222222222222222222222222222222222222222222222222222222222"}
+EOF
+jq -e 'keys == ["environment_digest","mandate_checksum","processing_hash","record_schema","source_inventory_digest","validation_digest"]' "$FIXTURE" >/dev/null
+if jq -e '.wrapper' "$FIXTURE" >/dev/null 2>&1; then
+  echo "approval producer marker contains wrapper provenance" >&2
+  exit 1
+fi
 
 printf '%s\n' 'INFO prefix' '{"success":true,"environment":{},"cross_store":{"content":{"count":1}}}' >"$RAW_LOG"
 directive_extract_producer_record "$RAW_LOG" "$RECORD"
@@ -294,7 +329,9 @@ EOF
 chmod +x "$MOCK_AZ" "$MOCK_TERRAFORM"
 
 MOCK_LOG="$MOCK_LOG" AZ_BIN="$MOCK_AZ" TERRAFORM_BIN="$MOCK_TERRAFORM" \
-  bash "$RESET_SCRIPT" dry-run --inventory-evidence "$EVIDENCE" >/dev/null
+  bash "$RESET_SCRIPT" dry-run --inventory-evidence "$EVIDENCE" >"$INVENTORY_OUTPUT"
+grep -q '^artifact_prefix=publication-lock/$' "$INVENTORY_OUTPUT"
+grep -q '^artifact_prefix=publication-claims/$' "$INVENTORY_OUTPUT"
 if grep -Eq 'containerapp job update|containerapp job stop|cosmosdb sql container delete|terraform.*(plan|apply)' "$MOCK_LOG"; then
   echo "dry-run issued a mutating Azure or Terraform command" >&2
   exit 1

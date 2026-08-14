@@ -102,6 +102,91 @@ if any(env.get(key) != value for key, value in expected.items()):
 PY
 }
 
+directive_assert_unapproved_execution_json() {
+  local container_json="$1"
+  local expected_argument="$2"
+  python3 - "$expected_argument" "$container_json" <<'PY'
+import json
+import sys
+
+expected_argument, raw = sys.argv[1:]
+container = json.loads(raw)
+if not isinstance(container, dict):
+    raise SystemExit("execution container is not an object")
+if container.get("command") != ["directive-ingest"] or container.get("args") != [expected_argument]:
+    raise SystemExit("nonpublication execution command is not pinned")
+names = {
+    item.get("name")
+    for item in container.get("env", [])
+    if isinstance(item, dict)
+}
+if names & {
+    "DIRECTIVE_APPROVED_VALIDATION_DIGEST",
+    "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST",
+    "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST",
+}:
+    raise SystemExit("approval overrides are not permitted for this execution")
+PY
+}
+
+directive_select_new_approved_execution_names() {
+  local before_json="$1"
+  local current_json="$2"
+  local expected_argument="$3"
+  local expected_image="$4"
+  local expected_environment_digest="$5"
+  local expected_source_digest="$6"
+  local expected_validation_digest="$7"
+  local expected_processing_version="$8"
+  local expected_search_index="$9"
+  python3 - "$before_json" "$current_json" "$expected_argument" \
+    "$expected_image" "$expected_environment_digest" "$expected_source_digest" \
+    "$expected_validation_digest" "$expected_processing_version" \
+    "$expected_search_index" <<'PY'
+import json
+import sys
+
+before = json.loads(sys.argv[1])
+current = json.loads(sys.argv[2])
+expected_argument, expected_image, expected_environment_digest, \
+    expected_source_digest, expected_validation_digest, \
+    expected_processing_version, expected_search_index = sys.argv[3:]
+before_names = {
+    item.get("name") for item in before if isinstance(item, dict)
+}
+matches = []
+for item in current:
+    if not isinstance(item, dict) or item.get("name") in before_names:
+        continue
+    template = item.get("properties", {}).get("template", {})
+    for container in template.get("containers", []):
+        if not isinstance(container, dict) or container.get("name") != "directive-ingestion":
+            continue
+        env = {
+            value.get("name"): value.get("value")
+            for value in container.get("env", [])
+            if isinstance(value, dict)
+        }
+        if (
+            container.get("image") == expected_image
+            and container.get("command") == ["directive-ingest"]
+            and container.get("args") == [expected_argument]
+            and env.get("DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST") == expected_environment_digest
+            and env.get("DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST") == expected_source_digest
+            and env.get("DIRECTIVE_APPROVED_VALIDATION_DIGEST") == expected_validation_digest
+            and env.get("DIRECTIVE_PROCESSING_VERSION") == expected_processing_version
+            and env.get("DIRECTIVE_SEARCH_INDEX") == expected_search_index
+        ):
+            name = item.get("name")
+            if isinstance(name, str) and name:
+                matches.append(name)
+for name in sorted(set(matches)):
+    print(name)
+if len(set(matches)) != 1:
+    raise SystemExit(2)
+PY
+}
+
 directive_assert_cosmos_recreation_plan() {
   local plan_json="$1"
   jq -e '

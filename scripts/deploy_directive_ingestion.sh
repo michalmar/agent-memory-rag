@@ -124,6 +124,7 @@ APPROVED_SOURCE_INVENTORY_DIGEST=""
 STARTED_EXECUTIONS=()
 PUBLICATION_MARKER_RESERVED=false
 PUBLICATION_DISPATCH_ATTEMPTED=false
+PUBLICATION_EXECUTION_SNAPSHOT="[]"
 
 ACR_SCOPE="$(
   az acr show --name "$ACR_NAME" --resource-group "$RG" --query id --output tsv
@@ -175,9 +176,16 @@ cleanup() {
       --auth-mode login \
       --delete-snapshots include \
       --output none || echo "ERROR: failed to roll back unused publication approval reservation" >&2
+    az storage blob delete \
+      --account-name "$STORAGE_ACCOUNT" \
+      --container-name "$ARTIFACT_BLOB_CONTAINER" \
+      --name "publication-approval-provenance/$VALIDATION_PRODUCER_DIGEST.json" \
+      --auth-mode login \
+      --delete-snapshots include \
+      --output none || echo "ERROR: failed to roll back approval provenance" >&2
   fi
   if [[ "$PUBLICATION_DISPATCH_ATTEMPTED" == true ]]; then
-    discover_publication_execution || true
+    recover_publication_execution "$PUBLICATION_EXECUTION_SNAPSHOT" || true
   fi
   if [[ "$status" -ne 0 && -n "${JOB_NAME:-}" ]]; then
     stop_started_executions
@@ -403,9 +411,11 @@ confirm_validation() {
 }
 
 reserve_publication_approval() {
-  local marker_file marker_name
+  local marker_file provenance_file marker_name provenance_name
   marker_name="publication-approval/$VALIDATION_PRODUCER_DIGEST.json"
+  provenance_name="publication-approval-provenance/$VALIDATION_PRODUCER_DIGEST.json"
   marker_file="$(mktemp)"
+  provenance_file="$(mktemp)"
   jq -S -n \
     --arg record_schema "directive.approval.v2" \
     --arg validation_digest "$VALIDATION_PRODUCER_DIGEST" \
@@ -413,28 +423,31 @@ reserve_publication_approval() {
     --arg environment_digest "$EXPECTED_ENVIRONMENT_DIGEST" \
     --arg processing_hash "$(jq -r '.producer_record.processing_hash' "$VALIDATION_EVIDENCE_FILE")" \
     --arg mandate_checksum "$(jq -r '.producer_record.mandate_checksum' "$VALIDATION_EVIDENCE_FILE")" \
-    --arg image_digest "$IMAGE_DIGEST" \
-    --arg subscription "$SUBSCRIPTION_ID" \
-    --arg resource_group "$RG" \
-    --arg job "$JOB_NAME" \
-    --arg processing_version "$EXPECTED_PROCESSING_VERSION" \
-    --arg search_index "$EXPECTED_SEARCH_INDEX" \
     '{
       record_schema: $record_schema,
       validation_digest: $validation_digest,
       source_inventory_digest: $source_digest,
       environment_digest: $environment_digest,
       processing_hash: $processing_hash,
-      mandate_checksum: $mandate_checksum,
-      wrapper: {
-        image_digest: $image_digest,
-        subscription_id: $subscription,
-        resource_group: $resource_group,
-        job_name: $job,
-        processing_version: $processing_version,
-        search_index: $search_index
-      }
+      mandate_checksum: $mandate_checksum
     }' >"$marker_file"
+  jq -S -n \
+    --arg image_digest "$IMAGE_DIGEST" \
+    --arg subscription "$SUBSCRIPTION_ID" \
+    --arg resource_group "$RG" \
+    --arg job "$JOB_NAME" \
+    --arg processing_version "$EXPECTED_PROCESSING_VERSION" \
+    --arg search_index "$EXPECTED_SEARCH_INDEX" \
+    --arg validation_digest "$VALIDATION_PRODUCER_DIGEST" \
+    '{
+      validation_digest: $validation_digest,
+      image_digest: $image_digest,
+      subscription_id: $subscription,
+      resource_group: $resource_group,
+      job_name: $job,
+      processing_version: $processing_version,
+      search_index: $search_index
+    }' >"$provenance_file"
   if ! az storage blob upload \
     --account-name "$STORAGE_ACCOUNT" \
     --container-name "$ARTIFACT_BLOB_CONTAINER" \
@@ -443,11 +456,22 @@ reserve_publication_approval() {
     --auth-mode login \
     --if-none-match "*" \
     --output none; then
-    rm -f "$marker_file"
+    rm -f "$marker_file" "$provenance_file"
     die "Publication approval has already been consumed or could not be reserved"
   fi
-  rm -f "$marker_file"
   PUBLICATION_MARKER_RESERVED=true
+  if ! az storage blob upload \
+    --account-name "$STORAGE_ACCOUNT" \
+    --container-name "$ARTIFACT_BLOB_CONTAINER" \
+    --name "$provenance_name" \
+    --file "$provenance_file" \
+    --auth-mode login \
+    --if-none-match "*" \
+    --output none; then
+    rm -f "$marker_file" "$provenance_file"
+    die "Publication approval provenance could not be reserved"
+  fi
+  rm -f "$marker_file" "$provenance_file"
 }
 
 assert_live_v2_config() {
@@ -570,8 +594,16 @@ track_started_execution() {
   STARTED_EXECUTION_NAME="$execution_name"
 }
 
-discover_publication_execution() {
-  local executions execution_name
+snapshot_execution_ids() {
+  az containerapp job execution list \
+    --name "$JOB_NAME" \
+    --resource-group "$RG" \
+    --output json
+}
+
+recover_publication_execution() {
+  local before_json="$1" executions
+  local candidates_file recovery_status=0 execution_name
   [[ "$PUBLICATION_DISPATCH_ATTEMPTED" == true ]] || return 0
   executions="$(
     az containerapp job execution list \
@@ -579,67 +611,51 @@ discover_publication_execution() {
       --resource-group "$RG" \
       --output json 2>/dev/null
   )" || return 1
-  execution_name="$(
-    python3 - "$IMAGE" "$EXPECTED_ENVIRONMENT_DIGEST" \
-      "$APPROVED_SOURCE_INVENTORY_DIGEST" "$VALIDATION_PRODUCER_DIGEST" \
-      "$EXPECTED_PROCESSING_VERSION" "$EXPECTED_SEARCH_INDEX" "$executions" <<'PY'
-import json
-import sys
-
-image, environment_digest, source_digest, validation_digest, \
-    processing_version, search_index, raw = sys.argv[1:]
-items = json.loads(raw)
-if not isinstance(items, list):
-    raise SystemExit(0)
-for item in items:
-    props = item.get("properties", {}) if isinstance(item, dict) else {}
-    template = props.get("template", {}) if isinstance(props, dict) else {}
-    containers = template.get("containers", []) if isinstance(template, dict) else []
-    for container in containers:
-        if not isinstance(container, dict) or container.get("name") != "directive-ingestion":
-            continue
-        env = {
-            value.get("name"): value.get("value")
-            for value in container.get("env", [])
-            if isinstance(value, dict)
-        }
-        if (
-            container.get("image") == image
-            and container.get("command") == ["directive-ingest"]
-            and container.get("args") == ["run-daily"]
-            and env.get("DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST") == environment_digest
-            and env.get("DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST") == source_digest
-            and env.get("DIRECTIVE_APPROVED_VALIDATION_DIGEST") == validation_digest
-            and env.get("DIRECTIVE_PROCESSING_VERSION") == processing_version
-            and env.get("DIRECTIVE_SEARCH_INDEX") == search_index
-        ):
-            name = item.get("name")
-            if isinstance(name, str) and name:
-                print(name)
-                raise SystemExit(0)
-PY
-  )"
-  [[ -z "$execution_name" ]] || track_started_execution "$execution_name"
+  candidates_file="$(mktemp)"
+  if directive_select_new_approved_execution_names \
+      "$before_json" "$executions" run-daily "$IMAGE" \
+      "$EXPECTED_ENVIRONMENT_DIGEST" "$APPROVED_SOURCE_INVENTORY_DIGEST" \
+      "$VALIDATION_PRODUCER_DIGEST" "$EXPECTED_PROCESSING_VERSION" \
+      "$EXPECTED_SEARCH_INDEX" >"$candidates_file"
+  then
+    recovery_status=0
+  else
+    recovery_status=$?
+  fi
+  mapfile -t recovery_candidates <"$candidates_file"
+  rm -f "$candidates_file"
+  for execution_name in "${recovery_candidates[@]}"; do
+    [[ -n "$execution_name" ]] && track_started_execution "$execution_name"
+  done
+  [[ "$recovery_status" -eq 0 && "${#recovery_candidates[@]}" -eq 1 ]] || return 1
 }
 
 start_job_execution() {
   local expected_argument="$1"
   local execution_name execution_name_file start_args=()
+  local execution_snapshot
   assert_live_maintenance_mode
   assert_no_active_execution
-  [[ "$VALIDATION_PRODUCER_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
-    "Approved validation digest is invalid"
-  [[ "$EXPECTED_ENVIRONMENT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
-    "Approved environment digest is invalid"
-  [[ "$APPROVED_SOURCE_INVENTORY_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
-    "Approved source inventory digest is invalid"
-  start_args=(
-    --env-vars
-    "DIRECTIVE_APPROVED_VALIDATION_DIGEST=$VALIDATION_PRODUCER_DIGEST"
-    "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST=$EXPECTED_ENVIRONMENT_DIGEST"
-    "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST=$APPROVED_SOURCE_INVENTORY_DIGEST"
-  )
-  [[ "$expected_argument" == run-daily ]] && PUBLICATION_DISPATCH_ATTEMPTED=true
+  if [[ "$expected_argument" == run-daily || "$expected_argument" == verify ]]; then
+    [[ "$VALIDATION_PRODUCER_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
+      "Approved validation digest is invalid"
+    [[ "$EXPECTED_ENVIRONMENT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
+      "Approved environment digest is invalid"
+    [[ "$APPROVED_SOURCE_INVENTORY_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
+      "Approved source inventory digest is invalid"
+    start_args=(
+      --env-vars
+      "DIRECTIVE_APPROVED_VALIDATION_DIGEST=$VALIDATION_PRODUCER_DIGEST"
+      "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST=$EXPECTED_ENVIRONMENT_DIGEST"
+      "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST=$APPROVED_SOURCE_INVENTORY_DIGEST"
+    )
+  fi
+  if [[ "$expected_argument" == run-daily ]]; then
+    execution_snapshot="$(snapshot_execution_ids)" || die \
+      "Could not snapshot executions before publication dispatch"
+    PUBLICATION_EXECUTION_SNAPSHOT="$execution_snapshot"
+    PUBLICATION_DISPATCH_ATTEMPTED=true
+  fi
   execution_name_file="$(mktemp)"
   if ! az containerapp job start \
       --name "$JOB_NAME" \
@@ -651,13 +667,17 @@ start_job_execution() {
       --output tsv >"$execution_name_file"
   then
     rm -f "$execution_name_file"
-    [[ "$expected_argument" == run-daily ]] && discover_publication_execution || true
+    if [[ "$expected_argument" == run-daily ]]; then
+      recover_publication_execution "$execution_snapshot" || true
+    fi
     return 1
   fi
   execution_name="$(<"$execution_name_file")"
   rm -f "$execution_name_file"
   [[ -n "$execution_name" ]] || {
-    [[ "$expected_argument" == run-daily ]] && discover_publication_execution || true
+    if [[ "$expected_argument" == run-daily ]]; then
+      recover_publication_execution "$execution_snapshot" || true
+    fi
     echo "ERROR: Container Apps did not return an execution name" >&2
     return 1
   }
@@ -673,11 +693,16 @@ start_job_execution() {
       --query "properties.template.containers[?name=='$JOB_CONTAINER'] | [0]" \
       --output json
   )"
-  directive_assert_approved_execution_json \
-    "$execution_container" "$expected_argument" "$IMAGE" \
-    "$EXPECTED_ENVIRONMENT_DIGEST" "$APPROVED_SOURCE_INVENTORY_DIGEST" \
-    "$VALIDATION_PRODUCER_DIGEST" "$EXPECTED_PROCESSING_VERSION" \
-    "$EXPECTED_SEARCH_INDEX"
+  if [[ "$expected_argument" == run-daily || "$expected_argument" == verify ]]; then
+    directive_assert_approved_execution_json \
+      "$execution_container" "$expected_argument" "$IMAGE" \
+      "$EXPECTED_ENVIRONMENT_DIGEST" "$APPROVED_SOURCE_INVENTORY_DIGEST" \
+      "$VALIDATION_PRODUCER_DIGEST" "$EXPECTED_PROCESSING_VERSION" \
+      "$EXPECTED_SEARCH_INDEX"
+  else
+    directive_assert_unapproved_execution_json \
+      "$execution_container" "$expected_argument"
+  fi
 }
 
 assert_v2_search_schema() {
