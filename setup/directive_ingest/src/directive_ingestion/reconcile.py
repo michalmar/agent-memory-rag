@@ -147,6 +147,7 @@ class MandatePublicationSnapshot:
     snapshot: MandateSnapshot
     previous_active: dict[str, Any] | None
     changed: bool
+    candidate_active_etag: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1521,7 +1522,19 @@ class DirectiveIngestionRunner:
             await self.publish_documents(prepared, snapshots)
             await self.activate_documents(prepared)
             if mandate_snapshot is not None and mandate_snapshot.changed:
-                await self.mandates.activate(mandate_snapshot.snapshot, run_id)
+                candidate_active_etag = await self.mandates.activate(
+                    mandate_snapshot.snapshot,
+                    run_id,
+                    mandate_snapshot.previous_active,
+                )
+                if not isinstance(candidate_active_etag, str) or not candidate_active_etag:
+                    raise RuntimeError(
+                        "Mandate activation did not return a candidate ETag"
+                    )
+                mandate_snapshot = replace(
+                    mandate_snapshot,
+                    candidate_active_etag=candidate_active_etag,
+                )
             await self.record_source_states(
                 prepared, snapshots, validation_digest=validation_digest
             )
@@ -1629,8 +1642,16 @@ class DirectiveIngestionRunner:
             await self.blobs.delete_names(
                 artifact_names
             )
+        if (
+            mandate_snapshot is not None
+            and mandate_snapshot.changed
+            and mandate_snapshot.candidate_active_etag is not None
+        ):
+            await self.mandates.restore_active(
+                mandate_snapshot.previous_active,
+                mandate_snapshot.candidate_active_etag,
+            )
         if mandate_snapshot is not None and mandate_snapshot.changed:
-            await self.mandates.restore_active(mandate_snapshot.previous_active)
             await self.mandates.discard_staged(mandate_snapshot.snapshot)
 
     async def record_source_states(
@@ -2424,13 +2445,13 @@ def _validation_payload(
         ),
     }
     payload["validation_digest"] = _public_record_digest(
-        _validation_digest_projection(payload)
+        _validation_digest_projection(payload, mandates)
     )
     return payload
 
 
 def _validation_digest_projection(
-    payload: dict[str, object]
+    payload: dict[str, object], mandates: Any | None = None
 ) -> dict[str, object]:
     """Only hash the public, stable validation contract—not run metadata."""
     fields = (
@@ -2452,7 +2473,35 @@ def _validation_digest_projection(
         "failures",
         "source_inventory_digest",
     )
-    return {field: payload[field] for field in fields}
+    projection = {field: payload[field] for field in fields}
+    if mandates is not None:
+        projection["mandate_identity_digest"] = _mandate_identity_digest(mandates)
+    return projection
+
+
+def _mandate_identity_digest(mandates: Any) -> str:
+    """Bind approval to canonical tenant-qualified mandate assignments."""
+    checksum = getattr(mandates, "checksum", None)
+    if (
+        isinstance(checksum, str)
+        and len(checksum) == 64
+        and all(character in "0123456789abcdef" for character in checksum)
+    ):
+        return checksum
+    assignments = getattr(mandates, "assignments", None)
+    if assignments is None:
+        raise ValueError("Mandate approval identity is unavailable")
+    canonical = "\n".join(
+        f"{assignment.user_id},{assignment.directive_id},M"
+        for assignment in sorted(
+            assignments,
+            key=lambda assignment: (
+                str(assignment.user_id),
+                str(assignment.directive_id),
+            ),
+        )
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _safe_failure_code(exc: BaseException) -> str:

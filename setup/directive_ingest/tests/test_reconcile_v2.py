@@ -35,6 +35,7 @@ from directive_ingestion.reconcile import (
     _generation_scoped_chunks,
     _generation_canonical_hash,
     _public_record_digest,
+    _validation_digest_projection,
     _build_artifact_locators,
     _validate_public_corpus_limit,
     format_result,
@@ -733,7 +734,7 @@ async def test_validate_output_has_finalize_guard_shape() -> None:
 
     original_mandates = reconcile_module.parse_mandates
     reconcile_module.parse_mandates = lambda *_args: SimpleNamespace(
-        assignments=(), user_count=0
+        assignments=(), checksum="b" * 64, user_count=0
     )
     try:
         value = await runner.validate_inputs()
@@ -754,12 +755,12 @@ async def test_validate_output_has_finalize_guard_shape() -> None:
         "validation_digest",
     }.issubset(value)
     assert value["record_schema"] == "directive.validate.v2"
+    assert "mandate_identity_digest" not in value
     assert value["validation_digest"] == _public_record_digest(
-        {
-            key: item
-            for key, item in value.items()
-            if key not in {"run_id", "validation_digest"}
-        }
+        _validation_digest_projection(
+            value,
+            SimpleNamespace(assignments=(), checksum="b" * 64, user_count=0),
+        )
     )
 
 

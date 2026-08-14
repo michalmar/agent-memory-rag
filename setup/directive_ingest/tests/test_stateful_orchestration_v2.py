@@ -459,13 +459,14 @@ class MemoryMandates:
         self.staged = snapshot
         return snapshot, self.active, changed
 
-    async def activate(self, snapshot, _run_id: str) -> None:
+    async def activate(self, snapshot, _run_id: str, _previous) -> str:
         self.active = snapshot
+        return "memory-candidate-etag"
 
     async def cleanup(self, _snapshot_id: str) -> bool:
         return False
 
-    async def restore_active(self, previous) -> None:
+    async def restore_active(self, previous, _candidate_etag: str) -> None:
         self.active = previous
 
     async def discard_staged(self, _snapshot) -> None:

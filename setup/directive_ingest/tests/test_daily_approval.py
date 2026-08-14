@@ -20,6 +20,7 @@ from directive_ingestion.reconcile import (
     _source_inventory,
     _validation_payload,
 )
+from directive_ingestion.mandate_projection import ParsedMandates
 from directive_ingestion.source import SourceDocument, SourceProvenance
 from directive_ingestion.source_state_repository import SourceStateSnapshot
 
@@ -137,7 +138,7 @@ def test_validation_digest_is_independent_of_run_id() -> None:
         None,
         None,
     )
-    mandates = SimpleNamespace(assignments=(), user_count=0)
+    mandates = SimpleNamespace(assignments=(), checksum="b" * 64, user_count=0)
 
     first = _validation_payload(
         config, "first-run", [source], [metadata], mandates, []
@@ -148,6 +149,126 @@ def test_validation_digest_is_independent_of_run_id() -> None:
 
     assert first["validation_digest"] == second["validation_digest"]
     assert first["environment_digest"] == second["environment_digest"]
+
+
+def test_validation_digest_binds_canonical_mandate_identity_and_tenant() -> None:
+    source = _source()
+    config = SimpleNamespace(
+        **_config().__dict__,
+        processing_version="v2",
+        processing_hash="a" * 64,
+    )
+    metadata = SourceMetadata(
+        source,
+        SimpleNamespace(
+            directive_id="directive",
+            directive_version_id="directive:v1",
+        ),
+        None,
+        None,
+    )
+    first = ParsedMandates(
+        assignments=(
+            SimpleNamespace(
+                user_id="tenant-a:11111111-1111-1111-1111-111111111111",
+                directive_id="directive",
+            ),
+        ),
+        checksum="a" * 64,
+        user_count=1,
+    )
+    drifted = ParsedMandates(
+        assignments=(
+            SimpleNamespace(
+                user_id="tenant-b:11111111-1111-1111-1111-111111111111",
+                directive_id="directive",
+            ),
+        ),
+        checksum="b" * 64,
+        user_count=1,
+    )
+
+    approved = _validation_payload(config, "run", [source], [metadata], first, [])
+    candidate = _validation_payload(
+        config, "run", [source], [metadata], drifted, []
+    )
+
+    assert approved["mandate_count"] == candidate["mandate_count"] == 1
+    assert approved["mandate_user_count"] == candidate["mandate_user_count"] == 1
+    assert approved["validation_digest"] != candidate["validation_digest"]
+
+
+@pytest.mark.asyncio
+async def test_tenant_drifted_mandates_stop_before_summary_or_writes() -> None:
+    source = _source()
+    config = SimpleNamespace(
+        **_config().__dict__,
+        mandate_csv=object(),
+        azure_tenant_id="tenant-b",
+        processing_version="v2",
+        processing_hash="a" * 64,
+    )
+    metadata = [
+        SourceMetadata(
+            source,
+            SimpleNamespace(
+                directive_id="directive",
+                directive_version_id="directive:v1",
+            ),
+            None,
+            None,
+        )
+    ]
+    approved_mandates = ParsedMandates(
+        assignments=(
+            SimpleNamespace(
+                user_id="tenant-a:11111111-1111-1111-1111-111111111111",
+                directive_id="directive",
+            ),
+        ),
+        checksum="a" * 64,
+        user_count=1,
+    )
+    drifted_mandates = ParsedMandates(
+        assignments=(
+            SimpleNamespace(
+                user_id="tenant-b:11111111-1111-1111-1111-111111111111",
+                directive_id="directive",
+            ),
+        ),
+        checksum="b" * 64,
+        user_count=1,
+    )
+    approved_payload = _validation_payload(
+        config, "approved", [source], metadata, approved_mandates, []
+    )
+    candidate_payload = _validation_payload(
+        config, "candidate", [source], metadata, drifted_mandates, []
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.config = config
+    runner.discover_sources = AsyncMock(return_value=[source])
+    runner._metadata_validation_snapshot = AsyncMock(
+        return_value=ValidationSnapshot(
+            [source], metadata, drifted_mandates, candidate_payload
+        )
+    )
+    runner.prepare_changed_documents = AsyncMock()
+    runner.summaries = SimpleNamespace(summarize=AsyncMock())
+    runner.blobs = SimpleNamespace(put_immutable=AsyncMock())
+
+    with pytest.raises(ValueError, match="metadata snapshot"):
+        await runner.run_daily(
+            approved_validation_digest=approved_payload["validation_digest"],
+            approved_environment_digest=approved_payload["environment_digest"],
+            approved_source_inventory_digest=approved_payload[
+                "source_inventory_digest"
+            ],
+        )
+
+    runner.prepare_changed_documents.assert_not_awaited()
+    runner.summaries.summarize.assert_not_awaited()
+    runner.blobs.put_immutable.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from azure.core import MatchConditions
 from azure.cosmos import exceptions
 from azure.cosmos.aio import CosmosClient
 from directive_contracts import (
@@ -211,31 +212,83 @@ class MandateRepository:
         return snapshot, active, True
 
     async def activate(
-        self, snapshot: MandateSnapshot, run_id: str
-    ) -> None:
-        await self._container.upsert_item(
-            {
-                "id": _ACTIVE_ID,
-                "type": "active_snapshot",
-                "user_id": _CONTROL_PARTITION,
-                **snapshot.model_dump(mode="json"),
-                "run_id": run_id,
-                "activated_at": datetime.now(UTC).isoformat(),
-            }
-        )
+        self,
+        snapshot: MandateSnapshot,
+        run_id: str,
+        previous: dict[str, Any] | None,
+    ) -> str:
+        """Switch the active pointer only if the staged snapshot is still live."""
+        payload = {
+            "id": _ACTIVE_ID,
+            "type": "active_snapshot",
+            "user_id": _CONTROL_PARTITION,
+            **snapshot.model_dump(mode="json"),
+            "run_id": run_id,
+            "activated_at": datetime.now(UTC).isoformat(),
+        }
+        try:
+            if previous is None:
+                response = await self._container.create_item(body=payload)
+            else:
+                response = await self._container.replace_item(
+                    item=_ACTIVE_ID,
+                    body=payload,
+                    etag=_active_etag(previous),
+                    match_condition=MatchConditions.IfNotModified,
+                )
+        except (
+            exceptions.CosmosResourceExistsError,
+            exceptions.CosmosAccessConditionFailedError,
+            exceptions.CosmosResourceNotFoundError,
+        ) as exc:
+            raise RuntimeError(
+                "Concurrent mandate activation prevented switching the active pointer"
+            ) from exc
+        return _active_response_etag(response)
 
-    async def restore_active(self, previous: dict[str, Any] | None) -> None:
+    async def restore_active(
+        self,
+        previous: dict[str, Any] | None,
+        candidate_etag: str,
+    ) -> None:
+        """Restore only the pointer produced by this failed activation."""
+        if not candidate_etag:
+            raise RuntimeError("Mandate activation candidate is missing an ETag")
         if previous is None:
             try:
                 await self._container.delete_item(
-                    item=_ACTIVE_ID, partition_key=_CONTROL_PARTITION
+                    item=_ACTIVE_ID,
+                    partition_key=_CONTROL_PARTITION,
+                    etag=candidate_etag,
+                    match_condition=MatchConditions.IfNotModified,
                 )
             except exceptions.CosmosResourceNotFoundError:
                 pass
+            except exceptions.CosmosAccessConditionFailedError as exc:
+                raise RuntimeError(
+                    "Concurrent mandate activation prevented restoring the active "
+                    "pointer"
+                ) from exc
             return
-        await self._container.upsert_item(
-            {key: value for key, value in previous.items() if not key.startswith("_")}
-        )
+        try:
+            await self._container.replace_item(
+                item=_ACTIVE_ID,
+                body={
+                    key: value
+                    for key, value in previous.items()
+                    if not key.startswith("_")
+                },
+                etag=candidate_etag,
+                match_condition=MatchConditions.IfNotModified,
+            )
+        except (
+            exceptions.CosmosAccessConditionFailedError,
+            exceptions.CosmosResourceNotFoundError,
+        ) as exc:
+            raise RuntimeError(
+                "Concurrent mandate activation prevented restoring the active "
+                "pointer"
+            ) from exc
 
     async def discard_staged(self, snapshot: MandateSnapshot) -> None:
         """Idempotently delete a candidate snapshot that was never committed."""
@@ -266,11 +319,11 @@ class MandateRepository:
         self, parsed: ParsedMandates, run_id: str
     ) -> tuple[MandateSnapshot, bool]:
         """Compatibility API performing stage, activation, then cleanup."""
-        snapshot, _, changed = await self.stage(parsed, run_id)
+        snapshot, previous, changed = await self.stage(parsed, run_id)
         if not changed:
             cleanup_changed = await self.cleanup(snapshot.snapshot_id)
             return snapshot, cleanup_changed
-        await self.activate(snapshot, run_id)
+        await self.activate(snapshot, run_id, previous)
         cleanup_changed = await self.cleanup(snapshot.snapshot_id)
         return snapshot, changed or cleanup_changed
 
@@ -577,3 +630,21 @@ class MandateRepository:
         for item_id, user_id in stale:
             await self._container.delete_item(item=item_id, partition_key=user_id)
         return bool(stale)
+
+
+def _active_etag(active: dict[str, Any]) -> str:
+    etag = active.get("_etag")
+    if not isinstance(etag, str) or not etag:
+        raise RuntimeError("Active mandate pointer is missing an ETag")
+    return etag
+
+
+def _active_response_etag(response: object) -> str:
+    etag = (
+        response.get("_etag") or response.get("etag")
+        if isinstance(response, dict)
+        else getattr(response, "_etag", None) or getattr(response, "etag", None)
+    )
+    if not isinstance(etag, str) or not etag:
+        raise RuntimeError("Mandate activation response is missing an ETag")
+    return etag
