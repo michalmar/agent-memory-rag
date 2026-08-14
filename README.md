@@ -402,9 +402,15 @@ Agent changes required before deployment.
 5. Create the ignored target assignment file from
    `setup/directives/mandatory/mand.csv.example`; never commit or share the
    resulting `mand.csv`.
-6. Run `scripts/deploy_directive_ingestion.sh <release>` to build the ingestion
+6. Generate and approve a `directive-ingest validate` record for the exact
+   target environment and source corpus. Export its `validation_digest`, plus
+   the canonical environment and source-inventory digests, as
+   `DIRECTIVE_APPROVED_VALIDATION_DIGEST`,
+   `DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST`, and
+   `DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST`. Run
+   `scripts/deploy_directive_ingestion.sh <release>` to build the ingestion
    image, verify exact source-reader/artifact-contributor roles, run preflight,
-   publish the current source corpus, and verify the resulting state.
+   publish the approved source corpus, and verify the resulting state.
 7. Run `scripts/release_foundry_assets.sh all` to configure Search/Foundry IQ and
    publish the native Prompt Agent directly.
 7. Build and deploy each selected Hosted MAF image to the Foundry project through

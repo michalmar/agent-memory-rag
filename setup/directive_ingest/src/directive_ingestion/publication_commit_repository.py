@@ -16,6 +16,7 @@ class PublicationCommit:
     run_id: str
     stale_bundles: tuple[PublishedDirectiveVersion, ...]
     expected_state_names: frozenset[str]
+    validation_digest: str | None = None
 
 
 class PublicationCommitRepository:
@@ -35,20 +36,31 @@ class PublicationCommitRepository:
                 for item in value["stale_bundles"]
             )
             names = frozenset(value["expected_state_names"])
+            validation_digest = value.get("validation_digest")
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError("Publication commit marker is invalid") from exc
         if not isinstance(run_id, str) or not all(
             isinstance(name, str) for name in names
         ):
             raise RuntimeError("Publication commit marker has invalid identities")
-        return PublicationCommit(run_id, bundles, names)
+        if validation_digest is not None and (
+            not isinstance(validation_digest, str) or not validation_digest.strip()
+        ):
+            raise RuntimeError(
+                "Publication commit marker has an invalid validation digest"
+            )
+        return PublicationCommit(run_id, bundles, names, validation_digest)
 
     async def record(
         self,
         run_id: str,
         stale_bundles: list[PublishedDirectiveVersion],
         expected_state_names: set[str],
+        *,
+        validation_digest: str | None = None,
     ) -> PublicationCommit:
+        if validation_digest is not None and not validation_digest.strip():
+            raise ValueError("Validation digest must not be empty")
         marker = PublicationCommit(
             run_id,
             tuple(
@@ -62,19 +74,19 @@ class PublicationCommitRepository:
                 )
             ),
             frozenset(expected_state_names),
+            validation_digest,
         )
-        await self._blobs.replace_json(
-            _MARKER_NAME,
-            {
-                "type": "publication_commit",
-                "run_id": marker.run_id,
-                "stale_bundles": [
-                    bundle.model_dump(mode="json")
-                    for bundle in marker.stale_bundles
-                ],
-                "expected_state_names": sorted(marker.expected_state_names),
-            },
-        )
+        payload: dict[str, object] = {
+            "type": "publication_commit",
+            "run_id": marker.run_id,
+            "stale_bundles": [
+                bundle.model_dump(mode="json") for bundle in marker.stale_bundles
+            ],
+            "expected_state_names": sorted(marker.expected_state_names),
+        }
+        if marker.validation_digest is not None:
+            payload["validation_digest"] = marker.validation_digest
+        await self._blobs.replace_json(_MARKER_NAME, payload)
         return marker
 
     async def clear(self) -> None:

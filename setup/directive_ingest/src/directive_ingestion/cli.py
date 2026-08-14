@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 from pathlib import Path
 
 from .config import IngestionConfig
-from .reconcile import DirectiveIngestionRunner, format_result
+from .reconcile import (
+    DailyRunApproval,
+    DirectiveIngestionRunner,
+    format_result,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -32,6 +37,11 @@ def _parser() -> argparse.ArgumentParser:
 
 async def _run(args: argparse.Namespace) -> None:
     config = IngestionConfig.from_environment()
+    approval = (
+        _daily_run_approval_from_environment()
+        if args.command == "run-daily"
+        else None
+    )
     source_override = getattr(args, "source", None)
     if source_override is not None and config.source_kind != "local":
         raise ValueError(
@@ -70,15 +80,44 @@ async def _run(args: argparse.Namespace) -> None:
                 )
             )
         elif args.command == "run-daily":
+            if approval is None:
+                raise AssertionError("run-daily approval was not initialized")
             print(
                 format_result(
-                    await runner.run_daily(args.source, args.mandates)
+                    await runner.run_daily(
+                        args.source,
+                        args.mandates,
+                        approved_validation_digest=approval.validation_digest,
+                        approved_environment_digest=approval.environment_digest,
+                        approved_source_inventory_digest=(
+                            approval.source_inventory_digest
+                        ),
+                    )
                 )
             )
         else:
             raise AssertionError(f"Unknown command: {args.command}")
     finally:
         await runner.close()
+
+
+def _daily_run_approval_from_environment() -> DailyRunApproval:
+    names = (
+        "DIRECTIVE_APPROVED_VALIDATION_DIGEST",
+        "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST",
+        "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST",
+    )
+    values = {name: os.getenv(name, "").strip() for name in names}
+    missing = [name for name, value in values.items() if not value]
+    if missing:
+        raise ValueError(
+            "run-daily requires nonempty " + ", ".join(missing)
+        )
+    return DailyRunApproval(
+        validation_digest=values[names[0]],
+        environment_digest=values[names[1]],
+        source_inventory_digest=values[names[2]],
+    )
 
 
 def main() -> None:

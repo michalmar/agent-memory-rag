@@ -311,6 +311,13 @@ if [[ "$PREFLIGHT_SUCCEEDED" != true ]]; then
   exit 1
 fi
 
+if [[ -z "${DIRECTIVE_APPROVED_VALIDATION_DIGEST:-}" ]] \
+  || [[ -z "${DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST:-}" ]] \
+  || [[ -z "${DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST:-}" ]]; then
+  echo "Nonempty DIRECTIVE_APPROVED_*_DIGEST values are required before directive publication" >&2
+  exit 1
+fi
+
 echo "==> Switching the directive ingestion job to publication mode"
 az containerapp job update \
   --name "$JOB_NAME" \
@@ -325,6 +332,10 @@ EXECUTION_NAME="$(
   az containerapp job start \
     --name "$JOB_NAME" \
     --resource-group "$RG" \
+    --env-vars \
+      "DIRECTIVE_APPROVED_VALIDATION_DIGEST=$DIRECTIVE_APPROVED_VALIDATION_DIGEST" \
+      "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST=$DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST" \
+      "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST=$DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST" \
     --query name \
     --output tsv
 )"

@@ -134,6 +134,15 @@ class MandatePublicationSnapshot:
     changed: bool
 
 
+@dataclass(frozen=True)
+class DailyRunApproval:
+    """Operator approval evidence required for a guarded daily run."""
+
+    validation_digest: str
+    environment_digest: str
+    source_inventory_digest: str
+
+
 class DirectiveIngestionRunner:
     def __init__(self, config: IngestionConfig) -> None:
         self.config = config
@@ -244,7 +253,9 @@ class DirectiveIngestionRunner:
             "summary_model": "ok",
         }
 
-    async def verify(self) -> dict[str, object]:
+    async def verify(
+        self, *, validation_digest: str | None = None
+    ) -> dict[str, object]:
         run_id = _run_id()
         sources = await self.discover_sources()
         _validate_public_corpus_limit(sources)
@@ -561,6 +572,8 @@ class DirectiveIngestionRunner:
             "warning_count": 0,
             "cross_store": cross_store,
         }
+        if validation_digest is not None:
+            payload["validation_digest"] = validation_digest
         payload["state_digest"] = _public_record_digest(
             {
                 key: payload[key]
@@ -576,7 +589,9 @@ class DirectiveIngestionRunner:
                     "normalized_directive_ids",
                     "directive_version_ids",
                     "cross_store",
+                    "validation_digest",
                 )
+                if key in payload
             }
         )
         payload["verify_digest"] = _public_record_digest(payload)
@@ -615,11 +630,13 @@ class DirectiveIngestionRunner:
         )
         warnings = _validation_warnings(metadata, self.config.processing_hash)
         source_inventory = _source_inventory(sources)
+        environment = _safe_environment(self.config)
         payload: dict[str, object] = {
             "record_schema": "directive.validate.v2",
             "success": True,
             "run_id": run_id,
-            "environment": _safe_environment(self.config),
+            "environment": environment,
+            "environment_digest": _public_record_digest(environment),
             "processing_version": self.config.processing_version,
             "processing_hash": self.config.processing_hash,
             "search_index": self.config.search_index,
@@ -644,10 +661,20 @@ class DirectiveIngestionRunner:
         self,
         source_directory: Path | None = None,
         mandate_csv: Path | None = None,
+        *,
+        approved_validation_digest: str | None = None,
+        approved_environment_digest: str | None = None,
+        approved_source_inventory_digest: str | None = None,
     ) -> ReconcileResult:
         run_id = _run_id()
         sources = await self.discover_sources(source_directory)
         _validate_public_corpus_limit(sources)
+        approval = _daily_run_approval(
+            approved_validation_digest,
+            approved_environment_digest,
+            approved_source_inventory_digest,
+        )
+        self._validate_daily_approval(approval, sources)
         metadata = await self.extract_or_load_metadata(sources, run_id)
         await self._validate_and_quarantine(metadata, run_id)
         known_ids = {item.metadata.directive_id for item in metadata}
@@ -657,7 +684,11 @@ class DirectiveIngestionRunner:
             known_ids,
         )
         marker_before = await self.commits.load()
-        self._validate_pending_marker_corpus(metadata, marker_before)
+        self._validate_pending_marker_corpus(
+            metadata,
+            marker_before,
+            approval.validation_digest if approval is not None else None,
+        )
         prepared = await self.prepare_changed_documents(metadata, run_id)
         await self._validate_relations(
             prepared,
@@ -680,6 +711,7 @@ class DirectiveIngestionRunner:
             run_id,
             mandate_transaction,
             marker_before,
+            approval.validation_digest if approval is not None else None,
         )
         if mandate_transaction is not None:
             snapshot = mandate_transaction.snapshot
@@ -708,7 +740,11 @@ class DirectiveIngestionRunner:
             mandate_snapshot_id=snapshot.snapshot_id,
             mandate_changed=mandate_changed,
         )
-        await self.verify()
+        await self.verify(
+            validation_digest=(
+                approval.validation_digest if approval is not None else None
+            )
+        )
         if await self.commits.load() is not None:
             await self.commits.clear()
         if prepared or mandate_changed:
@@ -778,6 +814,7 @@ class DirectiveIngestionRunner:
         run_id: str,
         mandates: MandatePublicationSnapshot | None,
         marker_before: object | None,
+        validation_digest: str | None = None,
     ) -> None:
         """Rollback only before the durable cleanup marker is written."""
         try:
@@ -786,6 +823,7 @@ class DirectiveIngestionRunner:
                 replaced,
                 run_id,
                 force_commit=mandates is not None,
+                validation_digest=validation_digest,
             )
         except Exception:
             marker_after = await self.commits.load()
@@ -799,6 +837,7 @@ class DirectiveIngestionRunner:
         self,
         metadata: list[SourceMetadata],
         marker: object | None,
+        validation_digest: str | None = None,
     ) -> None:
         """Do not activate another corpus until a pending cleanup can resume."""
         if marker is None:
@@ -811,6 +850,37 @@ class DirectiveIngestionRunner:
         if marker_names != expected_names:
             raise RuntimeError(
                 "Publication cleanup marker does not match the source corpus"
+            )
+        marker_validation_digest = getattr(marker, "validation_digest", None)
+        if (
+            validation_digest is not None
+            and marker_validation_digest != validation_digest
+        ):
+            raise RuntimeError(
+                "Publication cleanup marker does not match the approved "
+                "validation"
+            )
+
+    def _validate_daily_approval(
+        self,
+        approval: DailyRunApproval | None,
+        sources: list[SourceDocument],
+    ) -> None:
+        """Reject changed deployment identities before document processing."""
+        if approval is None:
+            return
+        expected_environment = _public_record_digest(
+            _safe_environment(self.config)
+        )
+        expected_inventory = _public_record_digest(_source_inventory(sources))
+        if approval.environment_digest != expected_environment:
+            raise ValueError(
+                "Approved environment digest does not match this deployment"
+            )
+        if approval.source_inventory_digest != expected_inventory:
+            raise ValueError(
+                "Approved source inventory digest does not match discovered "
+                "sources"
             )
 
     async def publish_mandates(
@@ -1296,6 +1366,7 @@ class DirectiveIngestionRunner:
         replaced: list[PublishedDirectiveVersion] | None = None,
         run_id: str | None = None,
         force_commit: bool = False,
+        validation_digest: str | None = None,
     ) -> None:
         """Retire every store record not represented by validated sources."""
         expected_versions = {
@@ -1350,14 +1421,29 @@ class DirectiveIngestionRunner:
                 and not force_commit
             ):
                 return
-            marker = await self.commits.record(
+            record_args = (
                 run_id or _run_id(),
                 list(stale.values()),
                 expected_state_names,
             )
+            marker = (
+                await self.commits.record(
+                    *record_args, validation_digest=validation_digest
+                )
+                if validation_digest is not None
+                else await self.commits.record(*record_args)
+            )
         elif marker.expected_state_names != expected_state_names:
             raise RuntimeError(
                 "Publication cleanup marker does not match the source corpus"
+            )
+        elif (
+            validation_digest is not None
+            and marker.validation_digest != validation_digest
+        ):
+            raise RuntimeError(
+                "Publication cleanup marker does not match the approved "
+                "validation"
             )
         stale = {
             (
@@ -1904,6 +1990,30 @@ def _safe_environment(config: IngestionConfig) -> dict[str, str]:
         "search_service": config.search_service,
         "search_index": config.search_index,
     }
+
+
+def _daily_run_approval(
+    validation_digest: str | None,
+    environment_digest: str | None,
+    source_inventory_digest: str | None,
+) -> DailyRunApproval | None:
+    values = (
+        validation_digest,
+        environment_digest,
+        source_inventory_digest,
+    )
+    if all(value is None for value in values):
+        return None
+    if any(not isinstance(value, str) or not value.strip() for value in values):
+        raise ValueError(
+            "Daily run approvals must include nonempty validation, environment, "
+            "and source inventory digests"
+        )
+    return DailyRunApproval(
+        validation_digest=(validation_digest or "").strip(),
+        environment_digest=(environment_digest or "").strip(),
+        source_inventory_digest=(source_inventory_digest or "").strip(),
+    )
 
 
 def _safe_failure_code(exc: BaseException) -> str:
