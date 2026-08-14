@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 from directive_contracts import (
     DirectiveChunk,
     DirectiveMetadata,
+    ReviewFinding,
     DirectiveSummary,
     MandateSnapshot,
 )
@@ -704,6 +706,43 @@ class Harness:
             strategy="full_document",
             model_deployment="memory",
         )
+
+
+@pytest.mark.asyncio
+async def test_cached_validation_preserves_fresh_canonical_warning_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+
+    def canonical_with_warning(source: SourceDocument) -> CanonicalDirective:
+        return replace(
+            _canonical(source),
+            findings=(
+                ReviewFinding(
+                    code="canonical_section_warning",
+                    severity="warning",
+                    message="Canonical warning",
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(
+        "directive_ingestion.reconcile.parse_canonical",
+        lambda source, _extraction, _hash: canonical_with_warning(source),
+    )
+    fresh = await harness.runner.validate_inputs()
+
+    await harness.runner.run_daily()
+    cached = await harness.runner.validate_inputs()
+
+    assert fresh["run_id"] != cached["run_id"]
+    assert fresh["warnings"] == cached["warnings"] == [
+        {"code": "canonical_section_warning", "severity": "warning"}
+    ]
+    assert fresh["validation_digest"] == cached["validation_digest"]
+    state = await harness.states.load(harness.sources[0], PROCESSING_HASH)
+    assert state is not None
+    assert state.validation_warnings == (("canonical_section_warning", "warning"),)
 
 
 @pytest.mark.asyncio

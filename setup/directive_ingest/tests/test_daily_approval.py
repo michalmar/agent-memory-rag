@@ -397,6 +397,7 @@ async def test_daily_binding_persists_validation_digest_to_source_state() -> Non
         directive_metadata=metadata,
         artifact_generation_id="generation",
         pending_cleanup=(),
+        validation_warnings=(),
     )
     runner = object.__new__(DirectiveIngestionRunner)
     runner.config = SimpleNamespace(processing_hash="a" * 64)
@@ -420,6 +421,7 @@ async def test_daily_binding_persists_validation_digest_to_source_state() -> Non
         validation_digest="approved-validation",
         mandate_checksum="b" * 64,
         pending_cleanup=(),
+        validation_warnings=(),
         expected_etag="etag",
     )
 

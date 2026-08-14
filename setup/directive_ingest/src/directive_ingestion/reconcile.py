@@ -1145,6 +1145,7 @@ class DirectiveIngestionRunner:
                 )
             record_kwargs: dict[str, object] = {
                 "pending_cleanup": state.pending_cleanup,
+                "validation_warnings": state.validation_warnings,
                 "validation_digest": validation_digest,
                 "mandate_checksum": mandate_checksum,
                 "expected_etag": snapshot.etag,
@@ -1495,8 +1496,17 @@ class DirectiveIngestionRunner:
         )
         if not await self._state_has_live_publication(item.source, state):
             return False
+        if item.extraction is None:
+            raise RuntimeError("Source-state repair requires the fresh extraction")
         await self.source_states.record(
-            item.source, item.metadata, bundle.artifact_generation_id
+            item.source,
+            item.metadata,
+            bundle.artifact_generation_id,
+            validation_warnings=_canonical_warning_tuples(
+                parse_canonical(
+                    item.source, item.extraction, self.config.processing_hash
+                ).findings
+            ),
         )
         return True
 
@@ -1882,6 +1892,9 @@ class DirectiveIngestionRunner:
                     and snapshot is not None
                     and snapshot.previous_source_state is None
                 ),
+                "validation_warnings": _canonical_warning_tuples(
+                    item.canonical.findings
+                ),
             }
             if validation_digest is not None:
                 record_kwargs["validation_digest"] = validation_digest
@@ -2031,6 +2044,7 @@ class DirectiveIngestionRunner:
                     repair_generation_salt=getattr(
                         state, "repair_generation_salt", None
                     ),
+                    validation_warnings=state.validation_warnings,
                     validation_digest=(
                         validation_digest
                         if validation_digest is not None
@@ -2829,20 +2843,32 @@ def _validation_warnings(
 ) -> list[dict[str, str]]:
     warnings: set[tuple[str, str]] = set()
     for item in metadata:
-        if item.extraction is None:
+        if item.extraction is None and item.source_state is not None:
+            warnings.update(item.source_state.validation_warnings)
             continue
-        canonical = parse_canonical(
-            item.source, item.extraction, processing_hash
-        )
-        warnings.update(
-            (finding.code, finding.severity)
-            for finding in canonical.findings
-            if finding.severity == "warning"
-        )
+        if item.extraction is not None:
+            canonical = parse_canonical(
+                item.source, item.extraction, processing_hash
+            )
+            warnings.update(_canonical_warning_tuples(canonical.findings))
     return [
         {"code": code, "severity": severity}
         for code, severity in sorted(warnings)[:100]
     ]
+
+
+def _canonical_warning_tuples(
+    findings: Any,
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        sorted(
+            {
+                (finding.code, finding.severity)
+                for finding in findings
+                if finding.severity == "warning"
+            }
+        )[:100]
+    )
 
 
 def _document_validation_digest(metadata: list[SourceMetadata]) -> str:

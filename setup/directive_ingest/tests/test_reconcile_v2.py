@@ -882,7 +882,10 @@ async def test_malformed_state_repairs_without_restaging_live_generation() -> No
 
     assert prepared == []
     runner.source_states.record.assert_awaited_once_with(
-        source, metadata, bundle.artifact_generation_id
+        source,
+        metadata,
+        bundle.artifact_generation_id,
+        validation_warnings=(),
     )
     runner.summaries.summarize.assert_not_awaited()
     runner.search.build_chunks.assert_not_awaited()

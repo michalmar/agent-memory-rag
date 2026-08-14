@@ -15,6 +15,9 @@ from .blob_repository import BlobArtifactRepository
 from .integrity import IntegrityValidationError
 from .source import SourceDocument
 
+MAX_VALIDATION_WARNINGS = 100
+MAX_VALIDATION_WARNING_CODE_LENGTH = 128
+
 
 @dataclass(frozen=True)
 class PublishedSourceState:
@@ -29,6 +32,7 @@ class PublishedSourceState:
     publication_state: str
     repair_generation_salt: str | None = None
     pending_cleanup: tuple[PublishedDirectiveVersion, ...] = ()
+    validation_warnings: tuple[tuple[str, str], ...] = ()
     validation_digest: str | None = None
     mandate_checksum: str | None = None
 
@@ -78,6 +82,9 @@ class SourceStateRepository:
                     PublishedDirectiveVersion.model_validate(bundle)
                     for bundle in value.get("pending_cleanup", [])
                 ),
+                validation_warnings=_parse_validation_warnings(
+                    value["validation_warnings"]
+                ),
                 validation_digest=value.get("validation_digest"),
                 mandate_checksum=value.get("mandate_checksum"),
             )
@@ -124,6 +131,7 @@ class SourceStateRepository:
         pending_cleanup: tuple[PublishedDirectiveVersion, ...] = (),
         *,
         repair_generation_salt: str | None = None,
+        validation_warnings: tuple[tuple[str, str], ...] = (),
         validation_digest: str | None = None,
         mandate_checksum: str | None = None,
         expected_etag: str | None = None,
@@ -143,6 +151,7 @@ class SourceStateRepository:
             raise ValueError(
                 "Repair generation salt must be a lowercase SHA-256 digest"
             )
+        canonical_warnings = _canonical_validation_warnings(validation_warnings)
         payload: dict[str, Any] = {
             "type": "source_state",
             "source_filename": source.source_name,
@@ -156,6 +165,10 @@ class SourceStateRepository:
             "publication_state": "published",
             "pending_cleanup": [
                 bundle.model_dump(mode="json") for bundle in pending_cleanup
+            ],
+            "validation_warnings": [
+                {"code": code, "severity": severity}
+                for code, severity in canonical_warnings
             ],
         }
         if repair_generation_salt is not None:
@@ -178,12 +191,14 @@ class SourceStateRepository:
         validation_digest: str | None = None,
         mandate_checksum: str | None = None,
         repair_generation_salt: str | None = None,
+        validation_warnings: tuple[tuple[str, str], ...] = (),
     ) -> None:
         await self.record(
             source,
             metadata,
             artifact_generation_id,
             repair_generation_salt=repair_generation_salt,
+            validation_warnings=validation_warnings,
             validation_digest=validation_digest,
             mandate_checksum=mandate_checksum,
         )
@@ -237,3 +252,36 @@ def _is_checksum(value: object) -> bool:
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def _parse_validation_warnings(value: object) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, list):
+        raise ValueError("Source-state validation warnings must be a list")
+    warnings: list[tuple[str, str]] = []
+    for warning in value:
+        if not isinstance(warning, dict):
+            raise ValueError("Source-state validation warning must be an object")
+        code = warning.get("code")
+        severity = warning.get("severity")
+        if not isinstance(code, str) or not isinstance(severity, str):
+            raise ValueError("Source-state validation warning is invalid")
+        warnings.append((code, severity))
+    return _canonical_validation_warnings(tuple(warnings))
+
+
+def _canonical_validation_warnings(
+    warnings: tuple[tuple[str, str], ...],
+) -> tuple[tuple[str, str], ...]:
+    if len(warnings) > MAX_VALIDATION_WARNINGS:
+        raise ValueError("Source-state validation warnings exceed the limit")
+    canonical = tuple(sorted(set(warnings)))
+    if canonical != warnings:
+        raise ValueError("Source-state validation warnings are not canonical")
+    if any(
+        not code
+        or len(code) > MAX_VALIDATION_WARNING_CODE_LENGTH
+        or severity != "warning"
+        for code, severity in warnings
+    ):
+        raise ValueError("Source-state validation warning is invalid")
+    return canonical
