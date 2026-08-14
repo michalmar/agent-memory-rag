@@ -51,6 +51,11 @@ def test_versions_compare_by_decimal_and_keep_display_spelling_separate() -> Non
     assert build_directive_version_id("č/12", "01.00") == "Č/12:v1"
 
 
+def test_versions_reject_non_ascii_decimal_digits() -> None:
+    with pytest.raises(ValueError):
+        normalize_directive_version("１２.０")
+
+
 def test_storage_keys_are_full_deterministic_lowercase_hashes() -> None:
     key = directive_storage_key("č/12")
     version_key = directive_version_storage_key("č/12", "01.00")

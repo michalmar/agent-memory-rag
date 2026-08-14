@@ -12,7 +12,7 @@ MAX_DIRECTIVE_VERSION_LENGTH = 64
 MAX_DIRECTIVE_VERSION_ID_LENGTH = 200
 DIRECTIVE_VERSION_ID_PREFIX = ":v"
 
-_VERSION_PATTERN = re.compile(r"^\d+(?:\.\d+)?$")
+_VERSION_PATTERN = re.compile(r"^[0-9]+(?:\.[0-9]+)?$")
 _SEPARATOR_SPACING_PATTERN = re.compile(r"\s*([/._-])\s*")
 
 
