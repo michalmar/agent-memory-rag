@@ -7,7 +7,11 @@ import json
 from typing import Any
 
 from azure.core import MatchConditions
-from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+from azure.core.exceptions import (
+    ResourceExistsError,
+    ResourceModifiedError,
+    ResourceNotFoundError,
+)
 from azure.storage.blob import ContentSettings
 from azure.storage.blob.aio import BlobServiceClient
 
@@ -43,11 +47,11 @@ class BlobArtifactRepository:
         blob_name: str,
         content: bytes,
         content_type: str,
-    ) -> None:
+    ) -> str:
         content_hash = hashlib.sha256(content).hexdigest()
         blob = self._container.get_blob_client(blob_name)
         try:
-            await blob.upload_blob(
+            response = await blob.upload_blob(
                 content,
                 overwrite=False,
                 metadata={"content_sha256": content_hash},
@@ -60,6 +64,11 @@ class BlobArtifactRepository:
                 raise RuntimeError(
                     f"Immutable artifact collision at {blob_name}"
                 ) from None
+            etag = getattr(properties, "etag", None)
+            if not isinstance(etag, str) or not etag:
+                raise RuntimeError(f"State artifact is missing an ETag: {blob_name}")
+            return etag
+        return _response_etag(response, blob_name)
 
     async def put_json(self, blob_name: str, value: object) -> None:
         content = json.dumps(
@@ -170,7 +179,12 @@ class BlobArtifactRepository:
             return None
 
     async def restore_bytes(
-        self, blob_name: str, content: bytes, candidate_etag: str
+        self,
+        blob_name: str,
+        content: bytes,
+        candidate_etag: str,
+        *,
+        content_type: str = "application/json",
     ) -> None:
         blob = self._container.get_blob_client(blob_name)
         await blob.upload_blob(
@@ -179,8 +193,37 @@ class BlobArtifactRepository:
             etag=candidate_etag,
             match_condition=MatchConditions.IfNotModified,
             metadata={"content_sha256": hashlib.sha256(content).hexdigest()},
-            content_settings=ContentSettings(content_type="application/json"),
+            content_settings=ContentSettings(content_type=content_type),
         )
+
+    async def replace_bytes(
+        self,
+        blob_name: str,
+        content: bytes,
+        content_type: str,
+        *,
+        expected_etag: str,
+    ) -> str:
+        """Conditionally replace a mutable repair target from trusted bytes."""
+        if not expected_etag:
+            raise RuntimeError(
+                f"Artifact replacement requires an ETag: {blob_name}"
+            )
+        blob = self._container.get_blob_client(blob_name)
+        try:
+            response = await blob.upload_blob(
+                content,
+                overwrite=True,
+                etag=expected_etag,
+                match_condition=MatchConditions.IfNotModified,
+                metadata={"content_sha256": hashlib.sha256(content).hexdigest()},
+                content_settings=ContentSettings(content_type=content_type),
+            )
+        except (ResourceExistsError, ResourceModifiedError) as exc:
+            raise RuntimeError(
+                f"Concurrent artifact replacement prevented at {blob_name}"
+            ) from exc
+        return _response_etag(response, blob_name)
 
     async def delete_if_etag(self, blob_name: str, candidate_etag: str) -> None:
         await self._container.delete_blob(

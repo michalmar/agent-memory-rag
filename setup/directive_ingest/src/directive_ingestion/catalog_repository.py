@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -21,6 +22,19 @@ from directive_contracts import (
 )
 
 from .integrity import IntegrityValidationError
+
+_SNAPSHOT_UNSET = object()
+
+
+@dataclass(frozen=True)
+class CatalogSlotSnapshot:
+    """Raw stable-slot state retained for conditional restoration."""
+
+    directive_id: str
+    directive_version_id: str
+    payload: dict[str, Any]
+    etag: str
+
 
 def version_item_id(directive_id: str, version_label: str) -> str:
     return published_directive_version_item_id(directive_id, version_label)
@@ -72,6 +86,26 @@ class DirectiveCatalogRepository:
         if item is None:
             return None
         return _validate_published_bundle(item)
+
+    async def snapshot_version(
+        self, directive_id: str, directive_version_id: str
+    ) -> CatalogSlotSnapshot | None:
+        """Read a stable slot without interpreting a possibly corrupt payload."""
+        payload = await self.get_version(directive_id, directive_version_id)
+        if payload is None:
+            return None
+        etag = payload.get("_etag")
+        if not isinstance(etag, str) or not etag:
+            raise IntegrityValidationError(
+                "Catalog version is missing an ETag: "
+                f"{directive_version_id}"
+            )
+        return CatalogSlotSnapshot(
+            directive_id=directive_id,
+            directive_version_id=directive_version_id,
+            payload=dict(payload),
+            etag=etag,
+        )
 
     async def stage_version(
         self,
@@ -145,7 +179,9 @@ class DirectiveCatalogRepository:
         self,
         bundle: PublishedDirectiveVersion,
         relations: tuple[DirectiveRelation, ...],
-    ) -> None:
+        *,
+        expected_snapshot: CatalogSlotSnapshot | None | object = _SNAPSHOT_UNSET,
+    ) -> str:
         if serialized_json_size(bundle) > PUBLISHED_BUNDLE_MAX_BYTES:
             raise RuntimeError(
                 "Published directive bundle exceeds "
@@ -172,7 +208,7 @@ class DirectiveCatalogRepository:
                     "published_at": now,
                 }
             )
-        await self._replace_published_bundle(bundle)
+        return await self._replace_published_bundle(bundle, expected_snapshot)
 
     async def activate_current(
         self, metadata: DirectiveMetadata, run_id: str
@@ -233,28 +269,28 @@ class DirectiveCatalogRepository:
             )
 
     async def _replace_published_bundle(
-        self, bundle: PublishedDirectiveVersion
-    ) -> None:
+        self,
+        bundle: PublishedDirectiveVersion,
+        expected_snapshot: CatalogSlotSnapshot | None | object = _SNAPSHOT_UNSET,
+    ) -> str:
         payload = bundle.model_dump(mode="json")
-        existing = await self.get_version(
-            bundle.directive_id, bundle.directive_version_id
-        )
+        if expected_snapshot is _SNAPSHOT_UNSET:
+            expected_snapshot = await self.snapshot_version(
+                bundle.directive_id, bundle.directive_version_id
+            )
         try:
-            if existing is None:
-                await self._container.create_item(body=payload)
-                return
-            etag = existing.get("_etag")
-            if not isinstance(etag, str) or not etag:
-                raise RuntimeError(
-                    "Existing catalog version is missing an ETag: "
-                    f"{bundle.directive_version_id}"
+            if expected_snapshot is None:
+                response = await self._container.create_item(body=payload)
+                return _catalog_response_etag(
+                    response, bundle.directive_version_id
                 )
-            await self._container.replace_item(
+            response = await self._container.replace_item(
                 item=bundle.id,
                 body=payload,
-                etag=etag,
+                etag=expected_snapshot.etag,
                 match_condition=MatchConditions.IfNotModified,
             )
+            return _catalog_response_etag(response, bundle.directive_version_id)
         except (
             exceptions.CosmosResourceExistsError,
             exceptions.CosmosAccessConditionFailedError,
@@ -333,18 +369,43 @@ class DirectiveCatalogRepository:
     async def restore_version(
         self,
         expected: PublishedDirectiveVersion,
-        previous: PublishedDirectiveVersion | None,
+        previous: CatalogSlotSnapshot | None,
+        candidate_etag: str,
     ) -> None:
         """Restore the stable version slot after a failed publication."""
         if previous is not None:
-            await self._replace_published_bundle(previous)
+            payload = {
+                key: value
+                for key, value in previous.payload.items()
+                if not key.startswith("_")
+            }
+            try:
+                await self._container.replace_item(
+                    item=expected.id,
+                    body=payload,
+                    etag=candidate_etag,
+                    match_condition=MatchConditions.IfNotModified,
+                )
+            except exceptions.CosmosAccessConditionFailedError as exc:
+                raise RuntimeError(
+                    "Concurrent catalog publication prevented restoring "
+                    f"{expected.directive_version_id}"
+                ) from exc
             return
         try:
             await self._container.delete_item(
-                item=expected.id, partition_key=expected.directive_id
+                item=expected.id,
+                partition_key=expected.directive_id,
+                etag=candidate_etag,
+                match_condition=MatchConditions.IfNotModified,
             )
         except exceptions.CosmosResourceNotFoundError:
             pass
+        except exceptions.CosmosAccessConditionFailedError as exc:
+            raise RuntimeError(
+                "Concurrent catalog publication prevented restoring "
+                f"{expected.directive_version_id}"
+            ) from exc
 
     async def restore_current(
         self, directive_id: str, previous: dict[str, Any] | None
@@ -494,3 +555,18 @@ def _validate_published_bundle(
             f"{bundle.directive_version_id} ({size} bytes)"
         )
     return bundle
+
+
+def _catalog_response_etag(response: object, directive_version_id: str) -> str:
+    etag = (
+        response.get("_etag") or response.get("etag")
+        if isinstance(response, dict)
+        else getattr(response, "etag", None)
+        or getattr(response, "_etag", None)
+    )
+    if not isinstance(etag, str) or not etag:
+        raise RuntimeError(
+            "Catalog version replacement is missing an ETag: "
+            f"{directive_version_id}"
+        )
+    return etag

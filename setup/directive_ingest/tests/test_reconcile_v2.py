@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from azure.core.exceptions import ResourceNotFoundError
+from azure.cosmos import exceptions
 from directive_contracts import (
     DirectiveMetadata,
     calculate_artifact_generation_id,
@@ -16,11 +17,20 @@ from directive_contracts import (
 
 from directive_ingestion.chunking import TextChunk
 from directive_ingestion.blob_repository import BlobArtifactRepository
-from directive_ingestion.catalog_repository import _validate_published_bundle
-from directive_ingestion.integrity import IntegrityValidationError
+from directive_ingestion.catalog_repository import (
+    CatalogSlotSnapshot,
+    DirectiveCatalogRepository,
+    _validate_published_bundle,
+)
+from directive_ingestion.integrity import (
+    CatalogResetRequiredError,
+    IntegrityValidationError,
+)
 from directive_ingestion.reconcile import (
     DirectiveIngestionRunner,
     MAX_PUBLIC_DIRECTIVES,
+    PublicationSnapshot,
+    SourceArtifactSnapshot,
     SourceMetadata,
     _generation_scoped_chunks,
     _generation_canonical_hash,
@@ -135,6 +145,164 @@ async def test_state_rollback_uses_only_the_candidate_write_etag() -> None:
 
     assert blob.upload_blob.await_args.kwargs["etag"] == "candidate-etag"
     assert container.delete_blob.await_args.kwargs["etag"] == "candidate-etag"
+
+
+@pytest.mark.asyncio
+async def test_catalog_raw_slot_snapshot_restores_corrupt_descriptor_by_etag() -> None:
+    raw = {
+        "id": "version:directive:v1",
+        "directive_id": "directive",
+        "malformed": object(),
+        "_etag": "before",
+    }
+    container = SimpleNamespace(
+        read_item=AsyncMock(return_value=raw),
+        replace_item=AsyncMock(return_value={"_etag": "candidate"}),
+    )
+    repository = object.__new__(DirectiveCatalogRepository)
+    repository._container = container
+    bundle = SimpleNamespace(
+        id="version:directive:v1",
+        directive_id="directive",
+        directive_version_id="directive:v1",
+        model_dump=lambda **_: {
+            "id": "version:directive:v1",
+            "directive_id": "directive",
+            "type": "version",
+        },
+    )
+
+    snapshot = await repository.snapshot_version("directive", "directive:v1")
+    assert snapshot is not None
+    assert snapshot.payload is not raw
+    assert snapshot.payload["malformed"] is raw["malformed"]
+
+    candidate_etag = await repository._replace_published_bundle(
+        bundle, snapshot
+    )
+    await repository.restore_version(bundle, snapshot, candidate_etag)
+
+    assert container.replace_item.await_args_list[0].kwargs["etag"] == "before"
+    restored = container.replace_item.await_args_list[1].kwargs
+    assert restored["etag"] == "candidate"
+    assert restored["body"]["malformed"] is raw["malformed"]
+    assert "_etag" not in restored["body"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_slot_rollback_refuses_etag_conflict() -> None:
+    repository = object.__new__(DirectiveCatalogRepository)
+    repository._container = SimpleNamespace(
+        replace_item=AsyncMock(
+            side_effect=exceptions.CosmosAccessConditionFailedError(
+                status_code=412, message="changed"
+            )
+        )
+    )
+    bundle = SimpleNamespace(
+        id="version:directive:v1",
+        directive_id="directive",
+        directive_version_id="directive:v1",
+    )
+    snapshot = CatalogSlotSnapshot(
+        "directive",
+        "directive:v1",
+        {"id": bundle.id, "directive_id": "directive", "_etag": "before"},
+        "before",
+    )
+
+    with pytest.raises(RuntimeError, match="Concurrent catalog publication"):
+        await repository.restore_version(bundle, snapshot, "candidate")
+
+
+@pytest.mark.asyncio
+async def test_source_artifact_repair_uses_snapshot_etag_not_immutable_write() -> None:
+    source = _source()
+    item = SimpleNamespace(
+        source=source,
+        bundle=SimpleNamespace(
+            source_hash=source.source_hash,
+            artifacts=SimpleNamespace(
+                source_blob_name="directives/key/source.pdf",
+                canonical_blob_name="directives/key/document.md",
+            ),
+        ),
+        canonical=SimpleNamespace(markdown="# Directive\n"),
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.blobs = SimpleNamespace(
+        replace_bytes=AsyncMock(return_value="candidate"),
+        put_immutable=AsyncMock(),
+        validate_hash=AsyncMock(),
+    )
+
+    candidate = await runner._publish_artifacts(
+        item,
+        SourceArtifactSnapshot(
+            item.bundle.artifacts.source_blob_name, b"corrupt", "before"
+        ),
+    )
+
+    assert candidate == "candidate"
+    runner.blobs.replace_bytes.assert_awaited_once_with(
+        item.bundle.artifacts.source_blob_name,
+        source.content,
+        "application/pdf",
+        expected_etag="before",
+    )
+    runner.blobs.put_immutable.assert_awaited_once_with(
+        item.bundle.artifacts.canonical_blob_name,
+        b"# Directive\n",
+        "text/markdown; charset=utf-8",
+    )
+
+
+@pytest.mark.asyncio
+async def test_source_artifact_rollback_propagates_etag_conflict() -> None:
+    item = SimpleNamespace(
+        bundle=SimpleNamespace(
+            directive_id="directive",
+            directive_version_id="directive:v1",
+            artifact_generation_id="candidate",
+            artifacts=SimpleNamespace(source_blob_name="source.pdf"),
+        ),
+        canonical=SimpleNamespace(
+            metadata=SimpleNamespace(processing_hash="a" * 64)
+        ),
+        search_chunks=[],
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.catalog = SimpleNamespace(
+        restore_current=AsyncMock(),
+        snapshot_version=AsyncMock(),
+        restore_version=AsyncMock(),
+    )
+    runner.source_states = SimpleNamespace()
+    runner.blobs = SimpleNamespace(
+        restore_bytes=AsyncMock(side_effect=RuntimeError("ETag conflict"))
+    )
+    snapshot = PublicationSnapshot(
+        item=item,
+        previous_version=None,
+        previous_catalog_slot=None,
+        previous_current=None,
+        previous_current_bundle=None,
+        previous_source_state=None,
+        previous_source_artifact=SourceArtifactSnapshot(
+            "source.pdf", b"old", "before"
+        ),
+        candidate_source_artifact_etag="candidate",
+    )
+
+    with pytest.raises(RuntimeError, match="ETag conflict"):
+        await runner._rollback_publication([snapshot], None)
+
+    runner.blobs.restore_bytes.assert_awaited_once_with(
+        "source.pdf",
+        b"old",
+        "candidate",
+        content_type="application/pdf",
+    )
 
 
 @pytest.mark.asyncio
@@ -693,6 +861,111 @@ async def test_corrupt_live_generation_gets_isolated_repair_generation() -> None
         reconcile_module._build_published_bundle = original_bundle
     assert captured[0] is not None
     assert canonical.markdown == "# Directive\n"
+
+
+@pytest.mark.asyncio
+async def test_corrupt_catalog_slot_repair_does_not_salt_from_bad_descriptor() -> None:
+    source = _source()
+    metadata = _metadata(source)
+    canonical = SimpleNamespace(
+        metadata=metadata,
+        markdown="# Directive\n",
+        sections=(),
+        findings=(),
+        relations=(),
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.config = SimpleNamespace(
+        processing_hash=metadata.processing_hash,
+        chunk_token_limit=800,
+        chunk_overlap_tokens=120,
+    )
+    runner.summaries = SimpleNamespace(summarize=AsyncMock(return_value={}))
+    runner.search = SimpleNamespace(build_chunks=AsyncMock(return_value=[]))
+    runner.blobs = SimpleNamespace(quarantine=AsyncMock())
+    runner.catalog = SimpleNamespace(
+        get_published_version=AsyncMock(
+            side_effect=IntegrityValidationError("invalid descriptor")
+        ),
+        snapshot_version=AsyncMock(
+            return_value=CatalogSlotSnapshot(
+                metadata.directive_id,
+                metadata.directive_version_id,
+                {"malformed": object(), "_etag": "before"},
+                "before",
+            )
+        ),
+    )
+    runner.source_states = SimpleNamespace(record=AsyncMock())
+    import directive_ingestion.reconcile as reconcile_module
+
+    captured: list[object] = []
+    original_parse = reconcile_module.parse_canonical
+    original_chunks = reconcile_module.chunk_sections
+    original_manifest = reconcile_module._build_manifest
+    original_bundle = reconcile_module._build_published_bundle
+    reconcile_module.parse_canonical = lambda *_args: canonical
+    reconcile_module.chunk_sections = lambda *_args, **_kwargs: ([], ())
+    reconcile_module._build_manifest = lambda _value, *_args: captured.append(
+        _args[-1]
+    ) or object()
+    reconcile_module._build_published_bundle = lambda *_args: (object(), ())
+    try:
+        await runner.prepare_changed_documents(
+            [SourceMetadata(source, metadata, object(), None)], "run"
+        )
+    finally:
+        reconcile_module.parse_canonical = original_parse
+        reconcile_module.chunk_sections = original_chunks
+        reconcile_module._build_manifest = original_manifest
+        reconcile_module._build_published_bundle = original_bundle
+
+    assert captured == [None]
+    runner.catalog.snapshot_version.assert_awaited_once_with(
+        metadata.directive_id, metadata.directive_version_id
+    )
+
+
+@pytest.mark.asyncio
+async def test_unrestorable_corrupt_current_catalog_aborts_before_writes() -> None:
+    metadata = _metadata(_source())
+    item = SimpleNamespace(
+        bundle=SimpleNamespace(
+            directive_id=metadata.directive_id,
+            directive_version_id=metadata.directive_version_id,
+            source_hash=metadata.source_hash,
+            processing_hash=metadata.processing_hash,
+            artifact_generation_id="candidate",
+            artifacts=SimpleNamespace(source_blob_name="source.pdf"),
+        ),
+        source=_source(),
+        canonical=SimpleNamespace(
+            metadata=SimpleNamespace(processing_hash=metadata.processing_hash)
+        ),
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.catalog = SimpleNamespace(
+        snapshot_version=AsyncMock(
+            return_value=CatalogSlotSnapshot(
+                metadata.directive_id,
+                metadata.directive_version_id,
+                {"malformed": True, "_etag": "before"},
+                "before",
+            )
+        ),
+        get_published_version=AsyncMock(
+            side_effect=IntegrityValidationError("invalid descriptor")
+        ),
+        get_current=AsyncMock(
+            return_value={"directive_version_id": "other:v1"}
+        ),
+    )
+    runner.stage_documents = AsyncMock()
+
+    with pytest.raises(CatalogResetRequiredError, match="operator reset"):
+        await runner._publish_transaction([item])
+
+    runner.stage_documents.assert_not_awaited()
 
 
 @pytest.mark.asyncio

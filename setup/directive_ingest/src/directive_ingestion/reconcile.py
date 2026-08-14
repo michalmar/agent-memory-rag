@@ -40,13 +40,16 @@ from openai import APIError
 
 from .blob_repository import BlobArtifactRepository
 from .canonical import CanonicalDirective, parse_canonical
-from .catalog_repository import DirectiveCatalogRepository
+from .catalog_repository import (
+    CatalogSlotSnapshot,
+    DirectiveCatalogRepository,
+)
 from .chunking import TextChunk, chunk_sections
 from .clients import IngestionClients
 from .config import IngestionConfig
 from .content_repository import DirectiveContentRepository
 from .document_intelligence import DocumentIntelligenceExtractor
-from .integrity import IntegrityValidationError
+from .integrity import CatalogResetRequiredError, IntegrityValidationError
 from .mandate_projection import MandateRepository, parse_mandates
 from .publication_commit_repository import PublicationCommitRepository
 from .search_repository import DirectiveSearchRepository
@@ -121,10 +124,22 @@ class ReconcileResult:
 class PublicationSnapshot:
     item: PreparedDirective
     previous_version: PublishedDirectiveVersion | None
+    previous_catalog_slot: CatalogSlotSnapshot | None
     previous_current: dict[str, Any] | None
     previous_current_bundle: PublishedDirectiveVersion | None
     previous_source_state: SourceStateSnapshot | None
+    previous_source_artifact: SourceArtifactSnapshot | None
+    preserve_candidate_generation: bool = False
+    candidate_catalog_etag: str | None = None
+    candidate_source_artifact_etag: str | None = None
     candidate_source_state_etag: str | None = None
+
+
+@dataclass(frozen=True)
+class SourceArtifactSnapshot:
+    blob_name: str
+    content: bytes
+    etag: str
 
 
 @dataclass(frozen=True)
@@ -141,6 +156,57 @@ class DailyRunApproval:
     validation_digest: str
     environment_digest: str
     source_inventory_digest: str
+
+
+@dataclass(frozen=True)
+class ValidationSnapshot:
+    """The complete metadata-only input that an approval authorizes."""
+
+    sources: list[SourceDocument]
+    metadata: list[SourceMetadata]
+    mandates: Any
+    payload: dict[str, object]
+
+    @property
+    def validation_digest(self) -> str:
+        return str(self.payload["validation_digest"])
+
+
+def _publication_snapshot(
+    snapshots: list[PublicationSnapshot] | None,
+    item: PreparedDirective,
+) -> PublicationSnapshot | None:
+    return next(
+        (snapshot for snapshot in snapshots or [] if snapshot.item is item),
+        None,
+    )
+
+
+def _replace_publication_snapshot(
+    snapshots: list[PublicationSnapshot],
+    item: PreparedDirective,
+    **updates: object,
+) -> None:
+    for index, snapshot in enumerate(snapshots):
+        if snapshot.item is item:
+            snapshots[index] = replace(snapshot, **updates)
+            return
+    raise RuntimeError("Publication snapshot is missing its prepared directive")
+
+
+def _current_matches_bundle(
+    current: dict[str, Any] | None,
+    bundle: PublishedDirectiveVersion,
+) -> bool:
+    return bool(
+        current
+        and current.get("directive_version_id")
+        == bundle.directive_version_id
+        and current.get("source_hash") == bundle.source_hash
+        and current.get("processing_hash") == bundle.processing_hash
+        and current.get("artifact_generation_id")
+        == bundle.artifact_generation_id
+    )
 
 
 class DirectiveIngestionRunner:
@@ -254,11 +320,28 @@ class DirectiveIngestionRunner:
         }
 
     async def verify(
-        self, *, validation_digest: str | None = None
+        self,
+        *,
+        validation_digest: str | None = None,
+        expected_validation_digest: str | None = None,
     ) -> dict[str, object]:
+        expected_validation_digest = _expected_validation_digest(
+            validation_digest, expected_validation_digest
+        )
         run_id = _run_id()
         sources = await self.discover_sources()
         _validate_public_corpus_limit(sources)
+        environment = _safe_environment(self.config)
+        environment_digest = _public_record_digest(environment)
+        source_inventory_digest = _public_record_digest(
+            _source_inventory(sources)
+        )
+        if expected_validation_digest is not None:
+            await self._validate_published_approval(
+                expected_validation_digest,
+                environment_digest,
+                source_inventory_digest,
+            )
         source_states: list[PublishedSourceState] = []
         for source in sources:
             state = await self.source_states.load(
@@ -272,6 +355,13 @@ class DirectiveIngestionRunner:
                     f"{source.source_name}"
                 )
             source_states.append(state)
+        if expected_validation_digest is not None and any(
+            state.validation_digest != expected_validation_digest
+            for state in source_states
+        ):
+            raise RuntimeError(
+                "Source-state records do not match the approved validation digest"
+            )
         expected_state_names = {
             self.source_states.blob_name(source, self.config.processing_hash)
             for source in sources
@@ -559,11 +649,12 @@ class DirectiveIngestionRunner:
             "record_schema": "directive.verify.v2",
             "success": True,
             "run_id": run_id,
-            "environment": _safe_environment(self.config),
+            "environment": environment,
+            "environment_digest": environment_digest,
             "processing_version": self.config.processing_version,
             "processing_hash": self.config.processing_hash,
             "search_index": self.config.search_index,
-            "source_inventory_digest": _public_record_digest(inventory),
+            "source_inventory_digest": source_inventory_digest,
             "source_count": len(sources),
             "directive_count": len(directive_ids),
             "normalized_directive_ids": normalized_ids,
@@ -571,15 +662,15 @@ class DirectiveIngestionRunner:
             "warnings": [],
             "warning_count": 0,
             "cross_store": cross_store,
+            "validation_digest": expected_validation_digest,
         }
-        if validation_digest is not None:
-            payload["validation_digest"] = validation_digest
         payload["state_digest"] = _public_record_digest(
             {
                 key: payload[key]
                 for key in (
                     "record_schema",
                     "environment",
+                    "environment_digest",
                     "processing_version",
                     "processing_hash",
                     "search_index",
@@ -591,7 +682,6 @@ class DirectiveIngestionRunner:
                     "cross_store",
                     "validation_digest",
                 )
-                if key in payload
             }
         )
         payload["verify_digest"] = _public_record_digest(payload)
@@ -617,45 +707,13 @@ class DirectiveIngestionRunner:
         source_directory: Path | None = None,
         mandate_csv: Path | None = None,
     ) -> dict[str, object]:
-        run_id = _run_id()
         sources = await self.discover_sources(source_directory)
         _validate_public_corpus_limit(sources)
-        metadata = await self.extract_or_load_metadata(sources, run_id)
-        await self._validate_and_quarantine(metadata, run_id)
-        known_ids = {item.metadata.directive_id for item in metadata}
-        mandates = parse_mandates(
-            mandate_csv or self.config.mandate_csv,
-            self.config.azure_tenant_id,
-            known_ids,
+        snapshot = await self._metadata_validation_snapshot(
+            sources, _run_id(), mandate_csv
         )
-        warnings = _validation_warnings(metadata, self.config.processing_hash)
-        source_inventory = _source_inventory(sources)
-        environment = _safe_environment(self.config)
-        payload: dict[str, object] = {
-            "record_schema": "directive.validate.v2",
-            "success": True,
-            "run_id": run_id,
-            "environment": environment,
-            "environment_digest": _public_record_digest(environment),
-            "processing_version": self.config.processing_version,
-            "processing_hash": self.config.processing_hash,
-            "search_index": self.config.search_index,
-            "source_count": len(sources),
-            "directive_count": len(known_ids),
-            "normalized_directive_ids": sorted(known_ids),
-            "directive_version_ids": sorted(
-                item.metadata.directive_version_id for item in metadata
-            ),
-            "mandate_count": len(mandates.assignments),
-            "mandate_user_count": mandates.user_count,
-            "warnings": warnings,
-            "warning_count": len(warnings),
-            "failures": [],
-            "source_inventory_digest": _public_record_digest(source_inventory),
-        }
-        payload["validation_digest"] = _public_record_digest(payload)
-        format_result(payload)
-        return payload
+        format_result(snapshot.payload)
+        return snapshot.payload
 
     async def run_daily(
         self,
@@ -675,14 +733,19 @@ class DirectiveIngestionRunner:
             approved_source_inventory_digest,
         )
         self._validate_daily_approval(approval, sources)
-        metadata = await self.extract_or_load_metadata(sources, run_id)
-        await self._validate_and_quarantine(metadata, run_id)
-        known_ids = {item.metadata.directive_id for item in metadata}
-        parsed_mandates = parse_mandates(
-            mandate_csv or self.config.mandate_csv,
-            self.config.azure_tenant_id,
-            known_ids,
+        snapshot = await self._metadata_validation_snapshot(
+            sources, run_id, mandate_csv
         )
+        metadata = snapshot.metadata
+        parsed_mandates = snapshot.mandates
+        known_ids = {item.metadata.directive_id for item in metadata}
+        self._validate_daily_validation_snapshot(approval, snapshot)
+        if approval is not None:
+            await self._validate_published_approval(
+                approval.validation_digest,
+                approval.environment_digest,
+                approval.source_inventory_digest,
+            )
         marker_before = await self.commits.load()
         self._validate_pending_marker_corpus(
             metadata,
@@ -704,6 +767,9 @@ class DirectiveIngestionRunner:
                 prepared,
                 parsed_mandates if not mandates_current else None,
                 run_id,
+                validation_digest=(
+                    approval.validation_digest if approval is not None else None
+                ),
             )
         await self._reconcile_after_publication(
             metadata,
@@ -727,8 +793,12 @@ class DirectiveIngestionRunner:
                 complete=True,
             )
             mandate_changed = False
-        else:
+        elif getattr(self.catalog, "snapshot_version", None) is None:
             raise RuntimeError("Mandate publication transaction did not complete")
+        if approval is not None:
+            await self._bind_source_state_validation_digest(
+                metadata, approval.validation_digest
+            )
         result = ReconcileResult(
             run_id=run_id,
             source_count=len(sources),
@@ -741,7 +811,7 @@ class DirectiveIngestionRunner:
             mandate_changed=mandate_changed,
         )
         await self.verify(
-            validation_digest=(
+            expected_validation_digest=(
                 approval.validation_digest if approval is not None else None
             )
         )
@@ -884,6 +954,89 @@ class DirectiveIngestionRunner:
             raise ValueError(
                 "Approved source inventory digest does not match discovered "
                 "sources"
+            )
+
+    async def _metadata_validation_snapshot(
+        self,
+        sources: list[SourceDocument],
+        run_id: str,
+        mandate_csv: Path | None,
+    ) -> ValidationSnapshot:
+        """Build the common metadata-only snapshot before any summary work."""
+        metadata = await self.extract_or_load_metadata(sources, run_id)
+        await self._validate_and_quarantine(metadata, run_id)
+        known_ids = {item.metadata.directive_id for item in metadata}
+        mandates = parse_mandates(
+            mandate_csv or self.config.mandate_csv,
+            self.config.azure_tenant_id,
+            known_ids,
+        )
+        warnings = _validation_warnings(metadata, self.config.processing_hash)
+        payload = _validation_payload(
+            self.config,
+            run_id,
+            sources,
+            metadata,
+            mandates,
+            warnings,
+        )
+        return ValidationSnapshot(sources, metadata, mandates, payload)
+
+    def _validate_daily_validation_snapshot(
+        self, approval: DailyRunApproval | None, snapshot: ValidationSnapshot
+    ) -> None:
+        if approval is None:
+            return
+        if approval.validation_digest != snapshot.validation_digest:
+            raise ValueError(
+                "Approved validation digest does not match the metadata snapshot"
+            )
+
+    async def _validate_published_approval(
+        self,
+        validation_digest: str,
+        environment_digest: str,
+        source_inventory_digest: str,
+    ) -> None:
+        """Read only the approval named by the expected immutable digest."""
+        marker = await self.blobs.get_json(
+            f"publication-approval/{validation_digest}.json"
+        )
+        expected = {
+            "record_schema": "directive.approval.v2",
+            "validation_digest": validation_digest,
+            "environment_digest": environment_digest,
+            "source_inventory_digest": source_inventory_digest,
+            "processing_hash": self.config.processing_hash,
+        }
+        if marker != expected:
+            raise RuntimeError(
+                "Published approval marker does not exactly match the expected "
+                "validation snapshot"
+            )
+
+    async def _bind_source_state_validation_digest(
+        self, metadata: list[SourceMetadata], validation_digest: str
+    ) -> None:
+        """Persist the approved snapshot identity with every live source state."""
+        for item in metadata:
+            state = await self.source_states.load(
+                item.source, self.config.processing_hash
+            )
+            if state is None or not await self._state_has_live_publication(
+                item.source, state
+            ):
+                raise RuntimeError(
+                    "Source-state does not match a live published bundle: "
+                    f"{item.source.source_name}"
+                )
+            if state.validation_digest == validation_digest:
+                continue
+            await self.source_states.record(
+                item.source,
+                state.directive_metadata,
+                state.artifact_generation_id,
+                validation_digest=validation_digest,
             )
 
     async def publish_mandates(
@@ -1041,10 +1194,31 @@ class DirectiveIngestionRunner:
                 canonical = parse_canonical(
                     item.source, item.extraction, self.config.processing_hash
                 )
-                existing_bundle = await self.catalog.get_published_version(
-                    canonical.metadata.directive_id,
-                    canonical.metadata.directive_version_id,
-                )
+                try:
+                    existing_bundle = await self.catalog.get_published_version(
+                        canonical.metadata.directive_id,
+                        canonical.metadata.directive_version_id,
+                    )
+                except IntegrityValidationError:
+                    snapshot_method = getattr(
+                        self.catalog, "snapshot_version", None
+                    )
+                    if snapshot_method is None:
+                        raise CatalogResetRequiredError(
+                            "Catalog repair requires a raw ETag snapshot: "
+                            f"{canonical.metadata.directive_version_id}"
+                        ) from None
+                    if await snapshot_method(
+                        canonical.metadata.directive_id,
+                        canonical.metadata.directive_version_id,
+                    ) is None:
+                        raise CatalogResetRequiredError(
+                            "Corrupt catalog slot disappeared before repair: "
+                            f"{canonical.metadata.directive_version_id}"
+                        ) from None
+                    # The source document, not a malformed stored descriptor,
+                    # is authoritative for a deterministic replacement.
+                    existing_bundle = None
                 text_chunks, chunk_findings = chunk_sections(
                     canonical.metadata.directive_version_id,
                     canonical.metadata.source_hash,
@@ -1119,9 +1293,12 @@ class DirectiveIngestionRunner:
 
     async def _repair_source_state_if_live(self, item: SourceMetadata) -> bool:
         """Repair only the private state record when every public store is exact."""
-        bundle = await self.catalog.get_published_version(
-            item.metadata.directive_id, item.metadata.directive_version_id
-        )
+        try:
+            bundle = await self.catalog.get_published_version(
+                item.metadata.directive_id, item.metadata.directive_version_id
+            )
+        except IntegrityValidationError:
+            return False
         if bundle is None:
             return False
         state = PublishedSourceState(
@@ -1142,9 +1319,27 @@ class DirectiveIngestionRunner:
         )
         return True
 
-    async def stage_documents(self, prepared: list[PreparedDirective]) -> None:
+    async def stage_documents(
+        self,
+        prepared: list[PreparedDirective],
+        snapshots: list[PublicationSnapshot] | None = None,
+    ) -> None:
         for item in prepared:
-            await self._publish_artifacts(item)
+            snapshot = _publication_snapshot(snapshots, item)
+            candidate_etag = await self._publish_artifacts(
+                item,
+                snapshot.previous_source_artifact if snapshot else None,
+            )
+            if snapshots is not None and snapshot is not None:
+                _replace_publication_snapshot(
+                    snapshots,
+                    item,
+                    candidate_source_artifact_etag=(
+                        candidate_etag
+                        if isinstance(candidate_etag, str)
+                        else None
+                    ),
+                )
             for content_item in item.content_items:
                 await self.content.create_or_compare(content_item)
             await self.content.validate_bundle(item.bundle)
@@ -1155,7 +1350,11 @@ class DirectiveIngestionRunner:
                 item.findings,
             )
 
-    async def publish_documents(self, prepared: list[PreparedDirective]) -> None:
+    async def publish_documents(
+        self,
+        prepared: list[PreparedDirective],
+        snapshots: list[PublicationSnapshot] | None = None,
+    ) -> None:
         try:
             for item in prepared:
                 await self.search.publish_chunks(item.search_chunks)
@@ -1163,10 +1362,28 @@ class DirectiveIngestionRunner:
                     item.canonical,
                     (chunk.id for chunk in item.search_chunks),
                 )
-                await self.catalog.publish_version(
-                    item.bundle,
-                    item.canonical.relations,
-                )
+                snapshot = _publication_snapshot(snapshots, item)
+                if snapshot is None or snapshot.previous_catalog_slot is None:
+                    candidate_etag = await self.catalog.publish_version(
+                        item.bundle,
+                        item.canonical.relations,
+                    )
+                else:
+                    candidate_etag = await self.catalog.publish_version(
+                        item.bundle,
+                        item.canonical.relations,
+                        expected_snapshot=snapshot.previous_catalog_slot,
+                    )
+                if snapshots is not None and snapshot is not None:
+                    _replace_publication_snapshot(
+                        snapshots,
+                        item,
+                        candidate_catalog_etag=(
+                            candidate_etag
+                            if isinstance(candidate_etag, str)
+                            else None
+                        ),
+                    )
                 await self.catalog.validate_published(item.bundle)
         except (RuntimeError, cosmos_exceptions.CosmosHttpResponseError):
             for item in prepared:
@@ -1185,45 +1402,101 @@ class DirectiveIngestionRunner:
         prepared: list[PreparedDirective],
         mandates: Any | None = None,
         run_id: str = "",
+        *,
+        validation_digest: str | None = None,
     ) -> tuple[
         list[PublishedDirectiveVersion], MandatePublicationSnapshot | None
     ]:
         """Preserve stable catalog slots and current pointers on any late failure."""
         snapshots: list[PublicationSnapshot] = []
         for item in prepared:
-            previous_version = await self.catalog.get_published_version(
-                item.bundle.directive_id, item.bundle.directive_version_id
+            snapshot_method = getattr(self.catalog, "snapshot_version", None)
+            previous_catalog_slot = (
+                await snapshot_method(
+                    item.bundle.directive_id, item.bundle.directive_version_id
+                )
+                if snapshot_method is not None
+                else None
             )
+            try:
+                previous_version = await self.catalog.get_published_version(
+                    item.bundle.directive_id, item.bundle.directive_version_id
+                )
+            except IntegrityValidationError:
+                if previous_catalog_slot is None:
+                    raise CatalogResetRequiredError(
+                        "Catalog repair requires a raw ETag snapshot: "
+                        f"{item.bundle.directive_version_id}"
+                    ) from None
+                previous_version = None
             previous_current = await self.catalog.get_current(
                 item.bundle.directive_id
             )
             previous_current_bundle = None
+            preserve_candidate_generation = False
             if isinstance(
                 (version_id := (previous_current or {}).get(
                     "directive_version_id"
                 )),
                 str,
             ):
-                previous_current_bundle = (
-                    await self.catalog.get_published_version(
-                        item.bundle.directive_id, version_id
+                try:
+                    previous_current_bundle = (
+                        await self.catalog.get_published_version(
+                            item.bundle.directive_id, version_id
+                        )
                     )
-                )
-            snapshot_method = getattr(self.source_states, "snapshot", None)
+                except IntegrityValidationError:
+                    if (
+                        version_id == item.bundle.directive_version_id
+                        and _current_matches_bundle(
+                            previous_current, item.bundle
+                        )
+                    ):
+                        preserve_candidate_generation = True
+                    else:
+                        raise CatalogResetRequiredError(
+                            "Corrupt current catalog descriptor requires "
+                            "operator reset before publication: "
+                            f"{version_id}"
+                        ) from None
+            state_snapshot_method = getattr(self.source_states, "snapshot", None)
             previous_source_state = (
-                await snapshot_method(
+                await state_snapshot_method(
                     item.source, item.canonical.metadata.processing_hash
                 )
-                if snapshot_method is not None
+                if state_snapshot_method is not None
+                else None
+            )
+            artifact_snapshot_method = getattr(
+                self.blobs, "read_bytes_with_etag", None
+            )
+            artifact_snapshot = (
+                await artifact_snapshot_method(
+                    item.bundle.artifacts.source_blob_name
+                )
+                if artifact_snapshot_method is not None
+                else None
+            )
+            previous_source_artifact = (
+                SourceArtifactSnapshot(
+                    item.bundle.artifacts.source_blob_name,
+                    artifact_snapshot[0],
+                    artifact_snapshot[1],
+                )
+                if artifact_snapshot is not None
                 else None
             )
             snapshots.append(
                 PublicationSnapshot(
-                    item,
-                    previous_version,
-                    previous_current,
-                    previous_current_bundle,
-                    previous_source_state,
+                    item=item,
+                    previous_version=previous_version,
+                    previous_catalog_slot=previous_catalog_slot,
+                    previous_current=previous_current,
+                    previous_current_bundle=previous_current_bundle,
+                    previous_source_state=previous_source_state,
+                    previous_source_artifact=previous_source_artifact,
+                    preserve_candidate_generation=preserve_candidate_generation,
                 )
             )
         mandate_snapshot: MandatePublicationSnapshot | None = None
@@ -1235,12 +1508,14 @@ class DirectiveIngestionRunner:
                 mandate_snapshot = MandatePublicationSnapshot(
                     snapshot, previous_active, changed
                 )
-            await self.stage_documents(prepared)
-            await self.publish_documents(prepared)
+            await self.stage_documents(prepared, snapshots)
+            await self.publish_documents(prepared, snapshots)
             await self.activate_documents(prepared)
             if mandate_snapshot is not None and mandate_snapshot.changed:
                 await self.mandates.activate(mandate_snapshot.snapshot, run_id)
-            await self.record_source_states(prepared, snapshots)
+            await self.record_source_states(
+                prepared, snapshots, validation_digest=validation_digest
+            )
         except Exception:
             await self._rollback_publication(snapshots, mandate_snapshot)
             raise
@@ -1276,9 +1551,18 @@ class DirectiveIngestionRunner:
             await self.catalog.restore_current(
                 item.bundle.directive_id, snapshot.previous_current
             )
-            await self.catalog.restore_version(
-                item.bundle, snapshot.previous_version
-            )
+            if snapshot.candidate_catalog_etag is not None:
+                await self.catalog.restore_version(
+                    item.bundle,
+                    snapshot.previous_catalog_slot,
+                    snapshot.candidate_catalog_etag,
+                )
+            elif getattr(self.catalog, "snapshot_version", None) is None:
+                # Compatibility with non-ETag test doubles; production
+                # publication always records the replacement ETag above.
+                await self.catalog.restore_version(
+                    item.bundle, snapshot.previous_version
+                )
             if snapshot.candidate_source_state_etag is not None:
                 restore_method = getattr(self.source_states, "restore", None)
                 if restore_method is None:
@@ -1291,10 +1575,26 @@ class DirectiveIngestionRunner:
                     item.canonical.metadata.processing_hash,
                     snapshot.candidate_source_state_etag,
                 )
+            if snapshot.candidate_source_artifact_etag is not None:
+                if snapshot.previous_source_artifact is None:
+                    await self.blobs.delete_if_etag(
+                        item.bundle.artifacts.source_blob_name,
+                        snapshot.candidate_source_artifact_etag,
+                    )
+                else:
+                    await self.blobs.restore_bytes(
+                        snapshot.previous_source_artifact.blob_name,
+                        snapshot.previous_source_artifact.content,
+                        snapshot.candidate_source_artifact_etag,
+                        content_type="application/pdf",
+                    )
             if (
-                snapshot.previous_version is not None
-                and snapshot.previous_version.artifact_generation_id
-                == item.bundle.artifact_generation_id
+                snapshot.preserve_candidate_generation
+                or (
+                    snapshot.previous_version is not None
+                    and snapshot.previous_version.artifact_generation_id
+                    == item.bundle.artifact_generation_id
+                )
             ):
                 continue
             if snapshot.previous_current_bundle is not None:
@@ -1328,6 +1628,8 @@ class DirectiveIngestionRunner:
         self,
         prepared: list[PreparedDirective],
         snapshots: list[PublicationSnapshot] | None = None,
+        *,
+        validation_digest: str | None = None,
     ) -> None:
         """Commit private idempotency records only after live publication checks."""
         for item in prepared:
@@ -1345,11 +1647,8 @@ class DirectiveIngestionRunner:
                 ),
                 None,
             )
-            candidate_etag = await self.source_states.record(
-                item.source,
-                item.canonical.metadata,
-                item.bundle.artifact_generation_id,
-                pending_cleanup=tuple(
+            record_kwargs: dict[str, object] = {
+                "pending_cleanup": tuple(
                     bundle
                     for snapshot in snapshots or []
                     if snapshot.item is item
@@ -1361,16 +1660,24 @@ class DirectiveIngestionRunner:
                     and bundle.artifact_generation_id
                     != item.bundle.artifact_generation_id
                 ),
-                expected_etag=(
+                "expected_etag": (
                     snapshot.previous_source_state.etag
                     if snapshot and snapshot.previous_source_state is not None
                     else None
                 ),
-                require_absent=(
+                "require_absent": (
                     snapshots is not None
                     and snapshot is not None
                     and snapshot.previous_source_state is None
                 ),
+            }
+            if validation_digest is not None:
+                record_kwargs["validation_digest"] = validation_digest
+            candidate_etag = await self.source_states.record(
+                item.source,
+                item.canonical.metadata,
+                item.bundle.artifact_generation_id,
+                **record_kwargs,
             )
             if snapshots is not None:
                 for index, snapshot in enumerate(snapshots):
@@ -1492,6 +1799,7 @@ class DirectiveIngestionRunner:
                     item.source,
                     state.directive_metadata,
                     state.artifact_generation_id,
+                    validation_digest=validation_digest,
                 )
 
     async def _validate_candidate_documents(
@@ -1643,13 +1951,26 @@ class DirectiveIngestionRunner:
         """Compatibility wrapper preserving staged publication rollback semantics."""
         await self._publish_transaction(prepared, None, run_id)
 
-    async def _publish_artifacts(self, item: PreparedDirective) -> None:
+    async def _publish_artifacts(
+        self,
+        item: PreparedDirective,
+        source_snapshot: SourceArtifactSnapshot | None = None,
+    ) -> str | None:
         artifacts = item.bundle.artifacts
-        await self.blobs.put_immutable(
-            artifacts.source_blob_name,
-            item.source.content,
-            "application/pdf",
-        )
+        candidate_source_etag: str | None = None
+        if source_snapshot is None:
+            candidate_source_etag = await self.blobs.put_immutable(
+                artifacts.source_blob_name,
+                item.source.content,
+                "application/pdf",
+            )
+        elif source_snapshot.content != item.source.content:
+            candidate_source_etag = await self.blobs.replace_bytes(
+                artifacts.source_blob_name,
+                item.source.content,
+                "application/pdf",
+                expected_etag=source_snapshot.etag,
+            )
         await self.blobs.put_immutable(
             artifacts.canonical_blob_name,
             item.canonical.markdown.encode(),
@@ -1665,6 +1986,7 @@ class DirectiveIngestionRunner:
                 item.canonical.markdown.encode("utf-8")
             ).hexdigest(),
         )
+        return candidate_source_etag
 
     async def _publish_mandates(
         self,
@@ -2035,6 +2357,93 @@ def _daily_run_approval(
         environment_digest=(environment_digest or "").strip(),
         source_inventory_digest=(source_inventory_digest or "").strip(),
     )
+
+
+def _expected_validation_digest(
+    validation_digest: str | None, expected_validation_digest: str | None
+) -> str | None:
+    values = [
+        value.strip()
+        for value in (validation_digest, expected_validation_digest)
+        if isinstance(value, str) and value.strip()
+    ]
+    if len(values) != len(
+        [
+            value
+            for value in (validation_digest, expected_validation_digest)
+            if value is not None
+        ]
+    ):
+        raise ValueError("Expected validation digest must not be empty")
+    if len(set(values)) > 1:
+        raise ValueError("Expected validation digest values do not match")
+    return values[0] if values else None
+
+
+def _validation_payload(
+    config: IngestionConfig,
+    run_id: str,
+    sources: list[SourceDocument],
+    metadata: list[SourceMetadata],
+    mandates: Any,
+    warnings: list[dict[str, str]],
+) -> dict[str, object]:
+    environment = _safe_environment(config)
+    known_ids = {item.metadata.directive_id for item in metadata}
+    payload: dict[str, object] = {
+        "record_schema": "directive.validate.v2",
+        "success": True,
+        "run_id": run_id,
+        "environment": environment,
+        "environment_digest": _public_record_digest(environment),
+        "processing_version": config.processing_version,
+        "processing_hash": config.processing_hash,
+        "search_index": config.search_index,
+        "source_count": len(sources),
+        "directive_count": len(known_ids),
+        "normalized_directive_ids": sorted(known_ids),
+        "directive_version_ids": sorted(
+            item.metadata.directive_version_id for item in metadata
+        ),
+        "mandate_count": len(mandates.assignments),
+        "mandate_user_count": mandates.user_count,
+        "warnings": warnings,
+        "warning_count": len(warnings),
+        "failures": [],
+        "source_inventory_digest": _public_record_digest(
+            _source_inventory(sources)
+        ),
+    }
+    payload["validation_digest"] = _public_record_digest(
+        _validation_digest_projection(payload)
+    )
+    return payload
+
+
+def _validation_digest_projection(
+    payload: dict[str, object]
+) -> dict[str, object]:
+    """Only hash the public, stable validation contract—not run metadata."""
+    fields = (
+        "record_schema",
+        "success",
+        "environment",
+        "environment_digest",
+        "processing_version",
+        "processing_hash",
+        "search_index",
+        "source_count",
+        "directive_count",
+        "normalized_directive_ids",
+        "directive_version_ids",
+        "mandate_count",
+        "mandate_user_count",
+        "warnings",
+        "warning_count",
+        "failures",
+        "source_inventory_digest",
+    )
+    return {field: payload[field] for field in fields}
 
 
 def _safe_failure_code(exc: BaseException) -> str:
