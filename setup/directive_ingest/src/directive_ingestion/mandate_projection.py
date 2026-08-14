@@ -130,6 +130,17 @@ class MandateRepository:
         """Write candidate assignments without switching the active pointer."""
         active = await self._read_active()
         snapshot_id = f"mandates-{parsed.checksum}"
+        if (
+            active
+            and active.get("complete") is True
+            and active.get("checksum") == parsed.checksum
+            and not await self._snapshot_assignments_match(
+                snapshot_id, parsed
+            )
+        ):
+            snapshot_id += "-" + await self._snapshot_identity_digest(
+                snapshot_id
+            )
         snapshot = MandateSnapshot(
             snapshot_id=snapshot_id,
             checksum=parsed.checksum,
@@ -144,6 +155,7 @@ class MandateRepository:
             active
             and active.get("complete") is True
             and active.get("checksum") == parsed.checksum
+            and await self._snapshot_assignments_match(snapshot_id, parsed)
         ):
             return snapshot, active, False
 
@@ -266,8 +278,10 @@ class MandateRepository:
         ):
             return False
         snapshot_id = active.get("snapshot_id")
-        return isinstance(snapshot_id, str) and not await self._has_inactive(
-            snapshot_id
+        return (
+            isinstance(snapshot_id, str)
+            and await self._snapshot_assignments_match(snapshot_id, parsed)
+            and not await self._has_inactive(snapshot_id)
         )
 
     async def verification_summary(self) -> dict[str, object]:
@@ -310,6 +324,30 @@ class MandateRepository:
         if summary["checksum"] != parsed.checksum:
             raise RuntimeError("Active mandate snapshot checksum mismatch")
         snapshot_id = summary["snapshot_id"]
+        if not await self._snapshot_assignments_match(snapshot_id, parsed):
+            raise RuntimeError("Active mandate assignments do not match CSV")
+        return summary
+
+    async def _snapshot_assignments_match(
+        self, snapshot_id: str, parsed: ParsedMandates
+    ) -> bool:
+        actual = await self._snapshot_assignments(snapshot_id)
+        expected = {
+            (assignment.user_id, assignment.directive_id, "M")
+            for assignment in parsed.assignments
+        }
+        return actual == expected
+
+    async def _snapshot_identity_digest(self, snapshot_id: str) -> str:
+        identities = await self._snapshot_assignments(snapshot_id)
+        canonical = "\n".join(
+            ",".join(identity) for identity in sorted(identities)
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()[:16]
+
+    async def _snapshot_assignments(
+        self, snapshot_id: str
+    ) -> set[tuple[str, str, str]]:
         query = (
             "SELECT c.user_id, c.directive_id, c.flag FROM c WHERE "
             "c.type = 'assignment' AND c.snapshot_id = @snapshot"
@@ -322,16 +360,12 @@ class MandateRepository:
             user_id = value.get("user_id")
             directive_id = value.get("directive_id")
             flag = value.get("flag")
-            if not all(isinstance(item, str) for item in (user_id, directive_id, flag)):
+            if not all(
+                isinstance(item, str) for item in (user_id, directive_id, flag)
+            ):
                 raise RuntimeError("Active mandate assignment has invalid identity")
             actual.add((user_id, directive_id, flag))
-        expected = {
-            (assignment.user_id, assignment.directive_id, "M")
-            for assignment in parsed.assignments
-        }
-        if actual != expected:
-            raise RuntimeError("Active mandate assignments do not match CSV")
-        return summary
+        return actual
 
     async def _read_active(self) -> dict[str, Any] | None:
         try:

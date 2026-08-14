@@ -260,3 +260,21 @@ async def test_standalone_mandate_retry_resumes_inactive_snapshot_cleanup() -> N
     assert changed is True
     repository.activate.assert_not_awaited()
     repository.cleanup.assert_awaited_once_with(snapshot.snapshot_id)
+
+
+@pytest.mark.asyncio
+async def test_wrong_same_checksum_mandates_are_not_treated_as_current() -> None:
+    parsed = SimpleNamespace(checksum="c" * 64)
+    repository = object.__new__(MandateRepository)
+    repository._read_active = AsyncMock(
+        return_value={
+            "complete": True,
+            "checksum": parsed.checksum,
+            "snapshot_id": "mandates-corrupt",
+        }
+    )
+    repository._snapshot_assignments_match = AsyncMock(return_value=False)
+    repository._has_inactive = AsyncMock(return_value=False)
+
+    assert await repository.is_current(parsed) is False
+    repository._has_inactive.assert_not_awaited()
