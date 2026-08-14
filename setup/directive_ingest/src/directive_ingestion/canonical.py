@@ -134,7 +134,6 @@ def _body_markdown(extraction: ExtractedDocument) -> _BodyMarkdown:
         line_offsets = offsets[position : position + len(line_text)]
         position += len(line)
         if _is_decorative_body_line(
-            line_text,
             line_offsets,
             repeated_edge_offsets,
             counter_offsets,
@@ -201,7 +200,6 @@ def _line_body(extraction: ExtractedDocument) -> tuple[str, tuple[int, ...]]:
 
 
 def _is_decorative_body_line(
-    markdown: str,
     line_offsets: tuple[int, ...],
     repeated_edge_offsets: set[int],
     counter_offsets: set[int],
@@ -210,10 +208,7 @@ def _is_decorative_body_line(
         return False
     source_start = min(line_offsets)
     source_end = max(line_offsets) + 1
-    return bool(
-        _PAGE_COUNTER.fullmatch(markdown)
-        and any(source_start <= offset < source_end for offset in counter_offsets)
-    ) or any(
+    return any(source_start <= offset < source_end for offset in counter_offsets) or any(
         source_start <= offset < source_end for offset in repeated_edge_offsets
     )
 

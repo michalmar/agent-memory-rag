@@ -123,15 +123,31 @@ def _wrapped_body_payload(fixture: dict) -> dict:
     )
     result = payload["analyzeResult"]
     page_offset = result["pages"][2]["spans"][0]["offset"]
-    page_raw = [
-        "\n".join([f"## {lines[0]}", *lines[1:]]) for lines in body_pages
-    ]
+    page_raw = []
+    source_positions: list[list[tuple[int, int]]] = []
+    for page_number, lines in enumerate(body_pages, start=3):
+        raw_lines = [
+            f'<!-- PageFooter="{header}" -->',
+            lines[1],
+            f'<!-- PageNumber="{page_number}/4" -->',
+            lines[3],
+        ]
+        page_raw.append("\n".join(raw_lines))
+        source_positions.append(
+            [
+                (raw_lines[0].index(header), len(header)),
+                (0, len(lines[1])),
+                (raw_lines[2].index(f"{page_number}/4"), len(f"{page_number}/4")),
+                (0, len(lines[3])),
+            ]
+        )
     result["content"] = (
         result["content"][:page_offset] + "\n".join(page_raw)
     )
     paragraph_offset = len(fixture["lines"]) + len(fixture["page_two_lines"])
     for page_index, lines in enumerate(body_pages, start=2):
         raw = page_raw[page_index - 2]
+        raw_lines = raw.splitlines()
         page = result["pages"][page_index]
         page["spans"] = [
             {
@@ -141,19 +157,24 @@ def _wrapped_body_payload(fixture: dict) -> dict:
         ]
         cursor = 0
         for line_index, text in enumerate(lines):
-            raw_prefix = "## " if line_index == 0 else ""
-            text_offset = page_offset + cursor + len(raw_prefix)
+            source_position, source_length = source_positions[page_index - 2][
+                line_index
+            ]
+            text_offset = page_offset + cursor + source_position
             polygon_y = 1 if line_index == 0 else 95 if line_index == 2 else 50
             polygon = [0, polygon_y, 10, polygon_y, 10, polygon_y + 1, 0, polygon_y + 1]
             page["lines"][line_index]["spans"] = [
-                {"offset": text_offset, "length": len(text)}
+                {"offset": text_offset, "length": source_length}
             ]
             page["lines"][line_index]["polygon"] = polygon
             paragraph = result["paragraphs"][paragraph_offset]
             paragraph["spans"] = [{"offset": text_offset, "length": len(text)}]
+            paragraph["spans"][0]["length"] = source_length
             paragraph["boundingRegions"][0]["polygon"] = polygon
             paragraph_offset += 1
-            cursor += len(raw_prefix) + len(text) + (line_index < len(lines) - 1)
+            cursor += len(raw_lines[line_index]) + (
+                line_index < len(lines) - 1
+            )
         page_offset += len(raw) + 1
     return payload
 
@@ -734,7 +755,7 @@ def test_body_preamble_is_chunked_before_first_heading() -> None:
     assert directive.sections[1].content == "Úvodní text\n"
 
 
-def test_repeated_edge_header_does_not_remove_equal_mid_page_body_text() -> None:
+def test_wrapped_edge_header_and_counter_do_not_remove_equal_mid_page_text() -> None:
     fixture = json.loads((FIXTURES / "directive_v2_layout_a.json").read_text())
     payload = _wrapped_body_payload(fixture)
     directive = parse_canonical(
@@ -743,6 +764,9 @@ def test_repeated_edge_header_does_not_remove_equal_mid_page_body_text() -> None
         PROCESSING_HASH,
     )
 
+    assert '<!-- PageFooter="Sdílené záhlaví" -->' not in directive.markdown
+    assert '<!-- PageNumber="3/4" -->' not in directive.markdown
+    assert '<!-- PageNumber="4/4" -->' not in directive.markdown
     assert directive.markdown.count("Sdílené záhlaví") == 2
-    assert "Strana 3/4" not in directive.markdown
-    assert "Strana 4/4" not in directive.markdown
+    assert directive.markdown.count("Obsah třetí stránky") == 1
+    assert directive.markdown.count("Obsah čtvrté stránky") == 1
