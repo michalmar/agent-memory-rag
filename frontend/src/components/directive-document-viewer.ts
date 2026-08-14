@@ -5,6 +5,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import type { DirectiveDocument } from '../client.js';
 import {
   locateDirectiveHeading,
+  directivePdfDownloadFilename,
   type DirectiveCitationTarget,
   type DirectiveDocumentLoadStatus,
   type DirectiveDocumentReference,
@@ -38,6 +39,7 @@ export class DirectiveDocumentViewer extends LightDomElement {
   @property() pdfStatus: DirectiveDocumentLoadStatus = 'idle';
   @property() pdfError = '';
   @property() pdfUrl: string | null = null;
+  @property() pdfFilename: string | null = null;
   @property({ attribute: false }) actions!: DirectiveDocumentViewerActions;
   @state() private citationLocationStatus:
     'idle' | 'locating' | 'located' | 'unavailable' = 'idle';
@@ -392,6 +394,10 @@ export class DirectiveDocumentViewer extends LightDomElement {
         this.actions.retryPdf,
       );
     }
+    const downloadFilename = directivePdfDownloadFilename(
+      this.document?.source_filename,
+      this.pdfFilename,
+    );
     return html`
       <div class="document-pdf">
         <div class="document-pdf-actions">
@@ -406,17 +412,18 @@ export class DirectiveDocumentViewer extends LightDomElement {
             </span>
             Open in new tab
           </a>
-          <a
-            class="secondary-button"
-            href=${this.pdfUrl}
-            download=${this.document?.source_filename
-              ?? `${this.reference?.directiveId ?? 'directive'}.pdf`}
-          >
-            <span class="material-symbols-outlined" aria-hidden="true">
-              download
-            </span>
-            Download
-          </a>
+          ${downloadFilename
+            ? html`<a
+                class="secondary-button"
+                href=${this.pdfUrl}
+                download=${downloadFilename}
+              >
+                <span class="material-symbols-outlined" aria-hidden="true">
+                  download
+                </span>
+                Download
+              </a>`
+            : nothing}
         </div>
         <iframe
           class="document-pdf-frame"

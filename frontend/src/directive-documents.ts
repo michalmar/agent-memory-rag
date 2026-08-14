@@ -223,7 +223,7 @@ export function normalizeDirectiveId(value: string): string {
     throw new Error('Directive ID must not contain control characters');
   }
   normalized = normalized.trim().replace(/\s+/gu, ' ');
-  normalized = normalized.replace(SEPARATOR_SPACING, '$1').toUpperCase();
+  normalized = normalized.replace(SEPARATOR_SPACING, '$1');
   if (!normalized) {
     throw new Error('Directive ID must not be empty');
   }
@@ -255,7 +255,7 @@ export function normalizeDirectiveVersion(value: string): string {
     );
   }
   const [wholePart, fractionPart = ''] = value.split('.');
-  const normalizedWhole = wholePart.replace(/^0+(?=\d)/, '');
+  const normalizedWhole = wholePart.replace(/^0+/, '') || '0';
   const fraction = fractionPart.replace(/0+$/, '');
   return fraction ? `${normalizedWhole}.${fraction}` : normalizedWhole;
 }
@@ -312,6 +312,13 @@ function directiveQuery(
     directive_id: directiveId,
     directive_version_id: directiveVersionId,
   }).toString();
+}
+
+export function directivePdfDownloadFilename(
+  documentSourceFilename: string | undefined,
+  pdfFilename: string | null,
+): string | null {
+  return documentSourceFilename ?? pdfFilename;
 }
 
 function headingMatchesTarget(

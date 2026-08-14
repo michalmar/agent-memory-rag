@@ -130,6 +130,7 @@ export class NativeApp extends LitElement {
   @state() private directivePdfStatus: DirectiveDocumentLoadStatus = 'idle';
   @state() private directivePdfError = '';
   @state() private directivePdfUrl: string | null = null;
+  @state() private directivePdfFilename: string | null = null;
   @state() private toast: string | null = null;
 
   private client = new AGUIClient();
@@ -810,6 +811,7 @@ export class NativeApp extends LitElement {
     this.directiveDocumentTab = initialTab;
     this.directivePdfStatus = 'idle';
     this.directivePdfError = '';
+    this.directivePdfFilename = null;
     this.profileOpen = false;
     void this.loadDirectiveDocument();
     if (initialTab === 'pdf') void this.loadDirectivePdf();
@@ -887,7 +889,8 @@ export class NativeApp extends LitElement {
         controller.signal,
       );
       if (!this.directivePdfRequests.isCurrent(request)) return;
-      const objectUrl = URL.createObjectURL(pdf);
+      this.directivePdfFilename = pdf.filename ?? null;
+      const objectUrl = URL.createObjectURL(pdf.blob);
       this.directivePdfObjectUrl = objectUrl;
       this.refreshDirectivePdfPage();
       this.directivePdfStatus = 'ready';
@@ -921,6 +924,7 @@ export class NativeApp extends LitElement {
     this.directiveDocumentTab = 'document';
     this.directivePdfStatus = 'idle';
     this.directivePdfError = '';
+    this.directivePdfFilename = null;
     this.directiveDocumentTrigger = undefined;
 
     if (!restoreFocus) return;
@@ -1528,6 +1532,7 @@ export class NativeApp extends LitElement {
           .pdfStatus=${this.directivePdfStatus}
           .pdfError=${this.directivePdfError}
           .pdfUrl=${this.directivePdfUrl}
+          .pdfFilename=${this.directivePdfFilename}
           .actions=${this.directiveDocumentActions}
         ></directive-document-viewer>
         ${this.toast

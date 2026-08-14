@@ -5,6 +5,7 @@ import {
   directiveSourcePath,
 } from './directive-documents.js';
 import type { HealthResponse } from './health-status.js';
+import { validateDirectiveSourceFilename } from './source-documents.js';
 import { uiLogger } from './ui-logger.js';
 
 export interface AGUIEvent {
@@ -182,6 +183,36 @@ export interface DirectiveDocument {
   markdown: string;
 }
 
+export interface DirectiveSourcePdf {
+  blob: Blob;
+  filename?: string;
+}
+
+function contentDispositionFilename(
+  value: string | null,
+): string | undefined {
+  if (!value) return undefined;
+  const extended = /(?:^|;)\s*filename\*\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(
+    value,
+  );
+  const regular = /(?:^|;)\s*filename\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(
+    value,
+  );
+  const raw = extended?.[1] ?? extended?.[2] ?? regular?.[1] ?? regular?.[2];
+  if (!raw) return undefined;
+  let filename = raw.trim();
+  if (extended) {
+    filename = filename.replace(/^UTF-8''/i, '');
+    try {
+      filename = decodeURIComponent(filename);
+    } catch (error) {
+      if (error instanceof URIError) return undefined;
+      throw error;
+    }
+  }
+  return validateDirectiveSourceFilename(filename) ? filename : undefined;
+}
+
 export class AGUIClient {
   private base = getConfig().apiBaseUrl;
 
@@ -233,13 +264,19 @@ export class AGUIClient {
   private async reqBlob(
     path: string,
     init: RequestInit = {},
-  ): Promise<Blob> {
+  ): Promise<DirectiveSourcePdf> {
     const res = await this.response(path, init);
     const mediaType = res.headers.get('Content-Type')?.split(';', 1)[0];
     if (mediaType !== 'application/pdf') {
       throw new Error(`${path} returned ${mediaType ?? 'no content type'}`);
     }
-    return res.blob();
+    const filename = contentDispositionFilename(
+      res.headers.get('Content-Disposition'),
+    );
+    return {
+      blob: await res.blob(),
+      ...(filename ? { filename } : {}),
+    };
   }
 
   // Conversation history (Cosmos)
@@ -387,7 +424,7 @@ export class AGUIClient {
     directiveId: string,
     directiveVersionId: string,
     signal?: AbortSignal,
-  ): Promise<Blob> {
+  ): Promise<DirectiveSourcePdf> {
     return this.reqBlob(
       directiveSourcePath(directiveId, directiveVersionId),
       { headers: { Accept: 'application/pdf' }, signal },
@@ -420,6 +457,7 @@ export class AGUIClient {
     if (!res.ok || !res.body) {
       throw new Error(`/chat ${res.status}`);
     }
+
     const id = res.headers.get('X-Conversation-ID');
     if (id && handlers.onConversationId) handlers.onConversationId(id);
 

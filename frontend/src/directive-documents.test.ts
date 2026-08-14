@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   directiveOpenRequestFromCitation,
   directiveDocumentPath,
+  directivePdfDownloadFilename,
   directiveSourcePath,
   isAbortError,
   LatestRequest,
@@ -93,26 +94,27 @@ describe('directive document helpers', () => {
   });
 
   it('normalizes Unicode IDs and validates numeric version ownership', () => {
-    expect(normalizeDirectiveId('  číslo  /  7 ')).toBe('ČÍSLO/7');
-    expect(normalizeDirectiveId('cafe\u0301 _ 2')).toBe('CAFÉ_2');
-    expect(normalizeDirectiveVersion('0001.00')).toBe('1');
+    expect(normalizeDirectiveId('  číslo  /  7 ')).toBe('číslo/7');
+    expect(normalizeDirectiveId('İSTANBUL / ß')).toBe('İSTANBUL/ß');
+    expect(normalizeDirectiveId('cafe\u0301 _ 2')).toBe('café_2');
+    expect(normalizeDirectiveVersion('0000.0100')).toBe('0.01');
     expect(
       toDirectiveDocumentReference({
         ref_id: 'unicode',
         source_name: 'Czech directive',
         directive_id: '  číslo  /  7 ',
-        directive_version_id: 'ČÍSLO/7:v1',
+        directive_version_id: 'číslo/7:v1',
         version_label: '01.0',
       }),
     ).toEqual({
-      directiveId: 'ČÍSLO/7',
-      directiveVersionId: 'ČÍSLO/7:v1',
+      directiveId: 'číslo/7',
+      directiveVersionId: 'číslo/7:v1',
       sourceName: 'Czech directive',
       versionLabel: '01.0',
     });
-    expect(
-      validateDirectiveVersionId('ČÍSLO/7:v1', ' číslo/7 '),
-    ).toBe('ČÍSLO/7:v1');
+    expect(validateDirectiveVersionId('číslo/7:v1', ' číslo/7 ')).toBe(
+      'číslo/7:v1',
+    );
   });
 
   it('rejects invalid, mismatched, and non-canonical identities', () => {
@@ -157,6 +159,16 @@ describe('directive document helpers', () => {
         directive_version_id: `${'D'.repeat(129)}:v1`,
       }),
     ).toBeNull();
+  });
+
+  it('uses only authoritative PDF or document filenames for download', () => {
+    expect(
+      directivePdfDownloadFilename(undefined, 'český dokument.pdf'),
+    ).toBe('český dokument.pdf');
+    expect(directivePdfDownloadFilename(undefined, null)).toBeNull();
+    expect(
+      directivePdfDownloadFilename(undefined, null),
+    ).not.toBe('ČÍSLO/7.pdf');
   });
 
   it('parses generated section ordinals and recognizes document control', () => {
@@ -313,7 +325,11 @@ describe('directive document client', () => {
       .mockResolvedValueOnce(
         new Response('%PDF-content', {
           status: 200,
-          headers: { 'Content-Type': 'application/pdf' },
+          headers: {
+            'Content-Type': 'application/pdf',
+            'Content-Disposition':
+              "attachment; filename*=UTF-8''%C4%8Desk%C3%BD%20dokument.pdf",
+          },
         }),
       );
     const client = new AGUIClient();
@@ -331,7 +347,8 @@ describe('directive document client', () => {
     );
 
     expect(document.title).toBe('Driver safety');
-    expect(pdf.type).toBe('application/pdf');
+    expect(pdf.blob.type).toBe('application/pdf');
+    expect(pdf.filename).toBe('český dokument.pdf');
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       '/api/directives/document?directive_id=%C4%8C%C3%8DSLO%2F7&directive_version_id=%C4%8C%C3%8DSLO%2F7%3Av1',
@@ -354,6 +371,35 @@ describe('directive document client', () => {
         signal: controller.signal,
       }),
     );
+  });
+
+  it('keeps the authoritative PDF filename when document loading fails', async () => {
+    const { AGUIClient } = await import('./client.js');
+    fetchMock
+      .mockResolvedValueOnce(new Response('missing', { status: 404 }))
+      .mockResolvedValueOnce(
+        new Response('%PDF-content', {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/pdf',
+            'Content-Disposition': 'attachment; filename="skutecny zdroj.pdf"',
+          },
+        }),
+      );
+    const client = new AGUIClient();
+
+    await expect(
+      client.getDirectiveDocument('ČÍSLO/7', 'ČÍSLO/7:v1'),
+    ).rejects.toThrow();
+    const pdf = await client.getDirectiveSourcePdf('ČÍSLO/7', 'ČÍSLO/7:v1');
+
+    expect(pdf.filename).toBe('skutecny zdroj.pdf');
+    expect(directivePdfDownloadFilename(undefined, pdf.filename ?? null)).toBe(
+      'skutecny zdroj.pdf',
+    );
+    expect(
+      directivePdfDownloadFilename(undefined, pdf.filename ?? null),
+    ).not.toBe('ČÍSLO/7.pdf');
   });
 
   it('rejects non-PDF responses before creating an object URL', async () => {
