@@ -126,6 +126,15 @@ class BlobArtifactRepository:
             )
         return value
 
+    async def read_text(self, blob_name: str) -> str:
+        stream = await self._container.get_blob_client(blob_name).download_blob()
+        try:
+            return (await stream.readall()).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RuntimeError(
+                f"Artifact is not valid UTF-8 text: {blob_name}"
+            ) from exc
+
     async def validate_hash(
         self, blob_name: str, expected_hash: str
     ) -> None:
@@ -158,4 +167,9 @@ class BlobArtifactRepository:
 
     async def delete_names(self, names: set[str]) -> None:
         for name in sorted(names):
-            await self._container.delete_blob(name, delete_snapshots="include")
+            try:
+                await self._container.delete_blob(
+                    name, delete_snapshots="include"
+                )
+            except ResourceNotFoundError:
+                continue

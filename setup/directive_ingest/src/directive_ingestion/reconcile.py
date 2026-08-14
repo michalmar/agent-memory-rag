@@ -32,6 +32,7 @@ from directive_contracts import (
     canonical_json_hash,
     directive_storage_key,
     directive_version_storage_key,
+    section_content_item_id,
     serialized_json_size,
 )
 from openai import APIError
@@ -101,6 +102,14 @@ class ReconcileResult:
             "mandate_snapshot_id": self.mandate_snapshot_id,
             "mandate_changed": self.mandate_changed,
         }
+
+
+@dataclass(frozen=True)
+class PublicationSnapshot:
+    item: PreparedDirective
+    previous_version: PublishedDirectiveVersion | None
+    previous_current: dict[str, Any] | None
+    previous_current_bundle: PublishedDirectiveVersion | None
 
 
 class DirectiveIngestionRunner:
@@ -228,6 +237,14 @@ class DirectiveIngestionRunner:
                     f"{source.source_name}"
                 )
             source_states.append(state)
+        expected_state_names = {
+            self.source_states.blob_name(source, self.config.processing_hash)
+            for source in sources
+        }
+        if await self.source_states.list_names() != expected_state_names:
+            raise RuntimeError(
+                "Source-state records do not exactly match discovered sources"
+            )
         directive_ids = await self.catalog.list_published_directive_ids()
         bundles = await self.catalog.list_published_versions()
         current = await self.catalog.list_current_pointers()
@@ -261,6 +278,7 @@ class DirectiveIngestionRunner:
         content_sections = 0
         content_parts = 0
         split_sections = 0
+        expected_content_ids: set[str] = set()
         bundle_index = {
             (bundle.directive_id, bundle.directive_version_id): bundle
             for bundle in bundles
@@ -300,12 +318,17 @@ class DirectiveIngestionRunner:
             source_hash = await self.blobs.content_hash(
                 bundle.artifacts.source_blob_name
             )
-            canonical_hash = await self.blobs.content_hash(
-                bundle.artifacts.canonical_blob_name
-            )
             expected_generation_id = calculate_artifact_generation_id(
                 bundle.processing_hash,
-                canonical_hash,
+                hashlib.sha256(
+                    (
+                        bundle.source_filename
+                        + "\0"
+                        + (await self.blobs.read_text(
+                            bundle.artifacts.canonical_blob_name
+                        ))
+                    ).encode("utf-8")
+                ).hexdigest(),
                 canonical_json_hash(bundle.summary),
             )
             if (
@@ -323,6 +346,14 @@ class DirectiveIngestionRunner:
             split_sections += content_summary["split_sections"]
             for section in manifest.sections:
                 expected_chunks += len(section.chunk_ids)
+            for section_id, descriptor in bundle.section_content.items():
+                expected_content_ids.update(
+                    section_content_item_id(
+                        bundle.artifact_generation_id, section_id, ordinal
+                    )
+                    for ordinal in range(descriptor.part_count)
+                )
+            await self.search.validate_current_generation(bundle)
         for directive_id, pointer in current.items():
             version_id, source_hash, processing_hash, generation_id = pointer
             bundle = bundle_index.get((directive_id, version_id))
@@ -349,8 +380,13 @@ class DirectiveIngestionRunner:
                 "Artifacts exist outside the validated source corpus: "
                 + ", ".join(extras)
             )
+        if await self.content.list_item_ids() != expected_content_ids:
+            raise RuntimeError(
+                "Section-content records do not exactly match published bundles"
+            )
 
         search = await self.search.verification_summary()
+        await self.search.validate_exact_published(bundles)
         if (
             search["published_chunks"] != expected_chunks
             or search["published_directives"] != len(directive_ids)
@@ -362,7 +398,7 @@ class DirectiveIngestionRunner:
                 "Search publication counts do not match catalog manifests"
             )
 
-        mandates = await self.mandates.verification_summary()
+        mandates = await self.mandates.validate_exact(expected_mandates)
         if (
             mandates["assignment_count"]
             != len(expected_mandates.assignments)
@@ -479,13 +515,11 @@ class DirectiveIngestionRunner:
             known_ids,
         )
         mandates_current = await self.mandates.is_current(parsed_mandates)
+        replaced: list[PublishedDirectiveVersion] = []
         if prepared:
             await self.search.ensure_resources()
-            await self.stage_documents(prepared)
-            await self.publish_documents(prepared)
-        if prepared:
-            await self.record_source_states(prepared)
-        await self.reconcile_exact_corpus(metadata)
+            replaced = await self._publish_transaction(prepared)
+        await self.reconcile_exact_corpus(metadata, replaced)
         if mandates_current:
             snapshot = MandateSnapshot(
                 snapshot_id=f"mandates-{parsed_mandates.checksum}",
@@ -536,12 +570,11 @@ class DirectiveIngestionRunner:
             [item.metadata for item in metadata],
             {item.metadata.directive_id for item in metadata},
         )
+        replaced: list[PublishedDirectiveVersion] = []
         if prepared:
             await self.search.ensure_resources()
-            await self.stage_documents(prepared)
-            await self.publish_documents(prepared)
-            await self.record_source_states(prepared)
-        await self.reconcile_exact_corpus(metadata)
+            replaced = await self._publish_transaction(prepared)
+        await self.reconcile_exact_corpus(metadata, replaced)
         result = ReconcileResult(
             run_id=run_id,
             source_count=len(sources),
@@ -730,7 +763,7 @@ class DirectiveIngestionRunner:
                 summary = await self.summaries.summarize(canonical)
                 generation_id = calculate_artifact_generation_id(
                     canonical.metadata.processing_hash,
-                    hashlib.sha256(canonical.markdown.encode("utf-8")).hexdigest(),
+                    _generation_canonical_hash(canonical),
                     canonical_json_hash(summary),
                 )
                 text_chunks = _generation_scoped_chunks(
@@ -801,19 +834,116 @@ class DirectiveIngestionRunner:
                     item.canonical.relations,
                 )
                 await self.catalog.validate_published(item.bundle)
-            for item in prepared:
-                await self.catalog.activate_current(
-                    item.canonical.metadata, item.bundle.run_id
-                )
-                await self.search.reconcile_current(item.bundle)
-                await self.search.reconcile_generation(item.bundle)
         except (RuntimeError, cosmos_exceptions.CosmosHttpResponseError):
             for item in prepared:
                 await self.search.retire_chunks(item.search_chunks)
             raise
 
-    async def record_source_states(
+    async def activate_documents(self, prepared: list[PreparedDirective]) -> None:
+        for item in prepared:
+            await self.catalog.activate_current(
+                item.canonical.metadata, item.bundle.run_id
+            )
+            await self.search.reconcile_current(item.bundle)
+
+    async def _publish_transaction(
         self, prepared: list[PreparedDirective]
+    ) -> list[PublishedDirectiveVersion]:
+        """Preserve stable catalog slots and current pointers on any late failure."""
+        snapshots: list[PublicationSnapshot] = []
+        for item in prepared:
+            previous_version = await self.catalog.get_published_version(
+                item.bundle.directive_id, item.bundle.directive_version_id
+            )
+            previous_current = await self.catalog.get_current(
+                item.bundle.directive_id
+            )
+            previous_current_bundle = None
+            if isinstance(
+                (version_id := (previous_current or {}).get(
+                    "directive_version_id"
+                )),
+                str,
+            ):
+                previous_current_bundle = (
+                    await self.catalog.get_published_version(
+                        item.bundle.directive_id, version_id
+                    )
+                )
+            snapshots.append(
+                PublicationSnapshot(
+                    item,
+                    previous_version,
+                    previous_current,
+                    previous_current_bundle,
+                )
+            )
+        try:
+            await self.stage_documents(prepared)
+            await self.publish_documents(prepared)
+            await self.record_source_states(prepared, snapshots)
+            await self.activate_documents(prepared)
+        except Exception:
+            await self._rollback_publication(snapshots)
+            raise
+        return [
+            snapshot.previous_current_bundle
+            for snapshot in snapshots
+            if snapshot.previous_current_bundle is not None
+            and snapshot.previous_current_bundle.artifact_generation_id
+            != snapshot.item.bundle.artifact_generation_id
+        ]
+
+    async def _rollback_publication(
+        self,
+        snapshots: list[PublicationSnapshot],
+    ) -> None:
+        """Restore live descriptors before discarding new generation payloads."""
+        for snapshot in reversed(snapshots):
+            item = snapshot.item
+            await self.catalog.restore_current(
+                item.bundle.directive_id, snapshot.previous_current
+            )
+            await self.catalog.restore_version(
+                item.bundle, snapshot.previous_version
+            )
+            await self.source_states.delete(
+                item.source, item.canonical.metadata.processing_hash
+            )
+            if (
+                snapshot.previous_version is not None
+                and snapshot.previous_version.artifact_generation_id
+                == item.bundle.artifact_generation_id
+            ):
+                continue
+            if snapshot.previous_current_bundle is not None:
+                await self.search.restore_current_generation(
+                    snapshot.previous_current_bundle
+                )
+            await self.search.delete_chunks(item.search_chunks)
+            await self.content.delete_bundle(item.bundle)
+            artifact_names = {item.bundle.artifacts.canonical_blob_name}
+            referenced_source_blobs = {
+                bundle.artifacts.source_blob_name
+                for bundle in (
+                    snapshot.previous_version,
+                    snapshot.previous_current_bundle,
+                )
+                if bundle is not None
+            }
+            if (
+                item.bundle.artifacts.source_blob_name
+                not in referenced_source_blobs
+            ):
+                artifact_names.add(item.bundle.artifacts.source_blob_name)
+            await self.blobs.delete_names(
+                artifact_names
+            )
+
+    async def record_source_states(
+        self,
+        prepared: list[PreparedDirective],
+        snapshots: list[PublicationSnapshot] | None = None,
     ) -> None:
         """Commit private idempotency records only after live publication checks."""
         for item in prepared:
@@ -827,29 +957,76 @@ class DirectiveIngestionRunner:
                 item.source,
                 item.canonical.metadata,
                 item.bundle.artifact_generation_id,
+                pending_cleanup=tuple(
+                    snapshot.previous_current_bundle
+                    for snapshot in snapshots or []
+                    if snapshot.item is item
+                    and snapshot.previous_current_bundle is not None
+                    and snapshot.previous_current_bundle.artifact_generation_id
+                    != item.bundle.artifact_generation_id
+                ),
             )
 
     async def reconcile_exact_corpus(
-        self, metadata: list[SourceMetadata]
+        self,
+        metadata: list[SourceMetadata],
+        replaced: list[PublishedDirectiveVersion] | None = None,
     ) -> None:
         """Retire every store record not represented by validated sources."""
         expected_versions = {
             (item.metadata.directive_id, item.metadata.directive_version_id)
             for item in metadata
         }
-        retired = await self.catalog.remove_absent_versions(expected_versions)
-        for bundle in retired:
-            await self.search.retire_generation(bundle)
+        published = await self.catalog.list_published_versions()
+        retired = [
+            bundle
+            for bundle in published
+            if (bundle.directive_id, bundle.directive_version_id)
+            not in expected_versions
+        ]
+        surviving_source_blobs = {
+            bundle.artifacts.source_blob_name
+            for bundle in published
+            if bundle not in retired
+        }
+        stale = {
+            (
+                bundle.directive_id,
+                bundle.directive_version_id,
+                bundle.artifact_generation_id,
+            ): bundle
+            for bundle in [
+                *retired,
+                *(replaced or []),
+                *(
+                    bundle
+                    for item in metadata
+                    if item.source_state is not None
+                    for bundle in item.source_state.pending_cleanup
+                ),
+            ]
+        }
+        for bundle in stale.values():
+            await self.search.delete_generation(bundle)
             await self.content.delete_bundle(bundle)
-            await self.blobs.delete_names(
-                {
-                    bundle.artifacts.source_blob_name,
-                    bundle.artifacts.canonical_blob_name,
-                }
-            )
+            artifact_names = {bundle.artifacts.canonical_blob_name}
+            if bundle.artifacts.source_blob_name not in surviving_source_blobs:
+                artifact_names.add(bundle.artifacts.source_blob_name)
+            await self.blobs.delete_names(artifact_names)
         await self.source_states.prune(
             {(item.source.source_name, item.source.source_hash) for item in metadata}
         )
+        await self.catalog.delete_versions(retired)
+        for item in metadata:
+            state = await self.source_states.load(
+                item.source, self.config.processing_hash
+            )
+            if state is not None and state.pending_cleanup:
+                await self.source_states.clear_pending(
+                    item.source,
+                    state.directive_metadata,
+                    state.artifact_generation_id,
+                )
 
     async def _state_has_live_publication(
         self,
@@ -919,8 +1096,7 @@ class DirectiveIngestionRunner:
         run_id: str,
     ) -> None:
         """Compatibility wrapper preserving staged publication rollback semantics."""
-        await self.stage_documents(prepared)
-        await self.publish_documents(prepared)
+        await self._publish_transaction(prepared)
 
     async def _publish_artifacts(self, item: PreparedDirective) -> None:
         artifacts = item.bundle.artifacts
@@ -1047,9 +1223,7 @@ def _build_manifest(
     summary: DirectiveSummary,
 ) -> DirectiveManifest:
     metadata = directive.metadata
-    canonical_hash = hashlib.sha256(
-        directive.markdown.encode("utf-8")
-    ).hexdigest()
+    canonical_hash = _generation_canonical_hash(directive)
     generation_id = calculate_artifact_generation_id(
         metadata.processing_hash,
         canonical_hash,
@@ -1082,6 +1256,17 @@ def _build_manifest(
         total_tokens=directive.total_tokens,
         sections=sections,
     )
+
+
+def _generation_canonical_hash(directive: CanonicalDirective) -> str:
+    """Bind a generation to the source filename as well as canonical content."""
+    return hashlib.sha256(
+        (
+            directive.metadata.source_filename
+            + "\0"
+            + directive.markdown
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _generation_scoped_chunks(
@@ -1261,14 +1446,13 @@ def _validation_warnings(
     ]
 
 
-def _public_record_digest(value: dict[str, object]) -> str:
+def _public_record_digest(value: object) -> str:
     return hashlib.sha256(
         json.dumps(
             value,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
-            default=str,
         ).encode("utf-8")
     ).hexdigest()
 

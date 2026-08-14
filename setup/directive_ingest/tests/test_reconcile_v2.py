@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -13,6 +14,7 @@ from directive_ingestion.reconcile import (
     DirectiveIngestionRunner,
     SourceMetadata,
     _generation_scoped_chunks,
+    _public_record_digest,
     _build_artifact_locators,
 )
 from directive_ingestion.source import SourceDocument, SourceProvenance
@@ -154,7 +156,7 @@ async def test_source_state_is_written_only_after_cross_store_validation() -> No
         )
     )
     runner.source_states = SimpleNamespace(
-        record=AsyncMock(side_effect=lambda *_: events.append("state"))
+        record=AsyncMock(side_effect=lambda *_, **__: events.append("state"))
     )
 
     await runner.record_source_states([item])
@@ -224,6 +226,18 @@ def test_generation_scoped_chunk_ids_do_not_reuse_live_ids() -> None:
     assert first[0].id != second[0].id
 
 
+def test_public_digest_uses_compact_utf8_canonical_json() -> None:
+    value = {"ž": ["Č", 1], "a": True}
+
+    expected = hashlib.sha256(
+        json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+
+    assert _public_record_digest(value) == expected
+
+
 @pytest.mark.asyncio
 async def test_validate_output_has_finalize_guard_shape() -> None:
     source = _source()
@@ -291,6 +305,9 @@ async def test_malformed_source_state_reprocesses_and_is_replaced() -> None:
 async def test_exact_corpus_retires_all_removed_store_records() -> None:
     retained = _source()
     retired_bundle = SimpleNamespace(
+        directive_id="d-1",
+        directive_version_id="d-1:v1",
+        artifact_generation_id="old",
         artifacts=SimpleNamespace(
             source_blob_name="directives/old/source.pdf",
             canonical_blob_name="directives/old/generations/old/document.md",
@@ -298,20 +315,69 @@ async def test_exact_corpus_retires_all_removed_store_records() -> None:
     )
     runner = object.__new__(DirectiveIngestionRunner)
     runner.catalog = SimpleNamespace(
-        remove_absent_versions=AsyncMock(return_value=[retired_bundle])
+        list_published_versions=AsyncMock(return_value=[retired_bundle]),
+        delete_versions=AsyncMock(),
     )
-    runner.search = SimpleNamespace(retire_generation=AsyncMock())
+    runner.search = SimpleNamespace(delete_generation=AsyncMock())
     runner.content = SimpleNamespace(delete_bundle=AsyncMock())
     runner.blobs = SimpleNamespace(delete_names=AsyncMock())
-    runner.source_states = SimpleNamespace(prune=AsyncMock())
+    runner.source_states = SimpleNamespace(
+        prune=AsyncMock(), load=AsyncMock(return_value=None), clear_pending=AsyncMock()
+    )
+    runner.config = SimpleNamespace(processing_hash="a" * 64)
 
     await runner.reconcile_exact_corpus(
         [SourceMetadata(retained, _metadata(retained), None, None)]
     )
 
-    runner.search.retire_generation.assert_awaited_once_with(retired_bundle)
+    runner.search.delete_generation.assert_awaited_once_with(retired_bundle)
     runner.content.delete_bundle.assert_awaited_once_with(retired_bundle)
     runner.blobs.delete_names.assert_awaited_once()
     runner.source_states.prune.assert_awaited_once_with(
         {(retained.source_name, retained.source_hash)}
     )
+    runner.catalog.delete_versions.assert_awaited_once_with([retired_bundle])
+
+
+@pytest.mark.asyncio
+async def test_run_daily_unchanged_corpus_performs_no_publication_writes() -> None:
+    source = _source()
+    metadata = _metadata(source)
+    state = SimpleNamespace()
+    parsed = SimpleNamespace(
+        assignments=(), checksum="c" * 64, user_count=0
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.config = SimpleNamespace(
+        mandate_csv=object(), azure_tenant_id="tenant"
+    )
+    runner.discover_sources = AsyncMock(return_value=[source])
+    runner.extract_or_load_metadata = AsyncMock(
+        return_value=[SourceMetadata(source, metadata, None, state)]
+    )
+    runner._validate_and_quarantine = AsyncMock()
+    runner.prepare_changed_documents = AsyncMock(return_value=[])
+    runner._validate_relations = AsyncMock()
+    runner.mandates = SimpleNamespace(
+        is_current=AsyncMock(return_value=True),
+        publish=AsyncMock(),
+    )
+    runner.search = SimpleNamespace(ensure_resources=AsyncMock())
+    runner._publish_transaction = AsyncMock()
+    runner.reconcile_exact_corpus = AsyncMock()
+    runner.verify = AsyncMock()
+    runner.catalog = SimpleNamespace(record_run=AsyncMock())
+    import directive_ingestion.reconcile as reconcile_module
+
+    original_mandates = reconcile_module.parse_mandates
+    reconcile_module.parse_mandates = lambda *_args: parsed
+    try:
+        result = await runner.run_daily()
+    finally:
+        reconcile_module.parse_mandates = original_mandates
+
+    assert result.changed_count == 0
+    runner.search.ensure_resources.assert_not_awaited()
+    runner._publish_transaction.assert_not_awaited()
+    runner.mandates.publish.assert_not_awaited()
+    runner.catalog.record_run.assert_not_awaited()

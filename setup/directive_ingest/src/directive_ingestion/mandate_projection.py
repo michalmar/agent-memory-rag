@@ -144,7 +144,8 @@ class MandateRepository:
             and active.get("complete") is True
             and active.get("checksum") == parsed.checksum
         ):
-            return snapshot, False
+            changed = await self._prune_inactive(snapshot_id)
+            return snapshot, changed
 
         published_at = datetime.now(UTC).isoformat()
         for assignment in parsed.assignments:
@@ -201,14 +202,20 @@ class MandateRepository:
                 "activated_at": datetime.now(UTC).isoformat(),
             }
         )
+        await self._prune_inactive(snapshot_id)
         return snapshot, True
 
     async def is_current(self, parsed: ParsedMandates) -> bool:
         active = await self._read_active()
-        return bool(
+        if not (
             active
             and active.get("complete") is True
             and active.get("checksum") == parsed.checksum
+        ):
+            return False
+        snapshot_id = active.get("snapshot_id")
+        return isinstance(snapshot_id, str) and not await self._has_inactive(
+            snapshot_id
         )
 
     async def verification_summary(self) -> dict[str, object]:
@@ -234,11 +241,45 @@ class MandateRepository:
                 "Active mandate snapshot count mismatch: expected "
                 f"{expected_count}, found {actual_count}"
             )
+        if await self._has_inactive(snapshot_id):
+            raise RuntimeError(
+                "Inactive mandate assignments or snapshots are present"
+            )
         return {
             "snapshot_id": snapshot_id,
+            "checksum": active.get("checksum"),
             "assignment_count": actual_count,
             "user_count": int(active.get("user_count", -1)),
         }
+
+    async def validate_exact(self, parsed: ParsedMandates) -> dict[str, object]:
+        """Require active assignment content, checksum, and counts to match."""
+        summary = await self.verification_summary()
+        if summary["checksum"] != parsed.checksum:
+            raise RuntimeError("Active mandate snapshot checksum mismatch")
+        snapshot_id = summary["snapshot_id"]
+        query = (
+            "SELECT c.user_id, c.directive_id, c.flag FROM c WHERE "
+            "c.type = 'assignment' AND c.snapshot_id = @snapshot"
+        )
+        actual: set[tuple[str, str, str]] = set()
+        async for value in self._container.query_items(
+            query=query,
+            parameters=[{"name": "@snapshot", "value": snapshot_id}],
+        ):
+            user_id = value.get("user_id")
+            directive_id = value.get("directive_id")
+            flag = value.get("flag")
+            if not all(isinstance(item, str) for item in (user_id, directive_id, flag)):
+                raise RuntimeError("Active mandate assignment has invalid identity")
+            actual.add((user_id, directive_id, flag))
+        expected = {
+            (assignment.user_id, assignment.directive_id, "M")
+            for assignment in parsed.assignments
+        }
+        if actual != expected:
+            raise RuntimeError("Active mandate assignments do not match CSV")
+        return summary
 
     async def _read_active(self) -> dict[str, Any] | None:
         try:
@@ -247,3 +288,36 @@ class MandateRepository:
             )
         except exceptions.CosmosResourceNotFoundError:
             return None
+
+    async def _has_inactive(self, active_snapshot_id: str) -> bool:
+        query = (
+            "SELECT VALUE COUNT(1) FROM c WHERE "
+            "(c.type = 'assignment' OR c.type = 'snapshot') AND "
+            "c.snapshot_id != @snapshot"
+        )
+        async for value in self._container.query_items(
+            query=query,
+            parameters=[{"name": "@snapshot", "value": active_snapshot_id}],
+        ):
+            return int(value) != 0
+        raise RuntimeError("Mandate inactive-record query returned no count")
+
+    async def _prune_inactive(self, active_snapshot_id: str) -> bool:
+        query = (
+            "SELECT c.id, c.user_id FROM c WHERE "
+            "(c.type = 'assignment' OR c.type = 'snapshot') AND "
+            "c.snapshot_id != @snapshot"
+        )
+        stale: list[tuple[str, str]] = []
+        async for value in self._container.query_items(
+            query=query,
+            parameters=[{"name": "@snapshot", "value": active_snapshot_id}],
+        ):
+            item_id = value.get("id")
+            user_id = value.get("user_id")
+            if not isinstance(item_id, str) or not isinstance(user_id, str):
+                raise RuntimeError("Inactive mandate record has invalid identity")
+            stale.append((item_id, user_id))
+        for item_id, user_id in stale:
+            await self._container.delete_item(item=item_id, partition_key=user_id)
+        return bool(stale)

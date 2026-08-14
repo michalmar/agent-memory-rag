@@ -122,12 +122,26 @@ class DirectiveContentRepository:
     async def delete_bundle(self, bundle: PublishedDirectiveVersion) -> None:
         for section_id, descriptor in bundle.section_content.items():
             for part_ordinal in range(descriptor.part_count):
-                await self._container.delete_item(
-                    item=section_content_item_id(
-                        bundle.artifact_generation_id, section_id, part_ordinal
-                    ),
-                    partition_key=bundle.directive_version_id,
-                )
+                try:
+                    await self._container.delete_item(
+                        item=section_content_item_id(
+                            bundle.artifact_generation_id,
+                            section_id,
+                            part_ordinal,
+                        ),
+                        partition_key=bundle.directive_version_id,
+                    )
+                except exceptions.CosmosResourceNotFoundError:
+                    continue
+
+    async def list_item_ids(self) -> set[str]:
+        """Enumerate all content IDs so verify can reject orphaned generations."""
+        values: set[str] = set()
+        query = "SELECT VALUE c.id FROM c"
+        async for value in self._container.query_items(query=query):
+            if isinstance(value, str):
+                values.add(value)
+        return values
 
 
 def _validate_content_record(

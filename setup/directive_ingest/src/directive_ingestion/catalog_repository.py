@@ -295,12 +295,25 @@ class DirectiveCatalogRepository:
     async def remove_absent_versions(
         self, expected: set[tuple[str, str]]
     ) -> list[PublishedDirectiveVersion]:
-        """Delete retired versions and current pointers absent from this corpus."""
-        retired = [
+        """Compatibility helper; prefer enumerate then delete for transactions."""
+        retired = await self.list_absent_versions(expected)
+        await self.delete_versions(retired)
+        return retired
+
+    async def list_absent_versions(
+        self, expected: set[tuple[str, str]]
+    ) -> list[PublishedDirectiveVersion]:
+        """Read stale bundles without mutating live catalog records."""
+        return [
             bundle
             for bundle in await self.list_published_versions()
             if (bundle.directive_id, bundle.directive_version_id) not in expected
         ]
+
+    async def delete_versions(
+        self, retired: list[PublishedDirectiveVersion]
+    ) -> None:
+        """Delete stale catalog records only after dependent stores are clean."""
         for bundle in retired:
             current = await self.get_current(bundle.directive_id)
             if (
@@ -314,7 +327,39 @@ class DirectiveCatalogRepository:
             await self._container.delete_item(
                 item=bundle.id, partition_key=bundle.directive_id
             )
-        return retired
+
+    async def restore_version(
+        self,
+        expected: PublishedDirectiveVersion,
+        previous: PublishedDirectiveVersion | None,
+    ) -> None:
+        """Restore the stable version slot after a failed publication."""
+        if previous is not None:
+            await self._replace_published_bundle(previous)
+            return
+        try:
+            await self._container.delete_item(
+                item=expected.id, partition_key=expected.directive_id
+            )
+        except exceptions.CosmosResourceNotFoundError:
+            pass
+
+    async def restore_current(
+        self, directive_id: str, previous: dict[str, Any] | None
+    ) -> None:
+        """Restore a current pointer snapshot after failed activation."""
+        if previous is None:
+            try:
+                await self._container.delete_item(
+                    item="current", partition_key=directive_id
+                )
+            except exceptions.CosmosResourceNotFoundError:
+                pass
+            return
+        payload = {
+            key: value for key, value in previous.items() if not key.startswith("_")
+        }
+        await self._container.upsert_item(payload)
 
     async def list_published_version_labels(self) -> set[tuple[str, str]]:
         values: set[tuple[str, str]] = set()

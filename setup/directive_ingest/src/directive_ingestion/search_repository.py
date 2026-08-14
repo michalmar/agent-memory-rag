@@ -229,12 +229,27 @@ class DirectiveSearchRepository:
             is_current=False,
         )
 
-    async def retire_generation(self, metadata: DirectiveMetadata) -> None:
-        keys = await self._find_keys(
-            _generation_filter(metadata, publication_state="published")
+    async def delete_chunks(self, chunks: Iterable[DirectiveChunk]) -> None:
+        await self._delete_keys([chunk.id for chunk in chunks])
+
+    async def delete_chunk_ids(self, chunk_ids: Iterable[str]) -> None:
+        await self._delete_keys(chunk_ids)
+
+    async def delete_generation(self, bundle: Any) -> None:
+        await self.delete_chunk_ids(
+            chunk_id
+            for section in bundle.manifest.sections
+            for chunk_id in section.chunk_ids
         )
+
+    async def restore_current_generation(self, bundle: Any) -> None:
         await self._merge_chunk_state(
-            keys, publication_state="retired", is_current=False
+            [
+                chunk_id
+                for section in bundle.manifest.sections
+                for chunk_id in section.chunk_ids
+            ],
+            is_current=True,
         )
 
     async def validate_published(
@@ -299,6 +314,21 @@ class DirectiveSearchRepository:
                 "Current Search generation IDs do not match manifest chunks"
             )
 
+    async def validate_exact_published(
+        self, bundles: Iterable[Any]
+    ) -> None:
+        expected_ids = {
+            chunk_id
+            for bundle in bundles
+            for section in bundle.manifest.sections
+            for chunk_id in section.chunk_ids
+        }
+        actual_ids = set(await self._find_keys(""))
+        if actual_ids != expected_ids:
+            raise RuntimeError(
+                "Search documents do not exactly match manifests"
+            )
+
     async def reconcile_generation(
         self, bundle: Any
     ) -> None:
@@ -316,11 +346,7 @@ class DirectiveSearchRepository:
             for key in await self._find_keys(published_filter)
             if key not in expected_ids
         ]
-        await self._merge_chunk_state(
-            stale_keys,
-            publication_state="retired",
-            is_current=False,
-        )
+        await self._delete_keys(stale_keys)
 
     async def reconcile_current(self, bundle: Any) -> None:
         if not bundle.is_current:
@@ -362,17 +388,19 @@ class DirectiveSearchRepository:
         page_size = 1000
         skip = 0
         while len(keys) < limit:
+            payload: dict[str, Any] = {
+                "search": "*",
+                "select": "id",
+                "top": min(page_size, limit - len(keys)),
+                "skip": skip,
+            }
+            if filter_expression:
+                payload["filter"] = filter_expression
             result = await self._request(
                 "POST",
                 f"/indexes/{self._config.search_index}/docs/search",
                 api_version=self._config.search_api_version,
-                payload={
-                    "search": "*",
-                    "filter": filter_expression,
-                    "select": "id",
-                    "top": min(page_size, limit - len(keys)),
-                    "skip": skip,
-                },
+                payload=payload,
             )
             page = result.get("value", [])
             page_keys = [
@@ -392,6 +420,12 @@ class DirectiveSearchRepository:
                 return keys
             skip += len(page)
         return keys
+
+    async def _delete_keys(self, keys: Iterable[str]) -> None:
+        for batch in _batches(list(keys), 500):
+            await self._upload_actions(
+                [{"id": key, "@search.action": "delete"} for key in batch]
+            )
 
     async def _merge_chunk_state(
         self,
