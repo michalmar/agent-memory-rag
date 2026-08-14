@@ -412,6 +412,7 @@ reserve_publication_approval() {
     --arg source_digest "$SOURCE_INVENTORY_DIGEST" \
     --arg environment_digest "$EXPECTED_ENVIRONMENT_DIGEST" \
     --arg processing_hash "$(jq -r '.producer_record.processing_hash' "$VALIDATION_EVIDENCE_FILE")" \
+    --arg mandate_checksum "$(jq -r '.producer_record.mandate_checksum' "$VALIDATION_EVIDENCE_FILE")" \
     --arg image_digest "$IMAGE_DIGEST" \
     --arg subscription "$SUBSCRIPTION_ID" \
     --arg resource_group "$RG" \
@@ -424,6 +425,7 @@ reserve_publication_approval() {
       source_inventory_digest: $source_digest,
       environment_digest: $environment_digest,
       processing_hash: $processing_hash,
+      mandate_checksum: $mandate_checksum,
       wrapper: {
         image_digest: $image_digest,
         subscription_id: $subscription,

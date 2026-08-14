@@ -156,7 +156,8 @@ validate_keys = {
     "processing_version", "processing_hash", "search_index",
     "source_count", "directive_count", "normalized_directive_ids",
     "directive_version_ids", "mandate_count", "mandate_user_count",
-    "warnings", "warning_count", "failures", "source_inventory_digest",
+    "mandate_checksum", "warnings", "warning_count", "failures",
+    "source_inventory_digest",
     "validation_digest",
 }
 verify_keys = {
@@ -164,7 +165,8 @@ verify_keys = {
     "processing_version", "processing_hash", "search_index",
     "source_inventory_digest", "source_count", "directive_count",
     "normalized_directive_ids", "directive_version_ids", "warnings",
-    "warning_count", "cross_store", "state_digest", "validation_digest",
+    "warning_count", "mandate_checksum", "cross_store", "state_digest",
+    "validation_digest",
     "verify_digest",
 }
 environment_keys = {
@@ -273,6 +275,8 @@ if schema == "directive.validate.v2":
         raise SystemExit("validation mandate_user_count is invalid")
     if not isinstance(record.get("failures"), list):
         raise SystemExit("validation failures must be an array")
+    if not _hex64(record.get("mandate_checksum")):
+        raise SystemExit("validation mandate_checksum is invalid")
     if not _hex64(record.get("validation_digest")) or digest({
         k: v for k, v in record.items()
         if k not in {"run_id", "validation_digest"}
@@ -305,11 +309,17 @@ else:
                     raise SystemExit(f"verify cross_store.{name}.{key} is invalid")
             elif not _int(value) or value < 0:
                 raise SystemExit(f"verify cross_store.{name}.{key} is invalid")
+    if (
+        not _hex64(record.get("mandate_checksum"))
+        or record["mandate_checksum"] != cross_store["mandates"]["checksum"]
+    ):
+        raise SystemExit("verify mandate_checksum does not match cross_store.mandates.checksum")
     projection_keys = (
         "record_schema", "environment", "environment_digest",
         "processing_version", "processing_hash",
         "search_index", "source_count", "source_inventory_digest", "directive_count",
-        "normalized_directive_ids", "directive_version_ids", "validation_digest",
+        "normalized_directive_ids", "directive_version_ids", "mandate_checksum",
+        "validation_digest",
         "cross_store",
     )
     projection = {key: record[key] for key in projection_keys}

@@ -439,8 +439,8 @@ only in the evidence wrapper. Before `run-daily`, deployment atomically reserves
 replays are rejected and the marker is retained after successful publication. The
 marker core is an exact `directive.approval.v2` record containing
 `validation_digest`, `environment_digest`, `source_inventory_digest`, and
-`processing_hash`; Azure image and execution provenance is kept only in its
-wrapper.
+`processing_hash`, plus the exact `mandate_checksum`; Azure image and execution
+provenance is kept only in its wrapper.
 producer contract also caps the publication at 32 sorted, unique directives and
 requires complete cross-store counts and digests.
 dispatch passes nonsecret per-execution overrides for

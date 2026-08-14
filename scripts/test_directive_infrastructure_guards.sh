@@ -130,6 +130,7 @@ base = {
     "directive_version_ids": ["V-1"],
     "mandate_count": 0,
     "mandate_user_count": 0,
+    "mandate_checksum": "2" * 64,
     "warnings": [],
     "warning_count": 0,
     "failures": [],
@@ -162,6 +163,7 @@ projection = {k: verify[k] for k in (
     "processing_version", "processing_hash",
     "search_index", "source_count", "source_inventory_digest", "directive_count",
     "normalized_directive_ids", "directive_version_ids", "validation_digest",
+    "mandate_checksum",
     "cross_store",
 )}
 verify["state_digest"] = digest(projection)
@@ -214,6 +216,8 @@ elif label == "unsorted warnings":
         {"code": "W1", "severity": "warning"},
     ]
     record["warning_count"] = 2
+elif label == "mandate checksum mismatch":
+    record["cross_store"]["mandates"]["checksum"] = "3" * 64
 pathlib.Path(sys.argv[2]).write_text(json.dumps(record), encoding="utf-8")
 PY
   expect_invalid_verify "$invalid_label"
@@ -224,6 +228,7 @@ wrapper execution id
 invalid severity
 duplicate warnings
 unsorted warnings
+mandate checksum mismatch
 EOF
 
 cat >"$PLAN" <<'EOF'

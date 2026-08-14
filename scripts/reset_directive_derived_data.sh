@@ -341,6 +341,7 @@ confirmation_token_for() {
   local verification_hash="${6:-}"
   local validation_digest="${7:-}"
   local environment_digest="${8:-$EXPECTED_ENVIRONMENT_DIGEST}"
+  local mandate_checksum="${9:-}"
   local prefix="DIRECTIVE-RESET-V2"
   [[ "$kind" == finalize ]] && prefix="DIRECTIVE-FINALIZE-V2"
   printf '%s-%s\n' "$prefix" "$(
@@ -351,7 +352,8 @@ state_digest=$state_digest
 image_digest=$image_digest
 verification_hash=$verification_hash
 validation_digest=$validation_digest
-environment_digest=$environment_digest" | cut -c1-24
+environment_digest=$environment_digest
+mandate_checksum=$mandate_checksum" | cut -c1-24
   )"
 }
 
@@ -361,12 +363,14 @@ write_inventory_evidence() {
   local created_at="$3"
   local nonce="$4"
   local inventory_hash verification_hash="" state_digest="" image_digest="" validation_digest=""
+  local mandate_checksum=""
   [[ -n "$INVENTORY_EVIDENCE_FILE" ]] || return 0
   inventory_hash="$(sha256_text "$(token_inventory_text)")"
   if [[ "$kind" == finalize ]]; then
     state_digest="$(jq -r '.producer_record.state_digest' "$VERIFICATION_FILE")"
     image_digest="$(jq -r '.wrapper.image_digest' "$VERIFICATION_FILE")"
     validation_digest="$(jq -r '.producer_record.validation_digest' "$VERIFICATION_FILE")"
+    mandate_checksum="$(jq -r '.producer_record.mandate_checksum' "$VERIFICATION_FILE")"
     verification_hash="$(sha256_file "$VERIFICATION_FILE")"
   fi
   jq -S -n \
@@ -382,6 +386,7 @@ write_inventory_evidence() {
     --arg state_digest "$state_digest" \
     --arg image_digest "$image_digest" \
     --arg validation_digest "$validation_digest" \
+    --arg mandate_checksum "$mandate_checksum" \
     --arg processing_version "directive-v2-czech-layout" \
     --arg search_index "$V2_INDEX" \
     '{
@@ -397,6 +402,7 @@ write_inventory_evidence() {
       state_digest: ($state_digest | if . == "" then null else . end),
       verification_image_digest: ($image_digest | if . == "" then null else . end),
       verification_validation_digest: ($validation_digest | if . == "" then null else . end),
+      verification_mandate_checksum: ($mandate_checksum | if . == "" then null else . end),
       verification_processing_version: ($processing_version | if $kind == "finalize" then . else null end),
       verification_search_index: ($search_index | if $kind == "finalize" then . else null end)
     }' >"$INVENTORY_EVIDENCE_FILE"
@@ -426,7 +432,8 @@ validate_inventory_evidence() {
     "$(jq -r '.verification_image_digest // empty' "$INVENTORY_EVIDENCE_FILE")" \
     "$(jq -r '.verification_evidence_sha256 // empty' "$INVENTORY_EVIDENCE_FILE")" \
     "$(jq -r '.verification_validation_digest // empty' "$INVENTORY_EVIDENCE_FILE")" \
-    "$EXPECTED_ENVIRONMENT_DIGEST")"
+    "$EXPECTED_ENVIRONMENT_DIGEST" \
+    "$(jq -r '.verification_mandate_checksum // empty' "$INVENTORY_EVIDENCE_FILE")")"
   [[ "$expected_token" == "$expected_derived_token" ]] || die \
     "Inventory evidence token is not bound to its timestamp, nonce, and inventory"
   jq -e \
@@ -440,6 +447,7 @@ validate_inventory_evidence() {
     --arg state_digest "$(jq -r '.producer_record.state_digest // empty' "$VERIFICATION_FILE" 2>/dev/null || true)" \
     --arg image_digest "$(jq -r '.wrapper.image_digest // empty' "$VERIFICATION_FILE" 2>/dev/null || true)" \
     --arg validation_digest "$(jq -r '.producer_record.validation_digest // empty' "$VERIFICATION_FILE" 2>/dev/null || true)" \
+    --arg mandate_checksum "$(jq -r '.producer_record.mandate_checksum // empty' "$VERIFICATION_FILE" 2>/dev/null || true)" \
     --arg processing_version "$(jq -r '.wrapper.processing_version // empty' "$VERIFICATION_FILE" 2>/dev/null || true)" \
     --arg search_index "$(jq -r '.wrapper.search_index // empty' "$VERIFICATION_FILE" 2>/dev/null || true)" \
     '
@@ -456,6 +464,7 @@ validate_inventory_evidence() {
          and .verification_processing_version == $processing_version
          and .verification_search_index == $search_index
          and .verification_validation_digest == $validation_digest
+         and .verification_mandate_checksum == $mandate_checksum
        else .verification_evidence_sha256 == ""
        end)
     ' "$INVENTORY_EVIDENCE_FILE" >/dev/null || die \
@@ -464,7 +473,7 @@ validate_inventory_evidence() {
 
 print_inventory() {
   local token created_at nonce verification_state_digest="" verification_image_digest=""
-  local verification_validation_digest="" verification_hash=""
+  local verification_validation_digest="" verification_mandate_checksum="" verification_hash=""
   echo "==> Directive derived-data $MODE inventory"
   inventory_text
   echo "directive-source is PROTECTED and is never a reset target"
@@ -477,13 +486,15 @@ print_inventory() {
     verification_state_digest="$(jq -r '.producer_record.state_digest' "$VERIFICATION_FILE")"
     verification_image_digest="$(jq -r '.wrapper.image_digest' "$VERIFICATION_FILE")"
     verification_validation_digest="$(jq -r '.producer_record.validation_digest' "$VERIFICATION_FILE")"
+    verification_mandate_checksum="$(jq -r '.producer_record.mandate_checksum' "$VERIFICATION_FILE")"
     verification_hash="$(sha256_file "$VERIFICATION_FILE")"
   fi
   token="$(confirmation_token_for \
     "$([[ "$MODE" == finalize ]] && echo finalize || echo reset)" \
     "$created_at" "$nonce" "$verification_state_digest" \
     "$verification_image_digest" "$verification_hash" \
-    "$verification_validation_digest" "$EXPECTED_ENVIRONMENT_DIGEST")"
+    "$verification_validation_digest" "$EXPECTED_ENVIRONMENT_DIGEST" \
+    "$verification_mandate_checksum")"
   write_inventory_evidence \
     "$token" \
     "$([[ "$MODE" == finalize ]] && echo finalize || echo reset)" \
@@ -965,12 +976,13 @@ start_fresh_verify() {
 
 finalize_v1() {
   local expected_state_digest expected_image_digest expected_processing_version expected_search_index
-  local expected_validation_digest
+  local expected_validation_digest expected_mandate_checksum
   expected_state_digest="$(jq -r '.state_digest' "$INVENTORY_EVIDENCE_FILE")"
   expected_image_digest="$(jq -r '.verification_image_digest' "$INVENTORY_EVIDENCE_FILE")"
   expected_processing_version="$(jq -r '.verification_processing_version' "$INVENTORY_EVIDENCE_FILE")"
   expected_search_index="$(jq -r '.verification_search_index' "$INVENTORY_EVIDENCE_FILE")"
   expected_validation_digest="$(jq -r '.verification_validation_digest' "$INVENTORY_EVIDENCE_FILE")"
+  expected_mandate_checksum="$(jq -r '.verification_mandate_checksum' "$INVENTORY_EVIDENCE_FILE")"
   validate_index_names
   load_inventory
   enter_maintenance_mode
@@ -980,6 +992,7 @@ finalize_v1() {
   load_inventory
   validate_inventory_evidence finalize "$CONFIRMATION_TOKEN"
   local evidence_image evidence_source evidence_processing_hash evidence_state_digest evidence_validation_digest
+  local evidence_mandate_checksum
   local verification_execution
   evidence_image="$(jq -r '.wrapper.image_digest // .image_digest' "$VERIFICATION_FILE")"
   evidence_source="$(jq -r '.producer_record.source_inventory_digest // .source_inventory_digest' "$VERIFICATION_FILE")"
@@ -987,12 +1000,15 @@ finalize_v1() {
   verification_execution="$(jq -r '.wrapper.verification_execution_id' "$VERIFICATION_FILE")"
   evidence_state_digest="$(jq -r '.producer_record.state_digest' "$VERIFICATION_FILE")"
   evidence_validation_digest="$(jq -r '.producer_record.validation_digest' "$VERIFICATION_FILE")"
+  evidence_mandate_checksum="$(jq -r '.producer_record.mandate_checksum' "$VERIFICATION_FILE")"
   [[ "$evidence_state_digest" == "$expected_state_digest" ]] || die \
     "Fresh verification state_digest differs from the finalize dry-run evidence"
   [[ "$evidence_image" == "$expected_image_digest" ]] || die \
     "Fresh verification image differs from the finalize dry-run evidence"
   [[ "$evidence_validation_digest" == "$expected_validation_digest" ]] || die \
     "Fresh verification validation_digest differs from the finalize dry-run evidence"
+  [[ "$evidence_mandate_checksum" == "$expected_mandate_checksum" ]] || die \
+    "Fresh verification mandate_checksum differs from the finalize dry-run evidence"
   [[ "$(jq -r '.wrapper.processing_version' "$VERIFICATION_FILE")" == "$expected_processing_version" &&
       "$(jq -r '.wrapper.search_index' "$VERIFICATION_FILE")" == "$expected_search_index" ]] || die \
     "Fresh verification configuration differs from the finalize dry-run evidence"
