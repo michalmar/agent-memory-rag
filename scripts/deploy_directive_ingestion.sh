@@ -78,6 +78,7 @@ if [[ "$PHASE" == all && -z "$VALIDATION_EVIDENCE_FILE" ]]; then
   GENERATED_VALIDATION_EVIDENCE=true
 fi
 
+SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
 RG="$(tf resource_group)"
 ACR_NAME="$(tf acr_name)"
 ACR_LOGIN="$(tf acr_login_server)"
@@ -152,6 +153,7 @@ COSMOS_ROLE_SNAPSHOT="$(mktemp)"
 cleanup() {
   local status=$?
   trap - EXIT
+  set +e
   if [[ "$status" -ne 0 && -n "${JOB_NAME:-}" ]]; then
     stop_started_executions
   fi
@@ -174,6 +176,8 @@ cleanup() {
       --command directive-ingest \
       --args maintenance \
       --output none || echo "ERROR: failed to leave maintenance mode" >&2
+    assert_live_maintenance_mode || echo "ERROR: maintenance assertion failed" >&2
+    assert_no_active_execution || echo "ERROR: active execution assertion failed" >&2
   fi
   exit "$status"
 }
@@ -182,26 +186,30 @@ trap cleanup EXIT
 stop_started_executions() {
   local execution_name status
   for execution_name in "${STARTED_EXECUTIONS[@]}"; do
-    status="$(
+    if ! status="$(
       az containerapp job execution show \
         --name "$JOB_NAME" \
         --resource-group "$RG" \
         --job-execution-name "$execution_name" \
         --query properties.status \
-        --output tsv 2>/dev/null || true
-    )"
+        --output tsv 2>/dev/null
+    )"; then
+      status="__lookup_failed__"
+    fi
     case "$status" in
-      Succeeded|Failed|Stopped|Degraded|Canceled|"") continue ;;
+      Succeeded|Failed|Stopped|Degraded|Canceled) continue ;;
     esac
     echo "==> Stopping failed-run execution $execution_name" >&2
     az containerapp job stop \
       --name "$JOB_NAME" \
       --resource-group "$RG" \
       --job-execution-name "$execution_name" \
-      --output none || true
+      --output none || echo "ERROR: failed to stop execution $execution_name" >&2
   done
   for ((attempt = 1; attempt <= 30; attempt++)); do
-    assert_no_active_execution && return 0
+    if assert_no_active_execution; then
+      return 0
+    fi
     sleep 2
   done
   echo "ERROR: started executions did not drain after failure cleanup" >&2
@@ -279,10 +287,6 @@ safe_summary_lines() {
   while IFS= read -r line; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
     [[ "${trimmed:0:1}" == "{" ]] || continue
-    if printf '%s\n' "$trimmed" |
-      grep -Eiq '"(content|markdown|prompt|document_text|administrative_content|raw_response)"[[:space:]]*:'; then
-      continue
-    fi
     sanitized="$(
       printf '%s\n' "$trimmed" |
         jq -ce 'if type == "object" then . else empty end' 2>/dev/null || true
@@ -309,9 +313,9 @@ show_execution_logs() {
     *) safe_summary_lines "$raw_logs" "$INDEX_SCHEMA_FILE" ;;
   esac
   if [[ -s "$VALIDATION_SUMMARY_FILE" && "${CURRENT_EXECUTION_LABEL:-}" == "Metadata validation" ]]; then
-    cat "$VALIDATION_SUMMARY_FILE"
+    jq -c '{success, record_field_names: (keys | sort)}' "$VALIDATION_SUMMARY_FILE"
   elif [[ -s "$VERIFY_SUMMARY_FILE" && "${CURRENT_EXECUTION_LABEL:-}" == "Directive verification" ]]; then
-    cat "$VERIFY_SUMMARY_FILE"
+    jq -c '{success, record_field_names: (keys | sort)}' "$VERIFY_SUMMARY_FILE"
   else
     echo "[redacted] no approved ingestion summary lines were emitted"
   fi
@@ -398,13 +402,16 @@ assert_live_maintenance_mode() {
 
 assert_no_active_execution() {
   local active
-  active="$(
+  if ! active="$(
     az containerapp job execution list \
       --name "$JOB_NAME" \
       --resource-group "$RG" \
       --query "[?properties.status!='Succeeded' && properties.status!='Failed' && properties.status!='Stopped' && properties.status!='Degraded' && properties.status!='Canceled'].name" \
       --output tsv
-  )"
+  )"; then
+    echo "ERROR: unable to query Container Apps executions" >&2
+    return 1
+  fi
   [[ -z "$active" ]] || {
     echo "ERROR: active directive execution(s) must drain before a phase change: $active" >&2
     return 1
@@ -478,9 +485,9 @@ start_job_execution() {
     return 1
   }
   STARTED_EXECUTIONS+=("$execution_name")
+  STARTED_EXECUTION_NAME="$execution_name"
   assert_execution_mode "$execution_name" "$expected_argument"
   assert_execution_image "$execution_name"
-  printf '%s\n' "$execution_name"
 }
 
 assert_v2_search_schema() {
@@ -541,6 +548,10 @@ require_one_summary_record() {
   }
   [[ "$(wc -l <"$file" | tr -d ' ')" == "1" ]] || {
     echo "ERROR: $label emitted a partial or ambiguous summary" >&2
+    return 1
+  }
+  [[ "$(wc -c <"$file" | tr -d ' ')" -le 65536 ]] || {
+    echo "ERROR: $label summary exceeds the safe record size limit" >&2
     return 1
   }
   jq -s -e 'length == 1 and (.[0] | type == "object")' "$file" >/dev/null || {
@@ -664,6 +675,11 @@ write_validation_evidence() {
       --arg image_reference "$IMAGE" \
       --arg execution "$VALIDATE_EXECUTION" \
       --arg source_digest "$SOURCE_INVENTORY_DIGEST" \
+      --arg subscription "$SUBSCRIPTION_ID" \
+      --arg resource_group "$RG" \
+      --arg job "$JOB_NAME" \
+      --arg processing_version "$EXPECTED_PROCESSING_VERSION" \
+      --arg search_index "$EXPECTED_SEARCH_INDEX" \
       '
         {
           producer_record: .,
@@ -671,7 +687,12 @@ write_validation_evidence() {
             image_digest: $image_digest,
             image_reference: $image_reference,
             source_inventory_digest: $source_digest,
-            validation_execution_id: $execution
+            validation_execution_id: $execution,
+            subscription_id: $subscription,
+            resource_group: $resource_group,
+            job_name: $job,
+            processing_version: $processing_version,
+            search_index: $search_index
           }
         }
     ' "$VALIDATION_SUMMARY_FILE"
@@ -742,12 +763,22 @@ revalidate_validation_evidence() {
       --arg image_reference "$IMAGE" \
       --arg execution "$VALIDATE_EXECUTION" \
       --arg source_digest "$SOURCE_INVENTORY_DIGEST" \
+      --arg subscription "$SUBSCRIPTION_ID" \
+      --arg resource_group "$RG" \
+      --arg job "$JOB_NAME" \
+      --arg processing_version "$EXPECTED_PROCESSING_VERSION" \
+      --arg search_index "$EXPECTED_SEARCH_INDEX" \
       '. + {
         wrapper: {
           image_digest: $image_digest,
           image_reference: $image_reference,
           source_inventory_digest: $source_digest,
-          validation_execution_id: $execution
+          validation_execution_id: $execution,
+          subscription_id: $subscription,
+          resource_group: $resource_group,
+          job_name: $job,
+          processing_version: $processing_version,
+          search_index: $search_index
         }
       }' <(printf '%s\n' "$canonical_record")
   )"
@@ -770,6 +801,11 @@ write_verification_evidence() {
       --arg validation_execution "$VALIDATE_EXECUTION" \
       --arg validation_digest "$VALIDATION_RECORD_DIGEST" \
       --arg execution "$VERIFY_EXECUTION" \
+      --arg subscription "$SUBSCRIPTION_ID" \
+      --arg resource_group "$RG" \
+      --arg job "$JOB_NAME" \
+      --arg processing_version "$EXPECTED_PROCESSING_VERSION" \
+      --arg search_index "$EXPECTED_SEARCH_INDEX" \
       '
         {
           producer_record: .,
@@ -778,7 +814,12 @@ write_verification_evidence() {
             source_inventory_digest: $source_digest,
             validation_execution_id: $validation_execution,
             validation_record_digest: $validation_digest,
-            verification_execution_id: $execution
+            verification_execution_id: $execution,
+            subscription_id: $subscription,
+            resource_group: $resource_group,
+            job_name: $job,
+            processing_version: $processing_version,
+            search_index: $search_index
           }
         }
       ' "$source_record"
@@ -790,14 +831,19 @@ write_verification_evidence() {
     '
       (.producer_record | type == "object") and
       .producer_record.success == true and
+      (.producer_record.normalized_directive_ids | type == "array" and all(.[]; type == "string")) and
+      (.producer_record.directive_version_ids | type == "array" and all(.[]; type == "string")) and
+      (.producer_record.warnings | type == "array" and length <= 100) and
       (.producer_record.verify_execution_id | type == "string" and length > 0) and
       (.producer_record.environment | type == "object") and
+      (.producer_record.source_count | type == "number" and . > 0) and
       .producer_record.search_index == "directive-chunks-v2" and
       .producer_record.processing_version == "directive-v2-czech-layout" and
       (.producer_record.processing_hash | test("^[0-9a-f]{64}$")) and
       (.producer_record.source_inventory_digest | test("^[0-9a-f]{64}$")) and
-      (.producer_record.verify_digest | type == "string" and length > 0) and
-      (.producer_record.cross_store | type == "object") and
+      (.producer_record.state_digest | test("^[0-9a-f]{64}$")) and
+      (.producer_record.verify_digest | test("^[0-9a-f]{64}$")) and
+      (.producer_record.cross_store | type == "object" and length > 0) and
       .wrapper.verification_execution_id != "" and
       .wrapper.validation_execution_id != "" and
       .wrapper.image_digest != "" and
@@ -934,7 +980,8 @@ ensure_maintenance_mode
 
 if [[ "$PHASE" != publish ]]; then
   echo "==> Bootstrapping the v2 Search index through a per-execution override"
-  BOOTSTRAP_EXECUTION="$(start_job_execution bootstrap)"
+  start_job_execution bootstrap
+  BOOTSTRAP_EXECUTION="$STARTED_EXECUTION_NAME"
   echo "==> Bootstrap execution: $BOOTSTRAP_EXECUTION"
   wait_for_execution "$BOOTSTRAP_EXECUTION" "Search bootstrap" 120 10
   assert_live_v2_config
@@ -944,7 +991,8 @@ if [[ "$PHASE" != publish ]]; then
   PREFLIGHT_SUCCEEDED=false
   for attempt in {1..5}; do
     ensure_maintenance_mode
-    PREFLIGHT_EXECUTION="$(start_job_execution preflight)"
+    start_job_execution preflight
+    PREFLIGHT_EXECUTION="$STARTED_EXECUTION_NAME"
     echo "==> Preflight execution: $PREFLIGHT_EXECUTION"
     if wait_for_execution "$PREFLIGHT_EXECUTION" "Preflight" 120 10; then
       PREFLIGHT_SUCCEEDED=true
@@ -956,7 +1004,8 @@ if [[ "$PHASE" != publish ]]; then
 
   refresh_source_inventory
   echo "==> Running metadata-only validation"
-  VALIDATE_EXECUTION="$(start_job_execution validate)"
+  start_job_execution validate
+  VALIDATE_EXECUTION="$STARTED_EXECUTION_NAME"
   echo "==> Validation execution: $VALIDATE_EXECUTION"
   wait_for_execution "$VALIDATE_EXECUTION" "Metadata validation" 120 10
   validate_metadata_summary
@@ -1003,12 +1052,14 @@ refresh_source_inventory
   die "Source inventory changed immediately before publication"
 
 echo "==> Starting approved publication through a per-execution override"
-EXECUTION_NAME="$(start_job_execution run-daily)"
+start_job_execution run-daily
+EXECUTION_NAME="$STARTED_EXECUTION_NAME"
 echo "==> Ingestion execution: $EXECUTION_NAME"
 wait_for_execution "$EXECUTION_NAME" "Directive ingestion" 240 30
 
 echo "==> Verifying published directive state"
-VERIFY_EXECUTION="$(start_job_execution verify)"
+start_job_execution verify
+VERIFY_EXECUTION="$STARTED_EXECUTION_NAME"
 echo "==> Verification execution: $VERIFY_EXECUTION"
 wait_for_execution "$VERIFY_EXECUTION" "Directive verification" 120 10
 refresh_source_inventory
