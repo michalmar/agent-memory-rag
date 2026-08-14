@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from azure.core.exceptions import ResourceNotFoundError
 from directive_contracts import (
     DirectiveMetadata,
     calculate_artifact_generation_id,
@@ -134,6 +135,31 @@ async def test_state_rollback_uses_only_the_candidate_write_etag() -> None:
 
     assert blob.upload_blob.await_args.kwargs["etag"] == "candidate-etag"
     assert container.delete_blob.await_args.kwargs["etag"] == "candidate-etag"
+
+
+@pytest.mark.asyncio
+async def test_replace_json_does_not_create_when_expected_etag_blob_is_missing() -> (
+    None
+):
+    blob = SimpleNamespace(
+        get_blob_properties=AsyncMock(
+            side_effect=ResourceNotFoundError("missing")
+        ),
+        upload_blob=AsyncMock(),
+    )
+    repository = object.__new__(BlobArtifactRepository)
+    repository._container = SimpleNamespace(get_blob_client=lambda _: blob)
+
+    with pytest.raises(
+        RuntimeError, match="Concurrent source-state replacement prevented"
+    ):
+        await repository.replace_json(
+            "source-state/test.json",
+            {"publication_state": "published"},
+            expected_etag="expected-etag",
+        )
+
+    blob.upload_blob.assert_not_awaited()
 
 
 @pytest.mark.asyncio

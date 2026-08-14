@@ -103,7 +103,11 @@ class BlobArtifactRepository:
             return _response_etag(response, blob_name)
         try:
             properties = await blob.get_blob_properties()
-        except ResourceNotFoundError:
+        except ResourceNotFoundError as exc:
+            if expected_etag is not None:
+                raise RuntimeError(
+                    f"Concurrent source-state replacement prevented at {blob_name}"
+                ) from exc
             try:
                 response = await blob.upload_blob(
                     content,

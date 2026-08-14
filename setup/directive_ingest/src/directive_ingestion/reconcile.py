@@ -830,7 +830,9 @@ class DirectiveIngestionRunner:
             marker_after = await self.commits.load()
             if marker_before is None and marker_after is None:
                 snapshots = getattr(self, "_publication_snapshots", [])
-                if snapshots:
+                if snapshots or (
+                    mandates is not None and mandates.changed
+                ):
                     await self._rollback_publication(snapshots, mandates)
             raise
 

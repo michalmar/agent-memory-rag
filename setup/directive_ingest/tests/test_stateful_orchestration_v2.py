@@ -457,7 +457,7 @@ class MemoryMandates:
         )
         changed = self.active != snapshot
         self.staged = snapshot
-        return snapshot, None, changed
+        return snapshot, self.active, changed
 
     async def activate(self, snapshot, _run_id: str) -> None:
         self.active = snapshot
@@ -465,8 +465,8 @@ class MemoryMandates:
     async def cleanup(self, _snapshot_id: str) -> bool:
         return False
 
-    async def restore_active(self, _previous) -> None:
-        self.active = None
+    async def restore_active(self, previous) -> None:
+        self.active = previous
 
     async def discard_staged(self, _snapshot) -> None:
         self.staged = None
@@ -679,6 +679,54 @@ async def test_initial_publication_then_noop_daily_run_is_write_free(
         harness.content.write_count,
         harness.search.write_count,
     ) == writes_before_noop
+
+
+@pytest.mark.asyncio
+async def test_marker_write_failure_rolls_back_changed_mandates_without_documents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    previous_active = MandateSnapshot(
+        snapshot_id="mandates-" + "b" * 64,
+        checksum="b" * 64,
+        assignment_count=0,
+        user_count=0,
+        complete=True,
+    )
+    harness.runner.mandates.active = previous_active
+    documents_before = (
+        dict(harness.catalog.bundles),
+        deepcopy(harness.catalog.current),
+        dict(harness.content.items),
+        dict(harness.search.chunks),
+    )
+    _, mandate_transaction = await harness.runner._publish_transaction(
+        [],
+        SimpleNamespace(assignments=(), checksum="c" * 64, user_count=0),
+        "run",
+    )
+    assert mandate_transaction is not None
+    assert harness.runner.mandates.active != previous_active
+
+    async def fail_marker_write(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("marker write failed")
+
+    harness.runner.commits.record = fail_marker_write
+
+    with pytest.raises(RuntimeError, match="marker write failed"):
+        await harness.runner._reconcile_after_publication(
+            [], [], "run", mandate_transaction, marker_before=None
+        )
+
+    assert harness.runner.mandates.active == previous_active
+    assert harness.runner.mandates.staged is None
+    assert (
+        dict(harness.catalog.bundles),
+        harness.catalog.current,
+        dict(harness.content.items),
+        dict(harness.search.chunks),
+    ) == documents_before
+    assert await harness.runner.commits.load() is None
 
 
 @pytest.mark.asyncio
