@@ -46,6 +46,8 @@ TAG="${1:-$(date +%Y%m%d%H%M%S)}"
 REPOSITORY="directive-ingestion"
 IMAGE="$ACR_LOGIN/$REPOSITORY:$TAG"
 JOB_CONTAINER="directive-ingestion"
+VALIDATION_CONFIRMATION="${DIRECTIVE_VALIDATE_CONFIRMATION:-}"
+VERIFY_EVIDENCE_FILE="${DIRECTIVE_VERIFY_EVIDENCE_FILE:-}"
 
 ACR_SCOPE="$(
   az acr show --name "$ACR_NAME" --resource-group "$RG" --query id --output tsv
@@ -168,15 +170,56 @@ roles_are_ready() {
   has_exact_cosmos_role
 }
 
+safe_summary_lines() {
+  awk '
+    { line = $0; sub(/^[[:space:]]*/, "", line) }
+    substr(line, 1, 1) == "{" && /"status"|"run_id"|"source_count"|"directive_count"|"mandate_count"|"mandate_user_count"|"changed_count"|"skipped_count"|"chunk_count"|"published_chunks"|"published_directives"|"published_versions"|"current_directives"|"current_versions"|"mandate_assignment_count"|"acr_pull"|"document_intelligence"/ {
+      print
+    }
+  '
+}
+
 show_execution_logs() {
   local execution_name="$1"
-  az containerapp job logs show \
-    --name "$JOB_NAME" \
-    --resource-group "$RG" \
-    --execution "$execution_name" \
-    --container "$JOB_CONTAINER" \
-    --tail 300 \
-    --format text || true
+  local raw_logs safe_logs
+  raw_logs="$(
+    az containerapp job logs show \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --execution "$execution_name" \
+      --container "$JOB_CONTAINER" \
+      --tail 300 \
+      --format text 2>/dev/null || true
+  )"
+  safe_logs="$(printf '%s\n' "$raw_logs" | safe_summary_lines)"
+  if [[ -n "$safe_logs" ]]; then
+    printf '%s\n' "$safe_logs"
+  else
+    echo "[redacted] no approved ingestion summary lines were emitted"
+  fi
+  if [[ -n "$VERIFY_EVIDENCE_FILE" && "${CURRENT_EXECUTION_LABEL:-}" == "Directive verification" ]]; then
+    printf '%s\n' "$safe_logs" >"$VERIFY_EVIDENCE_FILE"
+  fi
+}
+
+confirm_validation() {
+  local expected="PUBLISH_VALIDATED_DIRECTIVE_V2"
+  if [[ -n "$VALIDATION_CONFIRMATION" ]]; then
+    [[ "$VALIDATION_CONFIRMATION" == "$expected" ]] || {
+      echo "ERROR: DIRECTIVE_VALIDATE_CONFIRMATION must equal $expected" >&2
+      return 1
+    }
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    echo "ERROR: metadata validation requires operator confirmation" >&2
+    echo "Set DIRECTIVE_VALIDATE_CONFIRMATION=$expected after inspecting the" >&2
+    echo "validation summary, or run this command from a terminal." >&2
+    return 1
+  fi
+  local answer
+  read -r -p "Type $expected to publish the validated corpus: " answer
+  [[ "$answer" == "$expected" ]]
 }
 
 wait_for_execution() {
@@ -185,6 +228,7 @@ wait_for_execution() {
   local max_attempts="$3"
   local delay_seconds="$4"
   local attempt status
+  CURRENT_EXECUTION_LABEL="$label"
   for ((attempt = 1; attempt <= max_attempts; attempt++)); do
     status="$(
       az containerapp job execution show \
@@ -199,7 +243,7 @@ wait_for_execution() {
         show_execution_logs "$execution_name"
         return 0
         ;;
-      Failed | Stopped | Degraded)
+      Failed | Stopped | Degraded | Canceled)
         show_execution_logs "$execution_name"
         echo "$label execution ended with status $status" >&2
         return 1
@@ -271,6 +315,7 @@ for attempt in {1..30}; do
   sleep 20
 done
 
+RESTORE_PUBLICATION_MODE=true
 echo "==> Updating the directive ingestion job image in preflight mode"
 az containerapp job update \
   --name "$JOB_NAME" \
@@ -311,6 +356,31 @@ if [[ "$PREFLIGHT_SUCCEEDED" != true ]]; then
   exit 1
 fi
 
+echo "==> Running metadata-only validation"
+az containerapp job update \
+  --name "$JOB_NAME" \
+  --resource-group "$RG" \
+  --container-name "$JOB_CONTAINER" \
+  --command directive-ingest \
+  --args validate \
+  --output none
+VALIDATE_EXECUTION="$(
+  az containerapp job start \
+    --name "$JOB_NAME" \
+    --resource-group "$RG" \
+    --query name \
+    --output tsv
+)"
+if [[ -z "$VALIDATE_EXECUTION" ]]; then
+  echo "Container Apps did not return a validation execution name" >&2
+  exit 1
+fi
+echo "==> Validation execution: $VALIDATE_EXECUTION"
+assert_execution_mode "$VALIDATE_EXECUTION" "validate"
+wait_for_execution "$VALIDATE_EXECUTION" "Metadata validation" 120 10
+echo "==> Inspect the validation summary above before confirming publication"
+confirm_validation
+
 if [[ -z "${DIRECTIVE_APPROVED_VALIDATION_DIGEST:-}" ]] \
   || [[ -z "${DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST:-}" ]] \
   || [[ -z "${DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST:-}" ]]; then
@@ -346,9 +416,7 @@ fi
 echo "==> Ingestion execution: $EXECUTION_NAME"
 assert_execution_mode "$EXECUTION_NAME" "run-daily"
 wait_for_execution "$EXECUTION_NAME" "Directive ingestion" 240 30
-
 echo "==> Verifying published directive state"
-RESTORE_PUBLICATION_MODE=true
 az containerapp job update \
   --name "$JOB_NAME" \
   --resource-group "$RG" \

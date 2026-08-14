@@ -89,3 +89,20 @@ immutable afterward.
   gateway/tool allowlist; backend ingress remains internal.
 - Public history DTOs expose safe agent labels/version metadata but never owner,
   physical routing, Foundry conversation, Hosted session, response, or ETag data.
+
+## Directive v2 operations
+
+Production Terraform supplies `DIRECTIVE_SEARCH_INDEX=directive-chunks-v2` and
+`DIRECTIVE_PROCESSING_VERSION=directive-v2-czech-layout`. The manual ingestion
+job remains the only publication trigger. A maintenance-window cutover must
+run the guarded derived-data reset, image deployment, managed-identity
+preflight, metadata-only validation with operator confirmation, full ingestion,
+and cross-store verification in that order.
+
+The reset automation is dry-run by default and protects the
+`directive-source` container. It deletes and recreates only the derived
+Cosmos containers with their existing partition keys and purges derived
+artifact prefixes. Keep Search v1 until the sanitized v2 verification evidence
+has been inspected; the separate guarded finalize command then deletes v1.
+Recovery is always a rebuild from the preserved source container, not a backup
+or data-conversion rollback.

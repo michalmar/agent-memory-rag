@@ -387,6 +387,53 @@ The ignored assignment workflow prevents identity mappings from entering new
 snapshots. Historical commits contain the former demo mapping; purging shared
 Git history is a separate, disruptive operation and is not part of deployment.
 
+### Directive v2 maintenance and cutover
+
+Directive v2 is a destructive rebuild with no dual-read, dual-write, backup, or
+data-conversion rollback path. Schedule a maintenance window, stop new
+directive requests, confirm the source inventory and mandate CSV, and verify
+that no ingestion execution is active. The `directive-source` Blob container
+and its contents are protected input data and are never deleted or mutated by
+reset automation.
+
+The reset command is dry-run by default. Inspect its exact subscription,
+resource group, storage/Cosmos/Search/job inventory and copy the printed token:
+
+```bash
+./scripts/reset_directive_derived_data.sh
+./scripts/reset_directive_derived_data.sh reset --execute \
+  --confirm DIRECTIVE-RESET-V2-<token-from-fresh-dry-run>
+```
+
+The reset deletes only the three derived Cosmos containers, recreates them with
+Terraform and the retained `/directive_id`, `/directive_version_id`, and
+`/user_id` partition keys, then purges only `directives/`, `source-state/`, and
+obsolete `quarantine/` prefixes from the artifact container. It never edits
+Terraform state or touches source data. Deploy the compatible image with
+`scripts/deploy_directive_ingestion.sh`; the job runs preflight, metadata-only
+`validate`, an explicit operator confirmation, full ingestion (which bootstraps
+`directive-chunks-v2`), and cross-store `verify`. Set
+`DIRECTIVE_VALIDATE_CONFIRMATION=PUBLISH_VALIDATED_DIRECTIVE_V2` after reviewing
+the validation summary. Set `DIRECTIVE_VERIFY_EVIDENCE_FILE` to a file for the
+sanitized verification summary when preparing finalization.
+
+Keep `directive-chunks-v1` until v2 verification is accepted. A separate,
+freshly guarded finalize dry-run binds its token to the recent sanitized v2
+verification evidence; only then may v1 be deleted:
+
+```bash
+./scripts/reset_directive_derived_data.sh finalize \
+  --verification-file /tmp/directive-v2-verify.txt
+./scripts/reset_directive_derived_data.sh finalize --execute \
+  --verification-file /tmp/directive-v2-verify.txt \
+  --confirm DIRECTIVE-FINALIZE-V2-<token-from-fresh-dry-run>
+```
+
+If a run fails, recovery is a rebuild: correct the parser, contract,
+configuration, or preserved source input, bump the processing version when
+semantics changed, reset partial derived data, and rerun ingestion. There is no
+rollback conversion procedure.
+
 For a new Microsoft Entra tenant or subscription, follow the
 [cross-tenant Azure deployment runbook](docs/CROSS-TENANT-AZURE-DEPLOYMENT.md).
 It separates Contributor work from Microsoft Entra administration and Azure
