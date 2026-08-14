@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from decimal import getcontext, setcontext
 
 import pytest
 from pydantic import ValidationError
@@ -49,6 +50,29 @@ def test_versions_compare_by_decimal_and_keep_display_spelling_separate() -> Non
     assert normalize_directive_version("01.00") == "1"
     assert normalize_directive_version("1.2300") == "1.23"
     assert build_directive_version_id("č/12", "01.00") == "Č/12:v1"
+
+
+def test_versions_keep_distinct_long_decimal_values_exactly() -> None:
+    first = "1." + ("2" * 28) + "1"
+    second = "1." + ("2" * 28) + "2"
+    assert normalize_directive_version(first) != normalize_directive_version(second)
+
+
+def test_version_normalization_is_independent_of_decimal_context() -> None:
+    original = getcontext().copy()
+    try:
+        getcontext().prec = 2
+        low_precision = normalize_directive_version("000123.4500")
+        getcontext().prec = 80
+        high_precision = normalize_directive_version("000123.4500")
+    finally:
+        setcontext(original)
+    assert low_precision == high_precision == "123.45"
+
+
+def test_version_length_limit_is_enforced_before_normalization() -> None:
+    with pytest.raises(ValueError):
+        normalize_directive_version("1" * 65)
 
 
 def test_versions_reject_non_ascii_decimal_digits() -> None:

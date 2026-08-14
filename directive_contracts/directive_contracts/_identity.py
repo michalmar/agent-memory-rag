@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
-from decimal import Decimal, InvalidOperation
 
 MAX_DIRECTIVE_ID_LENGTH = 128
 MAX_DIRECTIVE_VERSION_LENGTH = 64
@@ -61,11 +60,12 @@ def normalize_directive_version(value: str) -> str:
         raise ValueError(
             "Directive version must match digits with an optional decimal fraction"
         )
-    try:
-        decimal = Decimal(value)
-    except InvalidOperation as exc:
-        raise ValueError("Directive version is not a valid decimal") from exc
-    return format(decimal.normalize(), "f")
+    integer, separator, fraction = value.partition(".")
+    integer = integer.lstrip("0") or "0"
+    if not separator:
+        return integer
+    fraction = fraction.rstrip("0")
+    return f"{integer}.{fraction}" if fraction else integer
 
 
 def build_directive_version_id(

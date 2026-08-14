@@ -103,7 +103,9 @@ class SearchDirectivesArguments(StrictArguments):
 
     @field_validator("directive_ids", mode="before")
     @classmethod
-    def normalize_directive_ids(cls, value: list[str]) -> list[str]:
+    def normalize_directive_ids(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            raise ValueError("directive_ids must be a JSON array")
         return [normalize_directive_id(item) for item in value]
 
     @model_validator(mode="after")
@@ -179,7 +181,9 @@ class UserDirectiveMandatesArguments(StrictArguments):
 
     @field_validator("directive_ids", mode="before")
     @classmethod
-    def normalize_directive_ids(cls, value: list[str]) -> list[str]:
+    def normalize_directive_ids(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            raise ValueError("directive_ids must be a JSON array")
         return [normalize_directive_id(item) for item in value]
 
     @model_validator(mode="after")

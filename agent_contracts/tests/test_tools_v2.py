@@ -55,3 +55,11 @@ def test_tool_limits_and_historical_safety_are_preserved() -> None:
 
     mandates = UserDirectiveMandatesArguments(directive_ids=["č/12"])
     assert mandates.directive_ids == ["Č/12"]
+
+
+@pytest.mark.parametrize("value", ["Č/12", {"id": "Č/12"}, ("Č/12",)])
+def test_directive_id_arrays_reject_non_json_arrays(value: object) -> None:
+    with pytest.raises(ValidationError, match="JSON array"):
+        SearchDirectivesArguments(intents=["find"], directive_ids=value)
+    with pytest.raises(ValidationError, match="JSON array"):
+        UserDirectiveMandatesArguments(directive_ids=value)
