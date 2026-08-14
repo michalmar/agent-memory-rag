@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -372,7 +372,7 @@ class DirectiveIngestionRunner:
                 "Active mandate snapshot does not match the source CSV"
             )
 
-        return {
+        payload = {
             "success": True,
             "verify_execution_id": run_id,
             "environment": _safe_environment(self.config),
@@ -382,7 +382,9 @@ class DirectiveIngestionRunner:
             "source_inventory_digest": _public_record_digest(
                 _source_inventory(sources)
             ),
+            "source_count": len(sources),
             "source_versions": len(sources),
+            "directive_count": len(directive_ids),
             "directive_ids": len(directive_ids),
             "current_versions": len(current),
             "accepted_relations": len(canonical_relation_ids),
@@ -396,6 +398,8 @@ class DirectiveIngestionRunner:
                 for key, value in mandates.items()
             },
         }
+        payload["verify_digest"] = _public_record_digest(payload)
+        return payload
 
     async def _preflight_response_model(
         self, deployment: str, label: str
@@ -429,6 +433,7 @@ class DirectiveIngestionRunner:
         warnings = _validation_warnings(metadata, self.config.processing_hash)
         source_inventory = _source_inventory(sources)
         payload = {
+            "success": True,
             "validation_execution_id": execution_id,
             "environment": _safe_environment(self.config),
             "processing_version": self.config.processing_version,
@@ -473,6 +478,7 @@ class DirectiveIngestionRunner:
             [item.metadata for item in metadata],
             known_ids,
         )
+        mandates_current = await self.mandates.is_current(parsed_mandates)
         if prepared:
             await self.search.ensure_resources()
             await self.stage_documents(prepared)
@@ -480,9 +486,19 @@ class DirectiveIngestionRunner:
         if prepared:
             await self.record_source_states(prepared)
         await self.reconcile_exact_corpus(metadata)
-        snapshot, mandate_changed = await self.mandates.publish(
-            parsed_mandates, run_id
-        )
+        if mandates_current:
+            snapshot = MandateSnapshot(
+                snapshot_id=f"mandates-{parsed_mandates.checksum}",
+                checksum=parsed_mandates.checksum,
+                assignment_count=len(parsed_mandates.assignments),
+                user_count=parsed_mandates.user_count,
+                complete=True,
+            )
+            mandate_changed = False
+        else:
+            snapshot, mandate_changed = await self.mandates.publish(
+                parsed_mandates, run_id
+            )
         result = ReconcileResult(
             run_id=run_id,
             source_count=len(sources),
@@ -495,15 +511,16 @@ class DirectiveIngestionRunner:
             mandate_changed=mandate_changed,
         )
         await self.verify()
-        await self.catalog.record_run(
-            run_id,
-            status="succeeded",
-            source_count=result.source_count,
-            changed_count=result.changed_count,
-            skipped_count=result.skipped_count,
-            chunk_count=result.chunk_count,
-            mandate_snapshot_id=result.mandate_snapshot_id,
-        )
+        if prepared or mandate_changed:
+            await self.catalog.record_run(
+                run_id,
+                status="succeeded",
+                source_count=result.source_count,
+                changed_count=result.changed_count,
+                skipped_count=result.skipped_count,
+                chunk_count=result.chunk_count,
+                mandate_snapshot_id=result.mandate_snapshot_id,
+            )
         return result
 
     async def reconcile_documents(
@@ -536,15 +553,16 @@ class DirectiveIngestionRunner:
             mandate_snapshot_id=None,
             mandate_changed=False,
         )
-        await self.catalog.record_run(
-            run_id,
-            status="succeeded",
-            source_count=result.source_count,
-            changed_count=result.changed_count,
-            skipped_count=result.skipped_count,
-            chunk_count=result.chunk_count,
-            mandate_snapshot_id=None,
-        )
+        if prepared:
+            await self.catalog.record_run(
+                run_id,
+                status="succeeded",
+                source_count=result.source_count,
+                changed_count=result.changed_count,
+                skipped_count=result.skipped_count,
+                chunk_count=result.chunk_count,
+                mandate_snapshot_id=None,
+            )
         return result
 
     async def publish_mandates(
@@ -710,6 +728,14 @@ class DirectiveIngestionRunner:
                 if fatal:
                     raise ValueError("; ".join(fatal))
                 summary = await self.summaries.summarize(canonical)
+                generation_id = calculate_artifact_generation_id(
+                    canonical.metadata.processing_hash,
+                    hashlib.sha256(canonical.markdown.encode("utf-8")).hexdigest(),
+                    canonical_json_hash(summary),
+                )
+                text_chunks = _generation_scoped_chunks(
+                    text_chunks, generation_id
+                )
                 search_chunks = await self.search.build_chunks(
                     canonical, text_chunks
                 )
@@ -766,8 +792,9 @@ class DirectiveIngestionRunner:
         try:
             for item in prepared:
                 await self.search.publish_chunks(item.search_chunks)
-                await self.search.validate_published(
-                    item.canonical, len(item.search_chunks)
+                await self.search.validate_published_chunk_ids(
+                    item.canonical,
+                    (chunk.id for chunk in item.search_chunks),
                 )
                 await self.catalog.publish_version(
                     item.bundle,
@@ -778,8 +805,8 @@ class DirectiveIngestionRunner:
                 await self.catalog.activate_current(
                     item.canonical.metadata, item.bundle.run_id
                 )
-                await self.search.reconcile_current(item.canonical.metadata)
-                await self.search.reconcile_generation(item.canonical.metadata)
+                await self.search.reconcile_current(item.bundle)
+                await self.search.reconcile_generation(item.bundle)
         except (RuntimeError, cosmos_exceptions.CosmosHttpResponseError):
             for item in prepared:
                 await self.search.retire_chunks(item.search_chunks)
@@ -792,8 +819,9 @@ class DirectiveIngestionRunner:
         for item in prepared:
             await self.catalog.validate_published(item.bundle)
             await self.content.validate_bundle(item.bundle)
-            await self.search.validate_published(
-                item.canonical, len(item.search_chunks)
+            await self.search.validate_published_chunk_ids(
+                item.canonical,
+                (chunk.id for chunk in item.search_chunks),
             )
             await self.source_states.record(
                 item.source,
@@ -836,16 +864,40 @@ class DirectiveIngestionRunner:
         if bundle is None:
             return False
         if (
-            bundle.source_hash != source.source_hash
+            bundle.directive_id != metadata.directive_id
+            or bundle.directive_version_id != metadata.directive_version_id
+            or bundle.source_filename != source.source_name
+            or bundle.source_hash != source.source_hash
             or bundle.processing_hash != metadata.processing_hash
             or bundle.artifact_generation_id != state.artifact_generation_id
         ):
             return False
         _validate_safe_artifact_paths(bundle)
-        return (
-            await self.blobs.exists(bundle.artifacts.source_blob_name)
-            and await self.blobs.exists(bundle.artifacts.canonical_blob_name)
-        )
+        current = await self.catalog.get_current(metadata.directive_id)
+        if not (
+            current
+            and current.get("directive_version_id")
+            == metadata.directive_version_id
+            and current.get("source_hash") == source.source_hash
+            and current.get("processing_hash") == metadata.processing_hash
+            and current.get("artifact_generation_id")
+            == state.artifact_generation_id
+        ):
+            return False
+        try:
+            if not (
+                await self.blobs.exists(bundle.artifacts.source_blob_name)
+                and await self.blobs.exists(bundle.artifacts.canonical_blob_name)
+            ):
+                return False
+            await self.blobs.validate_hash(
+                bundle.artifacts.source_blob_name, source.source_hash
+            )
+            await self.content.validate_bundle(bundle)
+            await self.search.validate_current_generation(bundle)
+        except RuntimeError:
+            return False
+        return True
 
     async def _prepare(
         self, sources: list[SourceDocument], run_id: str
@@ -1032,6 +1084,21 @@ def _build_manifest(
     )
 
 
+def _generation_scoped_chunks(
+    chunks: list[TextChunk], artifact_generation_id: str
+) -> list[TextChunk]:
+    """Prevent staging a replacement generation from touching live Search IDs."""
+    return [
+        replace(
+            chunk,
+            id=hashlib.sha256(
+                f"{artifact_generation_id}\0{chunk.id}".encode("utf-8")
+            ).hexdigest(),
+        )
+        for chunk in chunks
+    ]
+
+
 def _build_published_bundle(
     directive: CanonicalDirective,
     manifest: DirectiveManifest,
@@ -1196,7 +1263,13 @@ def _validation_warnings(
 
 def _public_record_digest(value: dict[str, object]) -> str:
     return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
     ).hexdigest()
 
 

@@ -8,9 +8,11 @@ from unittest.mock import AsyncMock
 import pytest
 from directive_contracts import DirectiveMetadata
 
+from directive_ingestion.chunking import TextChunk
 from directive_ingestion.reconcile import (
     DirectiveIngestionRunner,
     SourceMetadata,
+    _generation_scoped_chunks,
     _build_artifact_locators,
 )
 from directive_ingestion.source import SourceDocument, SourceProvenance
@@ -147,7 +149,9 @@ async def test_source_state_is_written_only_after_cross_store_validation() -> No
         validate_bundle=AsyncMock(side_effect=lambda *_: events.append("content"))
     )
     runner.search = SimpleNamespace(
-        validate_published=AsyncMock(side_effect=lambda *_: events.append("search"))
+        validate_published_chunk_ids=AsyncMock(
+            side_effect=lambda *_: events.append("search")
+        )
     )
     runner.source_states = SimpleNamespace(
         record=AsyncMock(side_effect=lambda *_: events.append("state"))
@@ -164,6 +168,7 @@ async def test_prepare_changed_documents_builds_first_generation() -> None:
     metadata = _metadata(source)
     canonical = SimpleNamespace(
         metadata=metadata,
+        markdown="# Directive\n",
         sections=(),
         findings=(),
         relations=(),
@@ -174,7 +179,7 @@ async def test_prepare_changed_documents_builds_first_generation() -> None:
         chunk_token_limit=800,
         chunk_overlap_tokens=120,
     )
-    runner.summaries = SimpleNamespace(summarize=AsyncMock(return_value=object()))
+    runner.summaries = SimpleNamespace(summarize=AsyncMock(return_value={}))
     runner.search = SimpleNamespace(build_chunks=AsyncMock(return_value=[]))
     runner.blobs = SimpleNamespace(quarantine=AsyncMock())
     import directive_ingestion.reconcile as reconcile_module
@@ -197,6 +202,26 @@ async def test_prepare_changed_documents_builds_first_generation() -> None:
     assert len(prepared) == 1
     assert prepared[0].source is source
     runner.summaries.summarize.assert_awaited_once_with(canonical)
+
+
+def test_generation_scoped_chunk_ids_do_not_reuse_live_ids() -> None:
+    chunks = [
+        TextChunk(
+            id="logical-chunk",
+            section_id="1",
+            ordinal=0,
+            content="text",
+            content_kind="section",
+            page_from=1,
+            page_to=1,
+        )
+    ]
+
+    first = _generation_scoped_chunks(chunks, "a" * 64)
+    second = _generation_scoped_chunks(chunks, "b" * 64)
+
+    assert first[0].id != chunks[0].id
+    assert first[0].id != second[0].id
 
 
 @pytest.mark.asyncio

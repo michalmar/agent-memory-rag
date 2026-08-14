@@ -259,78 +259,97 @@ class DirectiveSearchRepository:
             detail=directive.metadata.directive_version_id,
         )
 
-    async def reconcile_generation(
-        self, metadata: DirectiveMetadata
+    async def validate_published_chunk_ids(
+        self, directive: CanonicalDirective, chunk_ids: Iterable[str]
     ) -> None:
-        directive_id = _odata_string(metadata.directive_id)
-        version_id = _odata_string(metadata.directive_version_id)
-        source_hash = _odata_string(metadata.source_hash)
-        processing_hash = _odata_string(metadata.processing_hash)
-        stale_filter = (
-            f"directive_id eq '{directive_id}' and "
-            f"directive_version_id eq '{version_id}' and "
-            "publication_state eq 'published' and "
-            f"(source_hash ne '{source_hash}' or "
-            f"processing_hash ne '{processing_hash}')"
+        """Check a staged generation by its immutable document identities."""
+        expected = set(chunk_ids)
+        if not expected:
+            return
+        published = set(
+            await self._find_keys(
+                _generation_filter(
+                    directive.metadata, publication_state="published"
+                )
+            )
         )
-        stale_keys = await self._find_keys(stale_filter)
+        missing = expected - published
+        if missing:
+            raise RuntimeError(
+                "Published Search generation is missing manifest chunk IDs"
+            )
+
+    async def validate_current_generation(
+        self, bundle: Any
+    ) -> None:
+        """Require exactly the manifest's generation-scoped IDs to be live."""
+        expected_ids = {
+            chunk_id
+            for section in bundle.manifest.sections
+            for chunk_id in section.chunk_ids
+        }
+        filter_expression = (
+            f"directive_id eq '{_odata_string(bundle.directive_id)}' and "
+            "publication_state eq 'published' and is_current eq true and "
+            "is_valid eq true"
+        )
+        actual_ids = set(await self._find_keys(filter_expression))
+        if actual_ids != expected_ids:
+            raise RuntimeError(
+                "Current Search generation IDs do not match manifest chunks"
+            )
+
+    async def reconcile_generation(
+        self, bundle: Any
+    ) -> None:
+        expected_ids = {
+            chunk_id
+            for section in bundle.manifest.sections
+            for chunk_id in section.chunk_ids
+        }
+        published_filter = (
+            f"directive_id eq '{_odata_string(bundle.directive_id)}' and "
+            "publication_state eq 'published'"
+        )
+        stale_keys = [
+            key
+            for key in await self._find_keys(published_filter)
+            if key not in expected_ids
+        ]
         await self._merge_chunk_state(
             stale_keys,
             publication_state="retired",
             is_current=False,
         )
-        if stale_keys:
-            await self._wait_for_count(
-                stale_filter,
-                0,
-                detail=f"retired generation {metadata.directive_version_id}",
-            )
 
-    async def reconcile_current(self, metadata: DirectiveMetadata) -> None:
-        if not metadata.is_current:
+    async def reconcile_current(self, bundle: Any) -> None:
+        if not bundle.is_current:
             return
-        directive_id = _odata_string(metadata.directive_id)
-        version_id = _odata_string(metadata.directive_version_id)
-        source_hash = _odata_string(metadata.source_hash)
-        processing_hash = _odata_string(metadata.processing_hash)
-        exact_generation_filter = (
-            f"directive_id eq '{directive_id}' and "
-            f"directive_version_id eq '{version_id}' and "
-            f"source_hash eq '{source_hash}' and "
-            f"processing_hash eq '{processing_hash}' and "
-            "publication_state eq 'published'"
-        )
-        exact_keys = await self._find_keys(exact_generation_filter)
-        if not exact_keys:
+        expected_ids = {
+            chunk_id
+            for section in bundle.manifest.sections
+            for chunk_id in section.chunk_ids
+        }
+        if not expected_ids:
             raise RuntimeError(
                 "Current directive has no published Search chunks: "
-                f"{metadata.directive_version_id}"
+                f"{bundle.directive_version_id}"
             )
-        await self._merge_chunk_state(exact_keys, is_current=True)
-        await self._wait_for_count(
-            f"{exact_generation_filter} and is_current eq true",
-            len(exact_keys),
-            detail=f"current generation {metadata.directive_version_id}",
+        await self._merge_chunk_state(list(expected_ids), is_current=True)
+        current_filter = (
+            f"directive_id eq '{_odata_string(bundle.directive_id)}' and "
+            "publication_state eq 'published' and is_current eq true"
         )
-
-        stale_current_filter = (
-            f"directive_id eq '{directive_id}' and "
-            "publication_state eq 'published' and is_current eq true and "
-            f"(directive_version_id ne '{version_id}' or "
-            f"source_hash ne '{source_hash}' or "
-            f"processing_hash ne '{processing_hash}')"
-        )
-        stale_keys = await self._find_keys(stale_current_filter)
+        stale_keys = [
+            key
+            for key in await self._find_keys(current_filter)
+            if key not in expected_ids
+        ]
         await self._merge_chunk_state(
             stale_keys,
             is_current=False,
         )
-        if stale_keys:
-            await self._wait_for_count(
-                stale_current_filter,
-                0,
-                detail=f"stale current chunks for {metadata.directive_id}",
-            )
+        await self.validate_current_generation(bundle)
 
     async def _find_keys(
         self,

@@ -203,6 +203,14 @@ class MandateRepository:
         )
         return snapshot, True
 
+    async def is_current(self, parsed: ParsedMandates) -> bool:
+        active = await self._read_active()
+        return bool(
+            active
+            and active.get("complete") is True
+            and active.get("checksum") == parsed.checksum
+        )
+
     async def verification_summary(self) -> dict[str, object]:
         active = await self._read_active()
         if not active or active.get("complete") is not True:

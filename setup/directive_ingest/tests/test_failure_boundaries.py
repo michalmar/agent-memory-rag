@@ -28,7 +28,7 @@ async def test_catalog_publication_failure_retires_staged_search_chunks() -> Non
     runner.search = SimpleNamespace(
         stage_chunks=AsyncMock(),
         publish_chunks=AsyncMock(),
-        validate_published=AsyncMock(),
+        validate_published_chunk_ids=AsyncMock(),
         retire_chunks=AsyncMock(),
     )
     runner.catalog = SimpleNamespace(
@@ -62,7 +62,7 @@ async def test_activation_failure_retires_every_new_generation() -> None:
     runner = object.__new__(DirectiveIngestionRunner)
     runner.search = SimpleNamespace(
         publish_chunks=AsyncMock(),
-        validate_published=AsyncMock(),
+        validate_published_chunk_ids=AsyncMock(),
         reconcile_current=AsyncMock(side_effect=RuntimeError("activation failed")),
         reconcile_generation=AsyncMock(),
         retire_chunks=AsyncMock(),
