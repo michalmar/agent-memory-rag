@@ -99,6 +99,7 @@ class DirectiveContentRepository:
                     bundle=bundle,
                     section_id=section_id,
                     section_ordinal=section.ordinal,
+                    section_hash=section.content_hash,
                     part_ordinal=part_ordinal,
                     part_count=descriptor.part_count,
                 )
@@ -143,13 +144,21 @@ class DirectiveContentRepository:
                 values.add(value)
         return values
 
-    async def list_identities(self) -> set[tuple[str, str, str]]:
+    async def list_identities(self) -> set[tuple[str, str, str, str, str]]:
         """Return partitioned identities and validated content hashes."""
-        values: set[tuple[str, str, str]] = set()
+        values: set[tuple[str, str, str, str, str]] = set()
         query = "SELECT * FROM c"
         async for value in self._container.query_items(query=query):
             item = _validate_content_record(value)
-            values.add((item.directive_version_id, item.id, item.part_hash))
+            values.add(
+                (
+                    item.directive_version_id,
+                    item.id,
+                    item.directive_id,
+                    item.section_hash,
+                    item.part_hash,
+                )
+            )
         return values
 
 
@@ -171,6 +180,7 @@ def _validate_expected_part(
     bundle: PublishedDirectiveVersion,
     section_id: str,
     section_ordinal: int,
+    section_hash: str,
     part_ordinal: int,
     part_count: int,
 ) -> None:
@@ -187,6 +197,7 @@ def _validate_expected_part(
         or item.section_ordinal != section_ordinal
         or item.part_ordinal != part_ordinal
         or item.part_count != part_count
+        or item.section_hash != section_hash
         or item.part_hash
         != hashlib.sha256(item.content.encode("utf-8")).hexdigest()
     ):

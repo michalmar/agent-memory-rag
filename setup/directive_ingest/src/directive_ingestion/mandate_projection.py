@@ -332,11 +332,11 @@ class MandateRepository:
         self, snapshot_id: str, parsed: ParsedMandates
     ) -> bool:
         actual = await self._snapshot_assignments(snapshot_id)
-        expected = {
+        expected = sorted(
             (assignment.user_id, assignment.directive_id, "M")
             for assignment in parsed.assignments
-        }
-        return actual == expected
+        )
+        return sorted(actual) == expected
 
     async def _snapshot_identity_digest(self, snapshot_id: str) -> str:
         identities = await self._snapshot_assignments(snapshot_id)
@@ -347,12 +347,12 @@ class MandateRepository:
 
     async def _snapshot_assignments(
         self, snapshot_id: str
-    ) -> set[tuple[str, str, str]]:
+    ) -> list[tuple[str, str, str]]:
         query = (
             "SELECT c.user_id, c.directive_id, c.flag FROM c WHERE "
             "c.type = 'assignment' AND c.snapshot_id = @snapshot"
         )
-        actual: set[tuple[str, str, str]] = set()
+        actual: list[tuple[str, str, str]] = []
         async for value in self._container.query_items(
             query=query,
             parameters=[{"name": "@snapshot", "value": snapshot_id}],
@@ -364,7 +364,7 @@ class MandateRepository:
                 isinstance(item, str) for item in (user_id, directive_id, flag)
             ):
                 raise RuntimeError("Active mandate assignment has invalid identity")
-            actual.add((user_id, directive_id, flag))
+            actual.append((user_id, directive_id, flag))
         return actual
 
     async def _read_active(self) -> dict[str, Any] | None:

@@ -233,9 +233,15 @@ class MemoryContent:
                 )
                 self.write_count += 1
 
-    async def list_identities(self) -> set[tuple[str, str, str]]:
+    async def list_identities(self) -> set[tuple[str, str, str, str, str]]:
         return {
-            (version_id, item_id, item.part_hash)
+            (
+                version_id,
+                item_id,
+                item.directive_id,
+                item.section_hash,
+                item.part_hash,
+            )
             for (version_id, item_id), item in self.items.items()
         }
 

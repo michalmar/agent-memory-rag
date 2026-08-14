@@ -58,6 +58,9 @@ from .source import (
 )
 from .summaries import SummaryGenerator
 
+MAX_PUBLIC_DIRECTIVES = 100
+MAX_PUBLIC_RECORD_BYTES = 65_536
+
 
 @dataclass(frozen=True)
 class PreparedDirective:
@@ -68,6 +71,7 @@ class PreparedDirective:
     bundle: PublishedDirectiveVersion
     content_items: tuple[DirectiveSectionContent, ...]
     findings: tuple[ReviewFinding, ...]
+    repair_generation_salt: str | None = None
 
 
 @dataclass(frozen=True)
@@ -288,7 +292,7 @@ class DirectiveIngestionRunner:
         content_sections = 0
         content_parts = 0
         split_sections = 0
-        expected_content_identities: set[tuple[str, str, str]] = set()
+        expected_content_identities: set[tuple[str, str, str, str, str]] = set()
         bundle_index = {
             (bundle.directive_id, bundle.directive_version_id): bundle
             for bundle in bundles
@@ -328,18 +332,22 @@ class DirectiveIngestionRunner:
             source_hash = await self.blobs.content_hash(
                 bundle.artifacts.source_blob_name
             )
-            expected_generation_id = calculate_artifact_generation_id(
+            canonical_hash = hashlib.sha256(
+                (
+                    bundle.source_filename
+                    + "\0"
+                    + (await self.blobs.read_text(
+                        bundle.artifacts.canonical_blob_name
+                    ))
+                ).encode("utf-8")
+            ).hexdigest()
+            base_generation_id = calculate_artifact_generation_id(
                 bundle.processing_hash,
-                hashlib.sha256(
-                    (
-                        bundle.source_filename
-                        + "\0"
-                        + (await self.blobs.read_text(
-                            bundle.artifacts.canonical_blob_name
-                        ))
-                    ).encode("utf-8")
-                ).hexdigest(),
+                canonical_hash,
                 canonical_json_hash(bundle.summary),
+            )
+            expected_generation_id = _expected_live_generation_id(
+                bundle, base_generation_id, canonical_hash
             )
             if (
                 source_hash != bundle.source_hash
@@ -368,6 +376,8 @@ class DirectiveIngestionRunner:
                         (
                             bundle.directive_version_id,
                             item_id,
+                            item.directive_id,
+                            item.section_hash,
                             item.part_hash,
                         )
                     )
@@ -873,6 +883,13 @@ class DirectiveIngestionRunner:
     def validate_source_set(self, metadata: list[SourceMetadata]) -> None:
         """Validate all source identities before any expensive model work."""
         failures: list[tuple[SourceDocument, str]] = []
+        if len(metadata) > MAX_PUBLIC_DIRECTIVES:
+            raise _SourceSetValidationError(
+                [
+                    (item.source, "metadata_corpus_limit_exceeded")
+                    for item in metadata
+                ]
+            )
         by_id: dict[str, SourceMetadata] = {}
         versions: set[str] = set()
         for item in metadata:
@@ -956,30 +973,17 @@ class DirectiveIngestionRunner:
                 if fatal:
                     raise ValueError("; ".join(fatal))
                 summary = await self.summaries.summarize(canonical)
-                generation_id = calculate_artifact_generation_id(
-                    canonical.metadata.processing_hash,
-                    _generation_canonical_hash(canonical),
-                    canonical_json_hash(summary),
-                )
+                generation_id = _generation_id(canonical, summary)
+                repair_salt: str | None = None
                 if (
                     existing_bundle is not None
                     and existing_bundle.artifact_generation_id == generation_id
                 ):
-                    canonical = replace(
-                        canonical,
-                        markdown=(
-                            canonical.markdown.rstrip()
-                            + "\n\n<!-- directive-generation-repair:"
-                            + source_fingerprint(
-                                item.source.source_name, item.source.source_hash
-                            )
-                            + " -->\n"
-                        ),
+                    repair_salt = _repair_generation_salt(
+                        canonical.metadata, generation_id
                     )
-                    generation_id = calculate_artifact_generation_id(
-                        canonical.metadata.processing_hash,
-                        _generation_canonical_hash(canonical),
-                        canonical_json_hash(summary),
+                    generation_id = _generation_id(
+                        canonical, summary, repair_salt
                     )
                 text_chunks = _generation_scoped_chunks(
                     text_chunks, generation_id
@@ -988,7 +992,7 @@ class DirectiveIngestionRunner:
                     canonical, text_chunks
                 )
                 manifest = _build_manifest(
-                    canonical, text_chunks, summary
+                    canonical, text_chunks, summary, repair_salt
                 )
                 bundle, content_items = _build_published_bundle(
                     canonical,
@@ -1005,6 +1009,7 @@ class DirectiveIngestionRunner:
                         bundle=bundle,
                         content_items=content_items,
                         findings=tuple(findings),
+                        repair_generation_salt=repair_salt,
                     )
                 )
                 if canonical.metadata != item.metadata:
@@ -1142,14 +1147,23 @@ class DirectiveIngestionRunner:
             await self._rollback_publication(snapshots, mandate_snapshot)
             raise
         self._publication_snapshots = snapshots
+        replaced = {
+            (
+                bundle.directive_id,
+                bundle.directive_version_id,
+                bundle.artifact_generation_id,
+            ): bundle
+            for snapshot in snapshots
+            for bundle in (
+                snapshot.previous_version,
+                snapshot.previous_current_bundle,
+            )
+            if bundle is not None
+            and bundle.artifact_generation_id
+            != snapshot.item.bundle.artifact_generation_id
+        }
         return (
-            [
-                snapshot.previous_current_bundle
-                for snapshot in snapshots
-                if snapshot.previous_current_bundle is not None
-                and snapshot.previous_current_bundle.artifact_generation_id
-                != snapshot.item.bundle.artifact_generation_id
-            ],
+            list(replaced.values()),
             mandate_snapshot,
         )
 
@@ -1221,11 +1235,15 @@ class DirectiveIngestionRunner:
                 item.canonical.metadata,
                 item.bundle.artifact_generation_id,
                 pending_cleanup=tuple(
-                    snapshot.previous_current_bundle
+                    bundle
                     for snapshot in snapshots or []
                     if snapshot.item is item
-                    and snapshot.previous_current_bundle is not None
-                    and snapshot.previous_current_bundle.artifact_generation_id
+                    for bundle in (
+                        snapshot.previous_version,
+                        snapshot.previous_current_bundle,
+                    )
+                    if bundle is not None
+                    and bundle.artifact_generation_id
                     != item.bundle.artifact_generation_id
                 ),
             )
@@ -1418,19 +1436,25 @@ class DirectiveIngestionRunner:
             markdown = await self.blobs.read_text(
                 bundle.artifacts.canonical_blob_name
             )
-            expected_generation_id = calculate_artifact_generation_id(
+            canonical_hash = hashlib.sha256(
+                f"{source.source_name}\0{markdown}".encode("utf-8")
+            ).hexdigest()
+            base_generation_id = calculate_artifact_generation_id(
                 metadata.processing_hash,
-                hashlib.sha256(
-                    f"{source.source_name}\0{markdown}".encode("utf-8")
-                ).hexdigest(),
+                canonical_hash,
                 canonical_json_hash(bundle.summary),
+            )
+            expected_generation_id = _expected_live_generation_id(
+                bundle, base_generation_id, canonical_hash
             )
             if expected_generation_id != bundle.artifact_generation_id:
                 return False
             await self.content.validate_bundle(bundle)
             await self.search.validate_current_generation(bundle)
-        except RuntimeError:
-            return False
+        except RuntimeError as exc:
+            if _is_integrity_mismatch(exc):
+                return False
+            raise
         return True
 
     async def _prepare(
@@ -1578,14 +1602,10 @@ def _build_manifest(
     directive: CanonicalDirective,
     chunks: list[TextChunk],
     summary: DirectiveSummary,
+    repair_salt: str | None = None,
 ) -> DirectiveManifest:
     metadata = directive.metadata
-    canonical_hash = _generation_canonical_hash(directive)
-    generation_id = calculate_artifact_generation_id(
-        metadata.processing_hash,
-        canonical_hash,
-        canonical_json_hash(summary),
-    )
+    generation_id = _generation_id(directive, summary, repair_salt)
     chunk_ids: dict[str, list[str]] = defaultdict(list)
     for chunk in chunks:
         chunk_ids[chunk.section_id].append(chunk.id)
@@ -1624,6 +1644,64 @@ def _generation_canonical_hash(directive: CanonicalDirective) -> str:
             + directive.markdown
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _generation_id(
+    directive: CanonicalDirective,
+    summary: DirectiveSummary,
+    repair_salt: str | None = None,
+) -> str:
+    canonical_hash = _generation_canonical_hash(directive)
+    if repair_salt is not None:
+        canonical_hash = hashlib.sha256(
+            f"{canonical_hash}\0repair:{repair_salt}".encode("utf-8")
+        ).hexdigest()
+    return calculate_artifact_generation_id(
+        directive.metadata.processing_hash,
+        canonical_hash,
+        canonical_json_hash(summary),
+    )
+
+
+def _repair_generation_salt(
+    metadata: DirectiveMetadata, base_generation_id: str
+) -> str:
+    return hashlib.sha256(
+        (
+            "directive-generation-repair\0"
+            + metadata.directive_id
+            + "\0"
+            + metadata.directive_version_id
+            + "\0"
+            + metadata.source_hash
+            + "\0"
+            + metadata.processing_hash
+            + "\0"
+            + base_generation_id
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _expected_live_generation_id(
+    bundle: PublishedDirectiveVersion,
+    base_generation_id: str,
+    canonical_hash: str,
+) -> str:
+    if bundle.artifact_generation_id == base_generation_id:
+        return base_generation_id
+    repair_salt = _repair_generation_salt(bundle, base_generation_id)
+    canonical_hash = hashlib.sha256(
+        (
+            canonical_hash
+            + "\0repair:"
+            + repair_salt
+        ).encode("utf-8")
+    ).hexdigest()
+    return calculate_artifact_generation_id(
+        bundle.processing_hash,
+        canonical_hash,
+        canonical_json_hash(bundle.summary),
+    )
 
 
 def _generation_scoped_chunks(
@@ -1779,6 +1857,22 @@ def _safe_failure_code(exc: BaseException) -> str:
     if isinstance(exc, ValueError):
         return "metadata_invalid"
     return "metadata_processing_error"
+
+
+def _is_integrity_mismatch(exc: RuntimeError) -> bool:
+    """Only validated record mismatches are repairable; outages must propagate."""
+    return str(exc).startswith(
+        (
+            "Artifact hash mismatch",
+            "Missing directive section-content item",
+            "Directive section-content identity or hash mismatch",
+            "Reconstructed section content hash mismatch",
+            "Current Search generation IDs do not match",
+            "Published Search generation is missing",
+            "Catalog version is not published",
+            "Catalog bundle mismatch",
+        )
+    )
 
 
 def _source_inventory(sources: list[SourceDocument]) -> list[dict[str, str]]:
@@ -1970,4 +2064,9 @@ def format_result(value: object) -> str:
     if hasattr(value, "as_dict"):
         value = value.as_dict()
     _reject_floats(value)
-    return json.dumps(value, sort_keys=True, default=str)
+    encoded = json.dumps(value, sort_keys=True, default=str)
+    if len(encoded.encode("utf-8")) > MAX_PUBLIC_RECORD_BYTES:
+        raise ValueError(
+            f"Public directive record exceeds {MAX_PUBLIC_RECORD_BYTES} bytes"
+        )
+    return encoded

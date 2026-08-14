@@ -394,14 +394,12 @@ async def test_corrupt_live_generation_gets_isolated_repair_generation() -> None
     original_chunks = reconcile_module.chunk_sections
     original_manifest = reconcile_module._build_manifest
     original_bundle = reconcile_module._build_published_bundle
-    original_replace = reconcile_module.replace
     reconcile_module.parse_canonical = lambda *_args: canonical
     reconcile_module.chunk_sections = lambda *_args, **_kwargs: ([], ())
-    reconcile_module._build_manifest = lambda value, *_args: captured.append(value) or object()
+    reconcile_module._build_manifest = lambda _value, *_args: captured.append(
+        _args[-1]
+    ) or object()
     reconcile_module._build_published_bundle = lambda *_args: (object(), ())
-    reconcile_module.replace = lambda value, **changes: SimpleNamespace(
-        **(vars(value) | changes)
-    )
     try:
         await runner.prepare_changed_documents(
             [SourceMetadata(source, metadata, object(), None)], "run"
@@ -411,9 +409,8 @@ async def test_corrupt_live_generation_gets_isolated_repair_generation() -> None
         reconcile_module.chunk_sections = original_chunks
         reconcile_module._build_manifest = original_manifest
         reconcile_module._build_published_bundle = original_bundle
-        reconcile_module.replace = original_replace
-
-    assert "directive-generation-repair:" in captured[0].markdown
+    assert captured[0] is not None
+    assert canonical.markdown == "# Directive\n"
 
 
 @pytest.mark.asyncio
