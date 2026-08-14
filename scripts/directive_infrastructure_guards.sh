@@ -57,30 +57,32 @@ directive_assert_execution_mode_json() {
     ' <<<"$container_json" >/dev/null
 }
 
-directive_assert_publication_execution_json() {
+directive_assert_approved_execution_json() {
   local container_json="$1"
-  local expected_image="$2"
-  local expected_environment_digest="$3"
-  local expected_source_digest="$4"
-  local expected_validation_digest="$5"
-  local expected_processing_version="$6"
-  local expected_search_index="$7"
+  local expected_argument="$2"
+  local expected_image="$3"
+  local expected_environment_digest="$4"
+  local expected_source_digest="$5"
+  local expected_validation_digest="$6"
+  local expected_processing_version="$7"
+  local expected_search_index="$8"
   python3 - "$expected_image" "$expected_environment_digest" \
     "$expected_source_digest" "$expected_validation_digest" \
-    "$expected_processing_version" "$expected_search_index" "$container_json" <<'PY'
+    "$expected_processing_version" "$expected_search_index" \
+    "$expected_argument" "$container_json" <<'PY'
 import json
 import sys
 
 expected_image, expected_environment_digest, expected_source_digest, \
     expected_validation_digest, expected_processing_version, \
-    expected_search_index = sys.argv[1:7]
-container = json.loads(sys.argv[7])
+    expected_search_index, expected_argument = sys.argv[1:8]
+container = json.loads(sys.argv[8])
 if not isinstance(container, dict):
     raise SystemExit("execution container is not an object")
 command = container.get("command")
 args = container.get("args")
-if command != ["directive-ingest"] or args != ["run-daily"]:
-    raise SystemExit("publication execution command is not pinned")
+if command != ["directive-ingest"] or args != [expected_argument]:
+    raise SystemExit("approved execution command is not pinned")
 if container.get("image") != expected_image:
     raise SystemExit("publication execution image is not pinned")
 env = {
@@ -150,7 +152,7 @@ except (UnicodeDecodeError, json.JSONDecodeError, OSError) as exc:
     raise SystemExit(f"invalid producer record: {exc}")
 
 validate_keys = {
-    "record_schema", "success", "run_id", "environment",
+    "record_schema", "success", "run_id", "environment", "environment_digest",
     "processing_version", "processing_hash", "search_index",
     "source_count", "directive_count", "normalized_directive_ids",
     "directive_version_ids", "mandate_count", "mandate_user_count",
@@ -158,7 +160,7 @@ validate_keys = {
     "validation_digest",
 }
 verify_keys = {
-    "record_schema", "success", "run_id", "environment",
+    "record_schema", "success", "run_id", "environment", "environment_digest",
     "processing_version", "processing_hash", "search_index",
     "source_inventory_digest", "source_count", "directive_count",
     "normalized_directive_ids", "directive_version_ids", "warnings",
@@ -188,6 +190,11 @@ def _has_float(value):
         return any(_has_float(v) for v in value)
     return False
 
+def digest(value):
+    return hashlib.sha256(json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+
 if not isinstance(record, dict) or record.get("record_schema") != schema:
     raise SystemExit("unexpected producer record schema")
 expected_keys = validate_keys if schema == "directive.validate.v2" else verify_keys
@@ -213,6 +220,12 @@ if environment != expected_environment:
     raise SystemExit("producer environment does not exactly match live Terraform environment")
 if record.get("search_index") != search_index or environment.get("search_index") != search_index:
     raise SystemExit("producer Search index does not match the expected environment")
+if (
+    not _hex64(record.get("environment_digest"))
+    or digest(environment) != record["environment_digest"]
+    or record["environment_digest"] != digest(expected_environment)
+):
+    raise SystemExit("producer environment_digest does not match the canonical environment")
 if record.get("processing_version") != processing_version:
     raise SystemExit("producer processing version does not match")
 if not isinstance(record.get("processing_hash"), str) or not _hex64(record["processing_hash"]):
@@ -253,9 +266,6 @@ if len({(item["code"], item["severity"]) for item in warnings}) != len(warnings)
 if _has_float(record):
     raise SystemExit("producer record must be float-free")
 
-def digest(value):
-    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-
 if schema == "directive.validate.v2":
     if not _int(record.get("mandate_count")) or record["mandate_count"] < 0:
         raise SystemExit("validation mandate_count is invalid")
@@ -263,7 +273,10 @@ if schema == "directive.validate.v2":
         raise SystemExit("validation mandate_user_count is invalid")
     if not isinstance(record.get("failures"), list):
         raise SystemExit("validation failures must be an array")
-    if not _hex64(record.get("validation_digest")) or digest({k: v for k, v in record.items() if k != "validation_digest"}) != record["validation_digest"]:
+    if not _hex64(record.get("validation_digest")) or digest({
+        k: v for k, v in record.items()
+        if k not in {"run_id", "validation_digest"}
+    }) != record["validation_digest"]:
         raise SystemExit("validation_digest does not match the visible producer record")
 else:
     cross_store = record.get("cross_store")
@@ -293,7 +306,8 @@ else:
             elif not _int(value) or value < 0:
                 raise SystemExit(f"verify cross_store.{name}.{key} is invalid")
     projection_keys = (
-        "record_schema", "environment", "processing_version", "processing_hash",
+        "record_schema", "environment", "environment_digest",
+        "processing_version", "processing_hash",
         "search_index", "source_count", "source_inventory_digest", "directive_count",
         "normalized_directive_ids", "directive_version_ids", "validation_digest",
         "cross_store",

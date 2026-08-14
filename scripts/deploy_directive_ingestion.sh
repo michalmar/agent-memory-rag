@@ -407,19 +407,31 @@ reserve_publication_approval() {
   marker_name="publication-approval/$VALIDATION_PRODUCER_DIGEST.json"
   marker_file="$(mktemp)"
   jq -S -n \
+    --arg record_schema "directive.approval.v2" \
     --arg validation_digest "$VALIDATION_PRODUCER_DIGEST" \
     --arg source_digest "$SOURCE_INVENTORY_DIGEST" \
     --arg environment_digest "$EXPECTED_ENVIRONMENT_DIGEST" \
+    --arg processing_hash "$(jq -r '.producer_record.processing_hash' "$VALIDATION_EVIDENCE_FILE")" \
     --arg image_digest "$IMAGE_DIGEST" \
+    --arg subscription "$SUBSCRIPTION_ID" \
+    --arg resource_group "$RG" \
+    --arg job "$JOB_NAME" \
     --arg processing_version "$EXPECTED_PROCESSING_VERSION" \
     --arg search_index "$EXPECTED_SEARCH_INDEX" \
     '{
+      record_schema: $record_schema,
       validation_digest: $validation_digest,
       source_inventory_digest: $source_digest,
       environment_digest: $environment_digest,
-      image_digest: $image_digest,
-      processing_version: $processing_version,
-      search_index: $search_index
+      processing_hash: $processing_hash,
+      wrapper: {
+        image_digest: $image_digest,
+        subscription_id: $subscription,
+        resource_group: $resource_group,
+        job_name: $job,
+        processing_version: $processing_version,
+        search_index: $search_index
+      }
     }' >"$marker_file"
   if ! az storage blob upload \
     --account-name "$STORAGE_ACCOUNT" \
@@ -610,37 +622,38 @@ PY
 
 start_job_execution() {
   local expected_argument="$1"
-  local execution_name start_args=()
+  local execution_name execution_name_file start_args=()
   assert_live_maintenance_mode
   assert_no_active_execution
-  if [[ "$expected_argument" == run-daily ]]; then
-    [[ "$VALIDATION_PRODUCER_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
-      "Publication approval validation digest is invalid"
-    [[ "$EXPECTED_ENVIRONMENT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
-      "Publication approval environment digest is invalid"
-    [[ "$APPROVED_SOURCE_INVENTORY_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
-      "Publication approval source inventory digest is invalid"
-    start_args=(
-      --env-vars
-      "DIRECTIVE_APPROVED_VALIDATION_DIGEST=$VALIDATION_PRODUCER_DIGEST"
-      "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST=$EXPECTED_ENVIRONMENT_DIGEST"
-      "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST=$APPROVED_SOURCE_INVENTORY_DIGEST"
-    )
-    PUBLICATION_DISPATCH_ATTEMPTED=true
-  fi
-  if ! execution_name="$(
-    az containerapp job start \
+  [[ "$VALIDATION_PRODUCER_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
+    "Approved validation digest is invalid"
+  [[ "$EXPECTED_ENVIRONMENT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
+    "Approved environment digest is invalid"
+  [[ "$APPROVED_SOURCE_INVENTORY_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
+    "Approved source inventory digest is invalid"
+  start_args=(
+    --env-vars
+    "DIRECTIVE_APPROVED_VALIDATION_DIGEST=$VALIDATION_PRODUCER_DIGEST"
+    "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST=$EXPECTED_ENVIRONMENT_DIGEST"
+    "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST=$APPROVED_SOURCE_INVENTORY_DIGEST"
+  )
+  [[ "$expected_argument" == run-daily ]] && PUBLICATION_DISPATCH_ATTEMPTED=true
+  execution_name_file="$(mktemp)"
+  if ! az containerapp job start \
       --name "$JOB_NAME" \
       --resource-group "$RG" \
       --command directive-ingest \
       --args "$expected_argument" \
       "${start_args[@]}" \
       --query name \
-      --output tsv
-  )"; then
+      --output tsv >"$execution_name_file"
+  then
+    rm -f "$execution_name_file"
     [[ "$expected_argument" == run-daily ]] && discover_publication_execution || true
     return 1
   fi
+  execution_name="$(<"$execution_name_file")"
+  rm -f "$execution_name_file"
   [[ -n "$execution_name" ]] || {
     [[ "$expected_argument" == run-daily ]] && discover_publication_execution || true
     echo "ERROR: Container Apps did not return an execution name" >&2
@@ -649,21 +662,20 @@ start_job_execution() {
   track_started_execution "$execution_name"
   assert_execution_mode "$execution_name" "$expected_argument"
   assert_execution_image "$execution_name"
-  if [[ "$expected_argument" == run-daily ]]; then
-    local execution_container
-    execution_container="$(
-      az containerapp job execution show \
-        --name "$JOB_NAME" \
-        --resource-group "$RG" \
-        --job-execution-name "$execution_name" \
-        --query "properties.template.containers[?name=='$JOB_CONTAINER'] | [0]" \
-        --output json
-    )"
-    directive_assert_publication_execution_json \
-      "$execution_container" "$IMAGE" "$EXPECTED_ENVIRONMENT_DIGEST" \
-      "$APPROVED_SOURCE_INVENTORY_DIGEST" "$VALIDATION_PRODUCER_DIGEST" \
-      "$EXPECTED_PROCESSING_VERSION" "$EXPECTED_SEARCH_INDEX"
-  fi
+  local execution_container
+  execution_container="$(
+    az containerapp job execution show \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --job-execution-name "$execution_name" \
+      --query "properties.template.containers[?name=='$JOB_CONTAINER'] | [0]" \
+      --output json
+  )"
+  directive_assert_approved_execution_json \
+    "$execution_container" "$expected_argument" "$IMAGE" \
+    "$EXPECTED_ENVIRONMENT_DIGEST" "$APPROVED_SOURCE_INVENTORY_DIGEST" \
+    "$VALIDATION_PRODUCER_DIGEST" "$EXPECTED_PROCESSING_VERSION" \
+    "$EXPECTED_SEARCH_INDEX"
 }
 
 assert_v2_search_schema() {

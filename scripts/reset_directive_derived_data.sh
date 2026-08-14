@@ -32,6 +32,9 @@ STARTED_EXECUTIONS=()
 COSMOS_PLAN_FILE=""
 COSMOS_PLAN_JSON_FILE=""
 MAINTENANCE_TOUCHED=false
+APPROVED_VALIDATION_DIGEST=""
+APPROVED_ENVIRONMENT_DIGEST=""
+APPROVED_SOURCE_INVENTORY_DIGEST=""
 
 read -r -a AZ_CMD <<<"$AZ_BIN"
 read -r -a TERRAFORM_CMD <<<"$TERRAFORM_BIN"
@@ -813,14 +816,33 @@ assert_verify_execution_contract() {
       --query "properties.template.containers[?name=='directive-ingestion'].image | [0]" \
       --output tsv
   )"
-  directive_assert_execution_mode_json "$container_json" verify || \
-    die "Fresh execution did not use the exact directive-ingest verify command"
+  directive_assert_approved_execution_json \
+    "$container_json" verify "$expected_image" \
+    "$APPROVED_ENVIRONMENT_DIGEST" "$APPROVED_SOURCE_INVENTORY_DIGEST" \
+    "$APPROVED_VALIDATION_DIGEST" directive-v2-czech-layout "$V2_INDEX" || \
+    die "Fresh execution did not use the exact approved directive-ingest verify contract"
   [[ "$actual_image" == "$expected_image" ]] || \
     die "Fresh verification execution image changed from the pinned live image"
 }
 
+set_verify_approval_overrides() {
+  [[ -f "$VERIFICATION_FILE" ]] || die \
+    "Fresh verify requires the prior verification evidence file for approval binding"
+  APPROVED_VALIDATION_DIGEST="$(jq -r '.producer_record.validation_digest // empty' "$VERIFICATION_FILE")"
+  APPROVED_ENVIRONMENT_DIGEST="$(jq -r '.producer_record.environment_digest // empty' "$VERIFICATION_FILE")"
+  APPROVED_SOURCE_INVENTORY_DIGEST="$(jq -r '.producer_record.source_inventory_digest // empty' "$VERIFICATION_FILE")"
+  [[ "$APPROVED_VALIDATION_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
+    "Fresh verify approval validation_digest is invalid"
+  [[ "$APPROVED_ENVIRONMENT_DIGEST" == "$EXPECTED_ENVIRONMENT_DIGEST" ]] || die \
+    "Fresh verify approval environment_digest does not match live environment"
+  [[ "$APPROVED_SOURCE_INVENTORY_DIGEST" == "$SOURCE_INVENTORY_DIGEST" ]] || die \
+    "Fresh verify approval source inventory digest is stale"
+}
+
 start_fresh_verify() {
   local execution_name status log_file live_image execution_image record_digest started_at
+  local execution_name_file
+  set_verify_approval_overrides
   enter_maintenance_mode
   wait_for_active_executions_to_drain
   live_image="$(
@@ -831,15 +853,23 @@ start_fresh_verify() {
       --output tsv
   )"
   [[ "$live_image" == *@sha256:* ]] || die "Fresh verify requires an immutable live job image"
-  execution_name="$(
-    "${AZ_CMD[@]}" containerapp job start \
+  execution_name_file="$(mktemp)"
+  "${AZ_CMD[@]}" containerapp job start \
       --name "$JOB_NAME" \
       --resource-group "$RG" \
       --command directive-ingest \
       --args verify \
+      --env-vars \
+      "DIRECTIVE_APPROVED_VALIDATION_DIGEST=$APPROVED_VALIDATION_DIGEST" \
+      "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST=$APPROVED_ENVIRONMENT_DIGEST" \
+      "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST=$APPROVED_SOURCE_INVENTORY_DIGEST" \
       --query name \
-      --output tsv
-  )"
+      --output tsv >"$execution_name_file" || {
+    rm -f "$execution_name_file"
+    die "Fresh verify dispatch failed"
+  }
+  execution_name="$(<"$execution_name_file")"
+  rm -f "$execution_name_file"
   [[ -n "$execution_name" ]] || die "Fresh verify did not return an execution name"
   STARTED_EXECUTIONS+=("$execution_name")
   started_at="$(

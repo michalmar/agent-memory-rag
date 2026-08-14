@@ -20,7 +20,7 @@ NORMALIZED_RECORD="$(mktemp)"
 BAD_RECORD="$(mktemp)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/directive_infrastructure_guards.sh"
-trap 'rm -f "$FIXTURE" "$PLAN" "$BAD_PLAN" "$RAW_LOG" "$RECORD" "$OVERSIZE_LOG" "$MOCK_AZ" "$MOCK_TERRAFORM" "$MOCK_LOG" "$EVIDENCE" "$ENVIRONMENT" "$VALIDATE_RECORD" "$VERIFY_RECORD" "$NORMALIZED_RECORD" "$BAD_RECORD"' EXIT
+trap 'rm -f "$FIXTURE" "$FIXTURE.verify" "$PLAN" "$BAD_PLAN" "$RAW_LOG" "$RECORD" "$OVERSIZE_LOG" "$MOCK_AZ" "$MOCK_TERRAFORM" "$MOCK_LOG" "$EVIDENCE" "$ENVIRONMENT" "$VALIDATE_RECORD" "$VERIFY_RECORD" "$NORMALIZED_RECORD" "$BAD_RECORD"' EXIT
 
 cat >"$FIXTURE" <<'EOF'
 {"name":"directive-ingestion","command":["directive-ingest"],"args":["verify"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
@@ -31,8 +31,18 @@ directive_assert_execution_mode_json "$(<"$FIXTURE")" verify
 cat >"$FIXTURE" <<'EOF'
 {"name":"directive-ingestion","command":["directive-ingest"],"args":["run-daily"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","env":[{"name":"DIRECTIVE_PROCESSING_VERSION","value":"directive-v2-czech-layout"},{"name":"DIRECTIVE_SEARCH_INDEX","value":"directive-chunks-v2"},{"name":"DIRECTIVE_APPROVED_VALIDATION_DIGEST","value":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},{"name":"DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST","value":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST","value":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}]}
 EOF
-directive_assert_publication_execution_json \
+directive_assert_approved_execution_json \
   "$(<"$FIXTURE")" \
+  run-daily \
+  registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
+  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  directive-v2-czech-layout directive-chunks-v2
+sed 's/"run-daily"/"verify"/' "$FIXTURE" >"$FIXTURE.verify"
+directive_assert_approved_execution_json \
+  "$(<"$FIXTURE.verify")" \
+  verify \
   registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
   ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
@@ -109,6 +119,7 @@ base = {
     "success": True,
     "run_id": "validate-run",
     "environment": environment,
+    "environment_digest": digest(environment),
     "processing_version": "directive-v2-czech-layout",
     "processing_hash": "a" * 64,
     "search_index": "directive-chunks-v2",
@@ -123,7 +134,9 @@ base = {
     "warning_count": 0,
     "failures": [],
 }
-base["validation_digest"] = digest({k: v for k, v in base.items() if k != "validation_digest"})
+base["validation_digest"] = digest({
+    k: v for k, v in base.items() if k not in {"run_id", "validation_digest"}
+})
 validate_path.write_text(json.dumps(base, separators=(",", ":")) + "\n")
 cross_store = {
     "catalog": {"directive_count": 1, "version_count": 1, "current_count": 1, "identity_digest": "c" * 64},
@@ -145,7 +158,8 @@ verify = {k: v for k, v in base.items() if k not in {"record_schema", "mandate_c
 verify.update({"record_schema": "directive.verify.v2", "run_id": "verify-run", "warnings": [], "warning_count": 0, "cross_store": cross_store})
 verify["validation_digest"] = base["validation_digest"]
 projection = {k: verify[k] for k in (
-    "record_schema", "environment", "processing_version", "processing_hash",
+    "record_schema", "environment", "environment_digest",
+    "processing_version", "processing_hash",
     "search_index", "source_count", "source_inventory_digest", "directive_count",
     "normalized_directive_ids", "directive_version_ids", "validation_digest",
     "cross_store",
