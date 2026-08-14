@@ -1,0 +1,21 @@
+{
+  "title": "Bezpečný metodický pokyn",
+  "lines": [
+    "Metodický pokyn číslo: MP-TEST/01",
+    "Verze: 1.0",
+    "Účinnost od: 1 . 2 . 2026",
+    "Bezpečný metodický pokyn",
+    "Administrativní poznámka"
+  ],
+  "page_two_lines": [
+    "Verze: 1.00",
+    "Účinnost od: 01. 02. 2026",
+    "Schválil: Testovací role",
+    "Distribuce: Testovací skupina"
+  ],
+  "expected": {
+    "directive_id": "MP-TEST/01",
+    "version_label": "1.0",
+    "effective_from": "2026-02-01"
+  }
+}

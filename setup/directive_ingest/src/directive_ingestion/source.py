@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -14,7 +13,7 @@ from azure.core.exceptions import AzureError
 from azure.storage.blob.aio import BlobServiceClient
 from directive_contracts import (
     normalize_directive_source_prefix,
-    parse_directive_source_filename,
+    validate_directive_source_basename,
 )
 
 DEFAULT_MAX_CORPUS_BYTES = 512 * 1024 * 1024
@@ -37,26 +36,9 @@ class SourceProvenance:
 @dataclass(frozen=True, slots=True)
 class SourceDocument:
     source_name: str
-    directive_id_hint: str
-    version_hint: str
     source_hash: str
     content: bytes
     _provenance: SourceProvenance = field(repr=False, compare=False)
-
-    def metadata_version_matches(self, version_label: str) -> bool:
-        try:
-            return Decimal(self.version_hint) == Decimal(version_label)
-        except InvalidOperation:
-            return False
-
-    @property
-    def directive_version_id_hint(self) -> str:
-        normalized = format(Decimal(self.version_hint).normalize(), "f")
-        return f"{self.directive_id_hint}:v{normalized}"
-
-    @property
-    def source_stem(self) -> str:
-        return self.source_name[: -len(".pdf")]
 
 
 class DirectiveSource(Protocol):
@@ -245,13 +227,11 @@ def _build_document(
     content: bytes,
     provenance: SourceProvenance,
 ) -> SourceDocument:
-    identity = parse_directive_source_filename(source_name)
+    source_name = validate_directive_source_basename(source_name)
     if not content.startswith(b"%PDF"):
         raise ValueError(f"Directive source is not a PDF: {source_name}")
     return SourceDocument(
         source_name=source_name,
-        directive_id_hint=identity.directive_id,
-        version_hint=identity.version,
         source_hash=hashlib.sha256(content).hexdigest(),
         content=content,
         _provenance=provenance,
@@ -264,12 +244,12 @@ def _validate_document_set(
 ) -> list[SourceDocument]:
     if not documents:
         raise ValueError(f"No directive PDFs found under {location}")
-    identities = [
-        (item.directive_id_hint, Decimal(item.version_hint))
-        for item in documents
-    ]
-    if len(set(identities)) != len(identities):
-        raise ValueError("Duplicate directive ID/version filenames found")
+    names = [item.source_name for item in documents]
+    if len(set(names)) != len(names):
+        raise ValueError("Duplicate directive source filenames found")
+    hashes = [item.source_hash for item in documents]
+    if len(set(hashes)) != len(hashes):
+        raise ValueError("Duplicate directive source content hashes found")
     return documents
 
 
