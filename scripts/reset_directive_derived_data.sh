@@ -36,6 +36,7 @@ APPROVED_VALIDATION_DIGEST=""
 APPROVED_ENVIRONMENT_DIGEST=""
 APPROVED_SOURCE_INVENTORY_DIGEST=""
 RECOVERED_EXECUTION_NAME=""
+RECOVERY_CANDIDATES=()
 
 read -r -a AZ_CMD <<<"$AZ_BIN"
 read -r -a TERRAFORM_CMD <<<"$TERRAFORM_BIN"
@@ -60,6 +61,34 @@ die() {
   echo "ERROR: $*" >&2
   exit 1
 }
+
+load_recovery_candidates() {
+  local candidates_file="$1"
+  local execution_name
+  RECOVERY_CANDIDATES=()
+  while IFS= read -r execution_name || [[ -n "$execution_name" ]]; do
+    RECOVERY_CANDIDATES+=("$execution_name")
+  done <"$candidates_file"
+}
+
+run_bash_compat_self_test() {
+  local candidates_file
+  candidates_file="$(mktemp)"
+  printf '%s\n' "first-execution" " execution with spaces " >"$candidates_file"
+  load_recovery_candidates "$candidates_file"
+  rm -f "$candidates_file"
+  [[ "${#RECOVERY_CANDIDATES[@]}" -eq 2 ]] || return 1
+  [[ "${RECOVERY_CANDIDATES[0]}" == "first-execution" ]] || return 1
+  [[ "${RECOVERY_CANDIDATES[1]}" == " execution with spaces " ]] || return 1
+  RECOVERY_CANDIDATES=()
+  [[ "${#RECOVERY_CANDIDATES[@]}" -eq 0 ]]
+}
+
+if [[ "${1:-}" == --self-test ]]; then
+  run_bash_compat_self_test || die "Bash 3 recovery candidate self-test failed"
+  printf '%s\n' "reset-directive-derived-data=bash3-self-test-pass"
+  exit 0
+fi
 
 cleanup() {
   local status=$?
@@ -878,14 +907,14 @@ recover_fresh_verify_execution() {
   else
     recovery_status=$?
   fi
-  mapfile -t recovery_candidates <"$candidates_file"
+  load_recovery_candidates "$candidates_file"
   rm -f "$candidates_file"
-  for candidate in "${recovery_candidates[@]}"; do
+  for candidate in "${RECOVERY_CANDIDATES[@]}"; do
     [[ -n "$candidate" ]] || continue
     STARTED_EXECUTIONS+=("$candidate")
   done
-  [[ "$recovery_status" -eq 0 && "${#recovery_candidates[@]}" -eq 1 ]] || return 1
-  RECOVERED_EXECUTION_NAME="${recovery_candidates[0]}"
+  [[ "$recovery_status" -eq 0 && "${#RECOVERY_CANDIDATES[@]}" -eq 1 ]] || return 1
+  RECOVERED_EXECUTION_NAME="${RECOVERY_CANDIDATES[0]}"
 }
 
 start_fresh_verify() {

@@ -23,6 +23,16 @@ BAD_RECORD="$(mktemp)"
 source "$SCRIPT_DIR/directive_infrastructure_guards.sh"
 trap 'rm -f "$FIXTURE" "$FIXTURE.verify" "$PLAN" "$BAD_PLAN" "$RAW_LOG" "$RECORD" "$OVERSIZE_LOG" "$MOCK_AZ" "$MOCK_TERRAFORM" "$MOCK_LOG" "$EVIDENCE" "$INVENTORY_OUTPUT" "$ENVIRONMENT" "$VALIDATE_RECORD" "$VERIFY_RECORD" "$NORMALIZED_RECORD" "$BAD_RECORD"' EXIT
 
+/bin/bash "$SCRIPT_DIR/deploy_directive_ingestion.sh" --self-test >/dev/null
+/bin/bash "$RESET_SCRIPT" --self-test >/dev/null
+if grep -REq 'reset-publication-guards|reconcile-documents|publish-mandates' \
+  "$SCRIPT_DIR/deploy_directive_ingestion.sh" \
+  "$RESET_SCRIPT" \
+  "$SCRIPT_DIR/directive_infrastructure_guards.sh"; then
+  echo "removed publication CLI was referenced by infrastructure" >&2
+  exit 1
+fi
+
 cat >"$FIXTURE" <<'EOF'
 {"name":"directive-ingestion","command":["directive-ingest"],"args":["verify"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 EOF

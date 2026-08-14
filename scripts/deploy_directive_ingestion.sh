@@ -12,6 +12,38 @@ INFRA_DIR="$REPO_ROOT/infra"
 source "$SCRIPT_DIR/directive_infrastructure_guards.sh"
 MANDATE_FILE="$REPO_ROOT/setup/directives/mandatory/mand.csv"
 PHASE="${DIRECTIVE_INGEST_PHASE:-all}"
+RECOVERY_CANDIDATES=()
+
+load_recovery_candidates() {
+  local candidates_file="$1"
+  local execution_name
+  RECOVERY_CANDIDATES=()
+  while IFS= read -r execution_name || [[ -n "$execution_name" ]]; do
+    RECOVERY_CANDIDATES+=("$execution_name")
+  done <"$candidates_file"
+}
+
+run_bash_compat_self_test() {
+  local candidates_file
+  candidates_file="$(mktemp)"
+  printf '%s\n' "first-execution" " execution with spaces " >"$candidates_file"
+  load_recovery_candidates "$candidates_file"
+  rm -f "$candidates_file"
+  [[ "${#RECOVERY_CANDIDATES[@]}" -eq 2 ]] || return 1
+  [[ "${RECOVERY_CANDIDATES[0]}" == "first-execution" ]] || return 1
+  [[ "${RECOVERY_CANDIDATES[1]}" == " execution with spaces " ]] || return 1
+  RECOVERY_CANDIDATES=()
+  [[ "${#RECOVERY_CANDIDATES[@]}" -eq 0 ]]
+}
+
+if [[ "${1:-}" == --self-test ]]; then
+  run_bash_compat_self_test || {
+    echo "ERROR: Bash 3 recovery candidate self-test failed" >&2
+    exit 1
+  }
+  printf '%s\n' "deploy-directive-ingestion=bash3-self-test-pass"
+  exit 0
+fi
 
 case "${1:-}" in
   validate|publish|all)
@@ -622,12 +654,12 @@ recover_publication_execution() {
   else
     recovery_status=$?
   fi
-  mapfile -t recovery_candidates <"$candidates_file"
+  load_recovery_candidates "$candidates_file"
   rm -f "$candidates_file"
-  for execution_name in "${recovery_candidates[@]}"; do
+  for execution_name in "${RECOVERY_CANDIDATES[@]}"; do
     [[ -n "$execution_name" ]] && track_started_execution "$execution_name"
   done
-  [[ "$recovery_status" -eq 0 && "${#recovery_candidates[@]}" -eq 1 ]] || return 1
+  [[ "$recovery_status" -eq 0 && "${#RECOVERY_CANDIDATES[@]}" -eq 1 ]] || return 1
 }
 
 start_job_execution() {
