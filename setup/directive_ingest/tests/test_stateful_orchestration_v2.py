@@ -92,7 +92,18 @@ class MemoryBlobs:
             raise RuntimeError("Source state changed concurrently")
         self._write_state(name, json.loads(content))
 
-    async def replace_json(self, name: str, value: dict[str, object]) -> str:
+    async def replace_json(
+        self,
+        name: str,
+        value: dict[str, object],
+        *,
+        expected_etag: str | None = None,
+        require_absent: bool = False,
+    ) -> str:
+        if require_absent and name in self.json:
+            raise RuntimeError("Source state changed concurrently")
+        if expected_etag is not None and self.etags.get(name) != expected_etag:
+            raise RuntimeError("Source state changed concurrently")
         return self._write_state(name, value)
 
     async def list_names(self, prefix: str) -> set[str]:

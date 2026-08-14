@@ -71,7 +71,14 @@ class BlobArtifactRepository:
         ).encode()
         await self.put_immutable(blob_name, content, "application/json")
 
-    async def replace_json(self, blob_name: str, value: object) -> str:
+    async def replace_json(
+        self,
+        blob_name: str,
+        value: object,
+        *,
+        expected_etag: str | None = None,
+        require_absent: bool = False,
+    ) -> str:
         """Replace mutable internal state with an optimistic-concurrency guard."""
         content = json.dumps(
             value,
@@ -81,6 +88,19 @@ class BlobArtifactRepository:
             default=str,
         ).encode()
         blob = self._container.get_blob_client(blob_name)
+        if require_absent:
+            try:
+                response = await blob.upload_blob(
+                    content,
+                    overwrite=False,
+                    metadata={"content_sha256": hashlib.sha256(content).hexdigest()},
+                    content_settings=ContentSettings(content_type="application/json"),
+                )
+            except ResourceExistsError as exc:
+                raise RuntimeError(
+                    f"Concurrent source-state replacement prevented at {blob_name}"
+                ) from exc
+            return _response_etag(response, blob_name)
         try:
             properties = await blob.get_blob_properties()
         except ResourceNotFoundError:
@@ -96,7 +116,7 @@ class BlobArtifactRepository:
                     f"Concurrent source-state replacement prevented at {blob_name}"
                 ) from exc
             return _response_etag(response, blob_name)
-        etag = getattr(properties, "etag", None)
+        etag = expected_etag or getattr(properties, "etag", None)
         if not isinstance(etag, str) or not etag:
             raise RuntimeError(f"State artifact is missing an ETag: {blob_name}")
         try:

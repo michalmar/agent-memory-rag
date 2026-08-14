@@ -764,6 +764,7 @@ class DirectiveIngestionRunner:
     ) -> ReconcileResult:
         run_id = _run_id()
         sources = await self.discover_sources(source_directory)
+        _validate_public_corpus_limit(sources)
         metadata = await self.extract_or_load_metadata(sources, run_id)
         await self._validate_and_quarantine(metadata, run_id)
         marker_before = await self.commits.load()
@@ -1334,6 +1335,14 @@ class DirectiveIngestionRunner:
                 item.canonical,
                 (chunk.id for chunk in item.search_chunks),
             )
+            snapshot = next(
+                (
+                    candidate
+                    for candidate in snapshots or []
+                    if candidate.item is item
+                ),
+                None,
+            )
             candidate_etag = await self.source_states.record(
                 item.source,
                 item.canonical.metadata,
@@ -1349,6 +1358,16 @@ class DirectiveIngestionRunner:
                     if bundle is not None
                     and bundle.artifact_generation_id
                     != item.bundle.artifact_generation_id
+                ),
+                expected_etag=(
+                    snapshot.previous_source_state.etag
+                    if snapshot and snapshot.previous_source_state is not None
+                    else None
+                ),
+                require_absent=(
+                    snapshots is not None
+                    and snapshot is not None
+                    and snapshot.previous_source_state is None
                 ),
             )
             if snapshots is not None:

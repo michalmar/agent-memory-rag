@@ -100,6 +100,9 @@ class SourceStateRepository:
         metadata: DirectiveMetadata,
         artifact_generation_id: str,
         pending_cleanup: tuple[PublishedDirectiveVersion, ...] = (),
+        *,
+        expected_etag: str | None = None,
+        require_absent: bool = False,
     ) -> str:
         return await self._blobs.replace_json(
             self.blob_name(source, metadata.processing_hash),
@@ -118,6 +121,8 @@ class SourceStateRepository:
                     bundle.model_dump(mode="json") for bundle in pending_cleanup
                 ],
             },
+            expected_etag=expected_etag,
+            require_absent=require_absent,
         )
 
     async def clear_pending(
