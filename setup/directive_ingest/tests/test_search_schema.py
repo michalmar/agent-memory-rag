@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 import directive_ingestion.search_repository as search_repository
 from directive_ingestion.integrity import IntegrityValidationError
@@ -193,3 +194,21 @@ async def test_current_visibility_timeout_fails_on_exact_id_mismatch(
         await repository.validate_current_generation(bundle)
 
     repository._find_keys.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_exact_visibility_propagates_transport_errors() -> None:
+    repository = _repository()
+    directive = SimpleNamespace(
+        metadata=SimpleNamespace(
+            directive_version_id="Č/12:v1",
+            source_hash="a" * 64,
+            processing_hash="b" * 64,
+        )
+    )
+    repository._find_keys = AsyncMock(
+        side_effect=httpx.TransportError("Search unavailable")
+    )
+
+    with pytest.raises(httpx.TransportError, match="Search unavailable"):
+        await repository.validate_published_chunk_ids(directive, ["chunk-1"])
