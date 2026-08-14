@@ -24,7 +24,7 @@ load_recovery_candidates() {
 }
 
 run_bash_compat_self_test() {
-  local candidates_file
+  local candidates_file execution_name execution_already_tracked=false
   candidates_file="$(mktemp)"
   printf '%s\n' "first-execution" " execution with spaces " >"$candidates_file"
   load_recovery_candidates "$candidates_file"
@@ -33,7 +33,19 @@ run_bash_compat_self_test() {
   [[ "${RECOVERY_CANDIDATES[0]}" == "first-execution" ]] || return 1
   [[ "${RECOVERY_CANDIDATES[1]}" == " execution with spaces " ]] || return 1
   RECOVERY_CANDIDATES=()
-  [[ "${#RECOVERY_CANDIDATES[@]}" -eq 0 ]]
+  [[ "${#RECOVERY_CANDIDATES[@]}" -eq 0 ]] || return 1
+  : >"$candidates_file"
+  load_recovery_candidates "$candidates_file"
+  rm -f "$candidates_file"
+  [[ "${#RECOVERY_CANDIDATES[@]}" -eq 0 ]] || return 1
+  STARTED_EXECUTIONS=()
+  if [[ "${#STARTED_EXECUTIONS[@]}" -gt 0 ]]; then
+    for execution_name in "${STARTED_EXECUTIONS[@]}"; do
+      execution_already_tracked=true
+    done
+  fi
+  [[ "$execution_already_tracked" == false ]] || return 1
+  [[ "${#STARTED_EXECUTIONS[@]}" -eq 0 ]]
 }
 
 if [[ "${1:-}" == --self-test ]]; then
@@ -287,6 +299,9 @@ EXPECTED_ENVIRONMENT_DIGEST="$(sha256_text "$(jq -S -c . "$EXPECTED_ENVIRONMENT_
 
 stop_started_executions() {
   local execution_name status
+  if [[ "${#STARTED_EXECUTIONS[@]}" -eq 0 ]]; then
+    return 0
+  fi
   for execution_name in "${STARTED_EXECUTIONS[@]}"; do
     if ! status="$(
       az containerapp job execution show \
@@ -373,11 +388,13 @@ roles_are_ready() {
       "[?principalId=='$IDENTITY_PRINCIPAL_ID'].[roleDefinitionId,scope]" \
     --output tsv >"$COSMOS_ROLE_SNAPSHOT"
 
-  for expected in "${EXPECTED_ARM_ROLES[@]}"; do
-    expected_role="${expected%%|*}"
-    expected_scope="${expected#*|}"
-    has_exact_arm_role "$expected_role" "$expected_scope" || return 1
-  done
+  if [[ "${#EXPECTED_ARM_ROLES[@]}" -gt 0 ]]; then
+    for expected in "${EXPECTED_ARM_ROLES[@]}"; do
+      expected_role="${expected%%|*}"
+      expected_scope="${expected#*|}"
+      has_exact_arm_role "$expected_role" "$expected_scope" || return 1
+    done
+  fi
   has_exact_cosmos_role
 }
 
@@ -616,12 +633,14 @@ track_started_execution() {
   local execution_name="$1"
   local known
   [[ -n "$execution_name" ]] || return 1
-  for known in "${STARTED_EXECUTIONS[@]}"; do
-    [[ "$known" == "$execution_name" ]] && {
-      STARTED_EXECUTION_NAME="$execution_name"
-      return 0
-    }
-  done
+  if [[ "${#STARTED_EXECUTIONS[@]}" -gt 0 ]]; then
+    for known in "${STARTED_EXECUTIONS[@]}"; do
+      [[ "$known" == "$execution_name" ]] && {
+        STARTED_EXECUTION_NAME="$execution_name"
+        return 0
+      }
+    done
+  fi
   STARTED_EXECUTIONS+=("$execution_name")
   STARTED_EXECUTION_NAME="$execution_name"
 }
@@ -656,9 +675,11 @@ recover_publication_execution() {
   fi
   load_recovery_candidates "$candidates_file"
   rm -f "$candidates_file"
-  for execution_name in "${RECOVERY_CANDIDATES[@]}"; do
-    [[ -n "$execution_name" ]] && track_started_execution "$execution_name"
-  done
+  if [[ "${#RECOVERY_CANDIDATES[@]}" -gt 0 ]]; then
+    for execution_name in "${RECOVERY_CANDIDATES[@]}"; do
+      [[ -n "$execution_name" ]] && track_started_execution "$execution_name"
+    done
+  fi
   [[ "$recovery_status" -eq 0 && "${#RECOVERY_CANDIDATES[@]}" -eq 1 ]] || return 1
 }
 
@@ -680,7 +701,11 @@ start_job_execution() {
       "DIRECTIVE_APPROVED_VALIDATION_DIGEST=$VALIDATION_PRODUCER_DIGEST"
       "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST=$EXPECTED_ENVIRONMENT_DIGEST"
       "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST=$APPROVED_SOURCE_INVENTORY_DIGEST"
+      --query name
+      --output tsv
     )
+  else
+    start_args=(--query name --output tsv)
   fi
   if [[ "$expected_argument" == run-daily ]]; then
     execution_snapshot="$(snapshot_execution_ids)" || die \
@@ -694,9 +719,7 @@ start_job_execution() {
       --resource-group "$RG" \
       --command directive-ingest \
       --args "$expected_argument" \
-      "${start_args[@]}" \
-      --query name \
-      --output tsv >"$execution_name_file"
+      "${start_args[@]}" >"$execution_name_file"
   then
     rm -f "$execution_name_file"
     if [[ "$expected_argument" == run-daily ]]; then

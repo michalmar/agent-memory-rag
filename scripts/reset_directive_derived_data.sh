@@ -72,7 +72,7 @@ load_recovery_candidates() {
 }
 
 run_bash_compat_self_test() {
-  local candidates_file
+  local candidates_file execution_name execution_already_tracked=false
   candidates_file="$(mktemp)"
   printf '%s\n' "first-execution" " execution with spaces " >"$candidates_file"
   load_recovery_candidates "$candidates_file"
@@ -81,14 +81,21 @@ run_bash_compat_self_test() {
   [[ "${RECOVERY_CANDIDATES[0]}" == "first-execution" ]] || return 1
   [[ "${RECOVERY_CANDIDATES[1]}" == " execution with spaces " ]] || return 1
   RECOVERY_CANDIDATES=()
-  [[ "${#RECOVERY_CANDIDATES[@]}" -eq 0 ]]
+  [[ "${#RECOVERY_CANDIDATES[@]}" -eq 0 ]] || return 1
+  : >"$candidates_file"
+  load_recovery_candidates "$candidates_file"
+  rm -f "$candidates_file"
+  [[ "${#RECOVERY_CANDIDATES[@]}" -eq 0 ]] || return 1
+  STARTED_EXECUTIONS=()
+  stop_started_executions
+  if [[ "${#STARTED_EXECUTIONS[@]}" -gt 0 ]]; then
+    for execution_name in "${STARTED_EXECUTIONS[@]}"; do
+      execution_already_tracked=true
+    done
+  fi
+  [[ "$execution_already_tracked" == false ]] || return 1
+  [[ "${#STARTED_EXECUTIONS[@]}" -eq 0 ]]
 }
-
-if [[ "${1:-}" == --self-test ]]; then
-  run_bash_compat_self_test || die "Bash 3 recovery candidate self-test failed"
-  printf '%s\n' "reset-directive-derived-data=bash3-self-test-pass"
-  exit 0
-fi
 
 cleanup() {
   local status=$?
@@ -140,6 +147,9 @@ sha256_file() {
 
 stop_started_executions() {
   local execution_name status
+  if [[ "${#STARTED_EXECUTIONS[@]}" -eq 0 ]]; then
+    return 0
+  fi
   for execution_name in "${STARTED_EXECUTIONS[@]}"; do
     if ! status="$(
       "${AZ_CMD[@]}" containerapp job execution show \
@@ -162,6 +172,12 @@ stop_started_executions() {
   done
   wait_for_active_executions_to_drain || true
 }
+
+if [[ "${1:-}" == --self-test ]]; then
+  run_bash_compat_self_test || die "Bash 3 recovery candidate self-test failed"
+  printf '%s\n' "reset-directive-derived-data=bash3-self-test-pass"
+  exit 0
+fi
 
 tf_output() {
   "${TERRAFORM_CMD[@]}" -chdir="$INFRA_DIR" output -raw "$1"
@@ -909,10 +925,12 @@ recover_fresh_verify_execution() {
   fi
   load_recovery_candidates "$candidates_file"
   rm -f "$candidates_file"
-  for candidate in "${RECOVERY_CANDIDATES[@]}"; do
-    [[ -n "$candidate" ]] || continue
-    STARTED_EXECUTIONS+=("$candidate")
-  done
+  if [[ "${#RECOVERY_CANDIDATES[@]}" -gt 0 ]]; then
+    for candidate in "${RECOVERY_CANDIDATES[@]}"; do
+      [[ -n "$candidate" ]] || continue
+      STARTED_EXECUTIONS+=("$candidate")
+    done
+  fi
   [[ "$recovery_status" -eq 0 && "${#RECOVERY_CANDIDATES[@]}" -eq 1 ]] || return 1
   RECOVERED_EXECUTION_NAME="${RECOVERY_CANDIDATES[0]}"
 }
@@ -962,7 +980,13 @@ start_fresh_verify() {
     execution_name="$RECOVERED_EXECUTION_NAME"
   fi
   [[ -n "$execution_name" ]] || die "Fresh verify did not return an execution name"
-  if [[ ! " ${STARTED_EXECUTIONS[*]} " == *" $execution_name "* ]]; then
+  local execution_already_tracked=false
+  if [[ "${#STARTED_EXECUTIONS[@]}" -gt 0 ]]; then
+    case " ${STARTED_EXECUTIONS[*]} " in
+      *" $execution_name "*) execution_already_tracked=true ;;
+    esac
+  fi
+  if [[ "$execution_already_tracked" == false ]]; then
     STARTED_EXECUTIONS+=("$execution_name")
   fi
   started_at="$(

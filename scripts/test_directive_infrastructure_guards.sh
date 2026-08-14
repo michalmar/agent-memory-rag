@@ -23,8 +23,8 @@ BAD_RECORD="$(mktemp)"
 source "$SCRIPT_DIR/directive_infrastructure_guards.sh"
 trap 'rm -f "$FIXTURE" "$FIXTURE.verify" "$PLAN" "$BAD_PLAN" "$RAW_LOG" "$RECORD" "$OVERSIZE_LOG" "$MOCK_AZ" "$MOCK_TERRAFORM" "$MOCK_LOG" "$EVIDENCE" "$INVENTORY_OUTPUT" "$ENVIRONMENT" "$VALIDATE_RECORD" "$VERIFY_RECORD" "$NORMALIZED_RECORD" "$BAD_RECORD"' EXIT
 
-/bin/bash "$SCRIPT_DIR/deploy_directive_ingestion.sh" --self-test >/dev/null
-/bin/bash "$RESET_SCRIPT" --self-test >/dev/null
+/bin/bash -u "$SCRIPT_DIR/deploy_directive_ingestion.sh" --self-test >/dev/null
+/bin/bash -u "$RESET_SCRIPT" --self-test >/dev/null
 if grep -REq 'reset-publication-guards|reconcile-documents|publish-mandates' \
   "$SCRIPT_DIR/deploy_directive_ingestion.sh" \
   "$RESET_SCRIPT" \
@@ -56,6 +56,16 @@ directive_assert_approved_execution_json \
   directive-v2-czech-layout directive-chunks-v2
 BEFORE_EXECUTIONS='[{"name":"old-run"}]'
 NEW_EXECUTION='[{"name":"old-run"},{"name":"new-run","properties":{"template":{"containers":[{"name":"directive-ingestion","command":["directive-ingest"],"args":["run-daily"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","env":[{"name":"DIRECTIVE_PROCESSING_VERSION","value":"directive-v2-czech-layout"},{"name":"DIRECTIVE_SEARCH_INDEX","value":"directive-chunks-v2"},{"name":"DIRECTIVE_APPROVED_VALIDATION_DIGEST","value":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},{"name":"DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST","value":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST","value":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}]}]}}}]'
+if directive_select_new_approved_execution_names \
+  "$BEFORE_EXECUTIONS" "$BEFORE_EXECUTIONS" run-daily \
+  registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
+  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  directive-v2-czech-layout directive-chunks-v2 >/dev/null 2>&1; then
+  echo "zero-candidate lost-response recovery was accepted" >&2
+  exit 1
+fi
  [[ "$(directive_select_new_approved_execution_names \
   "$BEFORE_EXECUTIONS" "$NEW_EXECUTION" run-daily \
   registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
@@ -339,7 +349,12 @@ EOF
 chmod +x "$MOCK_AZ" "$MOCK_TERRAFORM"
 
 MOCK_LOG="$MOCK_LOG" AZ_BIN="$MOCK_AZ" TERRAFORM_BIN="$MOCK_TERRAFORM" \
-  bash "$RESET_SCRIPT" dry-run --inventory-evidence "$EVIDENCE" >"$INVENTORY_OUTPUT"
+  /bin/bash -u "$RESET_SCRIPT" dry-run --inventory-evidence "$EVIDENCE" >"$INVENTORY_OUTPUT"
+if MOCK_LOG="$MOCK_LOG" AZ_BIN="$MOCK_AZ" TERRAFORM_BIN="$MOCK_TERRAFORM" \
+  /bin/bash -u "$RESET_SCRIPT" finalize >"$INVENTORY_OUTPUT" 2>/dev/null; then
+  echo "finalize without evidence was accepted before execution" >&2
+  exit 1
+fi
 grep -q '^artifact_prefix=publication-lock/$' "$INVENTORY_OUTPUT"
 grep -q '^artifact_prefix=publication-claims/$' "$INVENTORY_OUTPUT"
 if grep -Eq 'containerapp job update|containerapp job stop|cosmosdb sql container delete|terraform.*(plan|apply)' "$MOCK_LOG"; then
