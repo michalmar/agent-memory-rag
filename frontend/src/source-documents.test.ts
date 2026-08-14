@@ -14,29 +14,30 @@ import {
 } from './source-documents.js';
 
 describe('directive source management helpers', () => {
-  it('enforces the shared directive PDF filename contract', () => {
-    expect(
-      validateDirectiveSourceFilename('12345678-company-policy-v1.pdf'),
-    ).toBe(true);
-    expect(
-      validateDirectiveSourceFilename('12345678-company-policy-v1.5.PDF'),
-    ).toBe(true);
-    expect(validateDirectiveSourceFilename('policy.pdf')).toBe(false);
-    expect(
-      validateDirectiveSourceFilename('../12345678-policy-v1.pdf'),
-    ).toBe(false);
+  it('enforces the shared safe PDF basename contract', () => {
+    expect(validateDirectiveSourceFilename('policy.pdf')).toBe(true);
+    expect(validateDirectiveSourceFilename('český název.v2.PDF')).toBe(true);
+    expect(validateDirectiveSourceFilename('policy_backup.final.pdf')).toBe(true);
+    expect(validateDirectiveSourceFilename('')).toBe(false);
+    expect(validateDirectiveSourceFilename('policy.txt')).toBe(false);
+    expect(validateDirectiveSourceFilename('policy/name.pdf')).toBe(false);
+    expect(validateDirectiveSourceFilename('policy\\name.pdf')).toBe(false);
+    expect(validateDirectiveSourceFilename('policy\u0000name.pdf')).toBe(false);
+    expect(validateDirectiveSourceFilename('policy\nname.pdf')).toBe(false);
+    expect(validateDirectiveSourceFilename('.')).toBe(false);
+    expect(validateDirectiveSourceFilename('a'.repeat(252) + '.pdf')).toBe(false);
   });
 
   it('maps stable upload failures without suggesting overwrite', () => {
     expect(
       directiveSourceUploadError(
         409,
-        '12345678-company-policy-v1.pdf',
+        'company-policy.pdf',
       ),
     ).toEqual({
       status: 'conflict',
       message: (
-        '"12345678-company-policy-v1.pdf" already exists and was not '
+        '"company-policy.pdf" already exists and was not '
         + 'overwritten.'
       ),
     });
@@ -88,7 +89,7 @@ describe('directive source client', () => {
           JSON.stringify({
             items: [
               {
-                filename: '12345678-company-policy-v1.pdf',
+                filename: 'český název.v2.PDF',
                 size_bytes: 100,
                 last_modified: '2026-07-25T00:00:00Z',
               },
@@ -105,12 +106,10 @@ describe('directive source client', () => {
 
     const page = await client.listDirectiveSources(null, 25);
     await client.deleteDirectiveSource(
-      '12345678-company policy-v1.pdf',
+      'český název.v2.PDF',
     );
 
-    expect(page.items[0].filename).toBe(
-      '12345678-company-policy-v1.pdf',
-    );
+    expect(page.items[0].filename).toBe('český název.v2.PDF');
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       '/api/directive-sources?limit=25',
@@ -120,7 +119,7 @@ describe('directive source client', () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      '/api/directive-sources/12345678-company%20policy-v1.pdf',
+      '/api/directive-sources/%C4%8Desk%C3%BD%20n%C3%A1zev.v2.PDF',
       expect.objectContaining({
         method: 'DELETE',
         headers: { 'X-Mock-User-ID': 'user-alice' },
@@ -146,7 +145,7 @@ describe('directive source client', () => {
       };
       status = 201;
       responseText = JSON.stringify({
-        filename: '12345678-company-policy-v1.pdf',
+        filename: 'český název.v2.PDF',
         size_bytes: 100,
         last_modified: '2026-07-25T00:00:00Z',
       });
@@ -192,7 +191,7 @@ describe('directive source client', () => {
     const file = Object.assign(
       new Blob(['%PDF-source'], { type: 'application/pdf' }),
       {
-        name: '12345678-company-policy-v1.pdf',
+        name: 'český název.v2.PDF',
         lastModified: 0,
       },
     ) as File;
@@ -208,7 +207,7 @@ describe('directive source client', () => {
     expect(progress).toEqual([50]);
     expect(request?.method).toBe('POST');
     expect(request?.url).toBe(
-      '/api/directive-sources/upload/12345678-company-policy-v1.pdf',
+      '/api/directive-sources/upload/%C4%8Desk%C3%BD%20n%C3%A1zev.v2.PDF',
     );
     expect(request?.headers.get('Content-Type')).toBe('application/pdf');
     expect(request?.headers.get('X-Mock-User-ID')).toBe('user-alice');

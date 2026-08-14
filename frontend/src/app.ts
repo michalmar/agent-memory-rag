@@ -221,10 +221,6 @@ export class NativeApp extends LitElement {
     close: () => this.closeDirectiveDocument(),
     selectTab: (tab: DirectiveDocumentTab) =>
       this.selectDirectiveDocumentTab(tab),
-    openLinkedDocument: (
-      request: DirectiveDocumentOpenRequest,
-      trigger?: HTMLElement,
-    ) => this.openDirectiveDocument(request, trigger),
     retryDocument: () => void this.loadDirectiveDocument(),
     retryPdf: () => void this.loadDirectivePdf(),
   };
@@ -540,7 +536,8 @@ export class NativeApp extends LitElement {
     if (!validateDirectiveSourceFilename(file.name)) {
       this.directiveSourceUploadStatus = 'invalid';
       this.directiveSourceUploadError = (
-        'Use the filename format 12345678-policy-name-v1.pdf.'
+        'Choose a non-empty PDF filename (up to 255 characters) without path '
+        + 'separators or control characters.'
       );
       return;
     }

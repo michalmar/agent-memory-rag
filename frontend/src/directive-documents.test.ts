@@ -3,16 +3,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   directiveOpenRequestFromCitation,
   directiveDocumentPath,
-  directiveReferenceFromPdfHref,
   directiveSourcePath,
   isAbortError,
   LatestRequest,
   locateDirectiveHeading,
+  normalizeDirectiveId,
+  normalizeDirectiveVersion,
   parseDirectiveSectionOrdinal,
   pdfUrlForPage,
   sameDirectiveDocument,
   toDirectiveCitationTarget,
   toDirectiveDocumentReference,
+  validateDirectiveVersionId,
 } from './directive-documents.js';
 
 describe('directive document helpers', () => {
@@ -90,6 +92,73 @@ describe('directive document helpers', () => {
     });
   });
 
+  it('normalizes Unicode IDs and validates numeric version ownership', () => {
+    expect(normalizeDirectiveId('  číslo  /  7 ')).toBe('ČÍSLO/7');
+    expect(normalizeDirectiveId('cafe\u0301 _ 2')).toBe('CAFÉ_2');
+    expect(normalizeDirectiveVersion('0001.00')).toBe('1');
+    expect(
+      toDirectiveDocumentReference({
+        ref_id: 'unicode',
+        source_name: 'Czech directive',
+        directive_id: '  číslo  /  7 ',
+        directive_version_id: 'ČÍSLO/7:v1',
+        version_label: '01.0',
+      }),
+    ).toEqual({
+      directiveId: 'ČÍSLO/7',
+      directiveVersionId: 'ČÍSLO/7:v1',
+      sourceName: 'Czech directive',
+      versionLabel: '01.0',
+    });
+    expect(
+      validateDirectiveVersionId('ČÍSLO/7:v1', ' číslo/7 '),
+    ).toBe('ČÍSLO/7:v1');
+  });
+
+  it('rejects invalid, mismatched, and non-canonical identities', () => {
+    const base = {
+      ref_id: 'invalid',
+      source_name: 'Directive',
+      directive_id: 'DIR/7',
+      directive_version_id: 'DIR/8:v1',
+    };
+    expect(toDirectiveDocumentReference(base)).toBeNull();
+    expect(
+      toDirectiveDocumentReference({
+        ...base,
+        directive_version_id: 'DIR/7:v1:extra',
+      }),
+    ).toBeNull();
+    expect(
+      toDirectiveDocumentReference({
+        ...base,
+        directive_version_id: 'DIR/7:v1',
+        version_label: 'stable',
+      }),
+    ).toBeNull();
+    expect(
+      toDirectiveDocumentReference({
+        ...base,
+        directive_id: 'DIR:7',
+        directive_version_id: 'DIR:7:v1',
+      }),
+    ).toBeNull();
+    expect(
+      toDirectiveDocumentReference({
+        ...base,
+        directive_id: 'DIR\u00007',
+        directive_version_id: 'DIR\u00007:v1',
+      }),
+    ).toBeNull();
+    expect(
+      toDirectiveDocumentReference({
+        ...base,
+        directive_id: 'D'.repeat(129),
+        directive_version_id: `${'D'.repeat(129)}:v1`,
+      }),
+    ).toBeNull();
+  });
+
   it('parses generated section ordinals and recognizes document control', () => {
     expect(parseDirectiveSectionOrdinal('s0000-document-control')).toBe(0);
     expect(parseDirectiveSectionOrdinal('s0012-driver-training')).toBe(12);
@@ -158,36 +227,16 @@ describe('directive document helpers', () => {
     ).toBe(false);
   });
 
-  it('encodes exact-version API paths and targets the cited page', () => {
-    expect(directiveDocumentPath('30336958', '30336958:v1')).toBe(
-      '/directives/30336958/versions/30336958%3Av1/document',
+  it('encodes exact-version query routes and targets the cited page', () => {
+    expect(directiveDocumentPath('ČÍSLO/7', 'ČÍSLO/7:v1')).toBe(
+      '/directives/document?directive_id=%C4%8C%C3%8DSLO%2F7&directive_version_id=%C4%8C%C3%8DSLO%2F7%3Av1',
     );
-    expect(directiveSourcePath('30336958', '30336958:v1')).toBe(
-      '/directives/30336958/versions/30336958%3Av1/source',
+    expect(directiveSourcePath('ČÍSLO/7', 'ČÍSLO/7:v1')).toBe(
+      '/directives/source?directive_id=%C4%8C%C3%8DSLO%2F7&directive_version_id=%C4%8C%C3%8DSLO%2F7%3Av1',
     );
     expect(pdfUrlForPage('blob:https://app.test/pdf', 3)).toBe(
       'blob:https://app.test/pdf#page=3',
     );
-  });
-
-  it('maps relative Markdown PDF links back to exact directive versions', () => {
-    expect(
-      directiveReferenceFromPdfHref(
-        '../pdf/30336958-company-car-driver-safety-requirements-v1.0.pdf',
-        'Company Car Driver Safety Requirements',
-      ),
-    ).toEqual({
-      directiveId: '30336958',
-      directiveVersionId: '30336958:v1',
-      sourceName: 'Company Car Driver Safety Requirements',
-      versionLabel: '1.0',
-    });
-    expect(
-      directiveReferenceFromPdfHref(
-        'https://example.test/30336958-policy-v1.pdf',
-        'External PDF',
-      ),
-    ).toBeNull();
   });
 
   it('invalidates stale requests without coupling document and PDF loads', () => {
@@ -271,13 +320,13 @@ describe('directive document client', () => {
     const controller = new AbortController();
 
     const document = await client.getDirectiveDocument(
-      '30336958',
-      '30336958:v1',
+      'ČÍSLO/7',
+      'ČÍSLO/7:v1',
       controller.signal,
     );
     const pdf = await client.getDirectiveSourcePdf(
-      '30336958',
-      '30336958:v1',
+      'ČÍSLO/7',
+      'ČÍSLO/7:v1',
       controller.signal,
     );
 
@@ -285,7 +334,7 @@ describe('directive document client', () => {
     expect(pdf.type).toBe('application/pdf');
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      '/api/directives/30336958/versions/30336958%3Av1/document',
+      '/api/directives/document?directive_id=%C4%8C%C3%8DSLO%2F7&directive_version_id=%C4%8C%C3%8DSLO%2F7%3Av1',
       expect.objectContaining({
         headers: {
           Accept: 'application/json',
@@ -296,7 +345,7 @@ describe('directive document client', () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      '/api/directives/30336958/versions/30336958%3Av1/source',
+      '/api/directives/source?directive_id=%C4%8C%C3%8DSLO%2F7&directive_version_id=%C4%8C%C3%8DSLO%2F7%3Av1',
       expect.objectContaining({
         headers: {
           Accept: 'application/pdf',
@@ -318,7 +367,7 @@ describe('directive document client', () => {
     const client = new AGUIClient();
 
     await expect(
-      client.getDirectiveSourcePdf('30336958', '30336958:v1'),
+      client.getDirectiveSourcePdf('ČÍSLO/7', 'ČÍSLO/7:v1'),
     ).rejects.toThrow('returned text/html');
   });
 });

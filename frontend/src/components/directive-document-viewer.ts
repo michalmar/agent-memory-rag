@@ -4,11 +4,9 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
 import type { DirectiveDocument } from '../client.js';
 import {
-  directiveReferenceFromPdfHref,
   locateDirectiveHeading,
   type DirectiveCitationTarget,
   type DirectiveDocumentLoadStatus,
-  type DirectiveDocumentOpenRequest,
   type DirectiveDocumentReference,
   type DirectiveDocumentTab,
 } from '../directive-documents.js';
@@ -22,10 +20,6 @@ import { LightDomElement } from './light-dom-element.js';
 export interface DirectiveDocumentViewerActions {
   close: () => void;
   selectTab: (tab: DirectiveDocumentTab) => void;
-  openLinkedDocument: (
-    request: DirectiveDocumentOpenRequest,
-    trigger?: HTMLElement,
-  ) => void;
   retryDocument: () => void;
   retryPdf: () => void;
 }
@@ -376,7 +370,7 @@ export class DirectiveDocumentViewer extends LightDomElement {
       );
     }
     return html`
-      <article class="document-markdown" @click=${this.onMarkdownClick}>
+      <article class="document-markdown">
         ${unsafeHTML(renderSafeDirectiveMarkdown(this.document.markdown))}
       </article>
     `;
@@ -458,25 +452,6 @@ export class DirectiveDocumentViewer extends LightDomElement {
       </div>
     `;
   }
-
-  private onMarkdownClick = (event: MouseEvent): void => {
-    const target = event.target instanceof Element ? event.target : null;
-    const button = target?.closest<HTMLButtonElement>(
-      'button[data-directive-pdf-href]',
-    );
-    const href = button?.dataset.directivePdfHref;
-    if (!button || !href) return;
-
-    const reference = directiveReferenceFromPdfHref(
-      href,
-      button.textContent ?? '',
-    );
-    if (!reference) return;
-    this.actions.openLinkedDocument(
-      { reference, initialTab: 'pdf' },
-      button,
-    );
-  };
 
   private onTabKeydown(
     event: KeyboardEvent,
