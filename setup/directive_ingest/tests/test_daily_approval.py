@@ -21,6 +21,7 @@ from directive_ingestion.reconcile import (
     _validation_payload,
 )
 from directive_ingestion.source import SourceDocument, SourceProvenance
+from directive_ingestion.source_state_repository import SourceStateSnapshot
 
 
 def _source() -> SourceDocument:
@@ -228,11 +229,15 @@ async def test_daily_binding_persists_validation_digest_to_source_state() -> Non
         validation_digest=None,
         directive_metadata=metadata,
         artifact_generation_id="generation",
+        pending_cleanup=(),
     )
     runner = object.__new__(DirectiveIngestionRunner)
     runner.config = SimpleNamespace(processing_hash="a" * 64)
     runner.source_states = SimpleNamespace(
         load=AsyncMock(return_value=state),
+        snapshot=AsyncMock(
+            return_value=SourceStateSnapshot("source-state/test.json", b"{}", "etag")
+        ),
         record=AsyncMock(),
     )
     runner._state_has_live_publication = AsyncMock(return_value=True)
@@ -246,6 +251,8 @@ async def test_daily_binding_persists_validation_digest_to_source_state() -> Non
         metadata,
         "generation",
         validation_digest="approved-validation",
+        pending_cleanup=(),
+        expected_etag="etag",
     )
 
 

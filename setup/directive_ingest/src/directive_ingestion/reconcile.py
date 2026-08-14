@@ -1032,11 +1032,20 @@ class DirectiveIngestionRunner:
                 )
             if state.validation_digest == validation_digest:
                 continue
+            snapshot = await self.source_states.snapshot(
+                item.source, self.config.processing_hash
+            )
+            if snapshot is None:
+                raise RuntimeError(
+                    "Source-state changed while binding validation approval"
+                )
             await self.source_states.record(
                 item.source,
                 state.directive_metadata,
                 state.artifact_generation_id,
+                pending_cleanup=state.pending_cleanup,
                 validation_digest=validation_digest,
+                expected_etag=snapshot.etag,
             )
 
     async def publish_mandates(
