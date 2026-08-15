@@ -10,6 +10,22 @@ from .artifacts import (
     section_content_item_id,
     serialized_json_size,
 )
+from ._identity import (
+    DIRECTIVE_VERSION_ID_PREFIX,
+    MAX_DIRECTIVE_ID_LENGTH,
+    MAX_DIRECTIVE_VERSION_ID_LENGTH,
+    MAX_DIRECTIVE_VERSION_LENGTH,
+    build_directive_version_id,
+    directive_storage_key,
+    directive_version_storage_key,
+    mandate_assignment_item_id,
+    normalize_directive_id,
+    normalize_directive_version,
+    published_directive_version_item_id,
+    source_fingerprint,
+    validate_directive_version_id,
+    validate_published_directive_version_item_id,
+)
 from .models import (
     DirectiveArtifactLocators,
     DirectiveChunk,
@@ -26,10 +42,8 @@ from .models import (
     ReviewFinding,
 )
 from .source_files import (
-    DIRECTIVE_SOURCE_FILENAME_PATTERN,
-    DirectiveSourceIdentity,
     normalize_directive_source_prefix,
-    parse_directive_source_filename,
+    validate_directive_source_basename,
 )
 
 __all__ = [
@@ -44,8 +58,10 @@ __all__ = [
     "DirectiveSectionContent",
     "DirectiveSectionContentDescriptor",
     "DirectiveSummary",
-    "DirectiveSourceIdentity",
-    "DIRECTIVE_SOURCE_FILENAME_PATTERN",
+    "DIRECTIVE_VERSION_ID_PREFIX",
+    "MAX_DIRECTIVE_ID_LENGTH",
+    "MAX_DIRECTIVE_VERSION_ID_LENGTH",
+    "MAX_DIRECTIVE_VERSION_LENGTH",
     "MandateAssignment",
     "MandateSnapshot",
     "PublishedDirectiveVersion",
@@ -54,8 +70,18 @@ __all__ = [
     "calculate_artifact_generation_id",
     "canonical_json_bytes",
     "canonical_json_hash",
+    "build_directive_version_id",
+    "directive_storage_key",
+    "directive_version_storage_key",
+    "mandate_assignment_item_id",
+    "normalize_directive_id",
+    "normalize_directive_version",
     "normalize_directive_source_prefix",
-    "parse_directive_source_filename",
+    "published_directive_version_item_id",
     "section_content_item_id",
     "serialized_json_size",
+    "source_fingerprint",
+    "validate_directive_source_basename",
+    "validate_directive_version_id",
+    "validate_published_directive_version_item_id",
 ]

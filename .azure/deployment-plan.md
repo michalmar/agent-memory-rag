@@ -6,6 +6,91 @@
 
 Generated: 2026-07-25T20:33:12Z
 
+## Current release: directive document processing v2
+
+Deployed and verified: 2026-08-15
+
+This release destructively rebuilds only derived directive data from the
+preserved `directive-source` corpus. It deploys the v2 ingestion runtime,
+publishes to `directive-chunks-v2`, and deletes the complete legacy
+`directive-kb-v1` -> `directive-chunks-ks-v1` -> `directive-chunks-v1` graph
+only after fresh cross-store verification succeeds.
+
+### Validation steps
+
+- [x] Run complete ingestion, contracts, backend, and frontend test suites.
+- [x] Build the frontend production bundle.
+- [x] Validate Terraform formatting and syntax.
+- [x] Run Bash 3.2 infrastructure guards, Bash syntax, and ShellCheck.
+- [x] Confirm the exact Azure subscription, tenant, resource group, storage
+      account, source corpus, and ingestion job.
+- [x] Confirm no ingestion execution is active.
+- [x] Produce and review a saved Terraform cutover plan.
+- [x] Verify the plan contains no delete or replacement action.
+- [x] Statically verify the operator's source-container reader assignment.
+- [x] Confirm the guarded reset preserves `directive-source`.
+- [x] Approve an explicitly empty mandate mapping for the initial two-PDF
+      rollout.
+
+### Validation proof
+
+Validated at `2026-08-15T06:23:22Z`.
+
+| Check | Result |
+| --- | --- |
+| Toolchain and authentication | Target subscription `7bc68c68-f434-49ad-ab3e-b883ec39da86`, tenant `a7b1484c-f66a-496a-b1cf-35631a50396c`, and isolated Azure CLI profile confirmed |
+| Integrated review | Final integration tip `d555543195c13cab3f545d7fa1a83866366202a6`; independent code review approved |
+| Ingestion and contracts | 157 ingestion, 20 directive-contract, and 6 agent-contract tests passed |
+| Backend | 175 tests and 30 subtests passed |
+| Frontend | 40 tests, TypeScript compilation, and Vite production build passed |
+| Infrastructure | Terraform format/validate, Bash 3.2 guards, Bash syntax, directive-script ShellCheck, and `git diff --check` passed |
+| Source corpus | 2 PDFs, 365,420 bytes total; source container is preserved |
+| Job safety | 0 active executions; current job is manual and will be moved to nonpublishing `maintenance` mode |
+| Saved cutover plan | 1 create, 2 updates, 0 deletes, 0 replacements |
+| Planned resources | Backend Search index to `directive-chunks-v2`; ingestion job to `maintenance` with `directive-v2-czech-layout` and `directive-chunks-v2`; add operator `Storage Blob Data Reader` on `directive-source` |
+| Excluded drift | Resource-group tag and storage-network drift are excluded from this cutover plan |
+| Plan integrity | SHA-256 `61f3617bf8c1ff4d2bc78e82dc29f0774c86b66221a9e67630d695e51de8596d` |
+| Mandates | Explicit empty mapping approved for this rollout |
+| Container build limit | Local Docker daemon unavailable; static Docker-context/import checks passed and immutable ACR build is required during deployment |
+
+**Saved plan:**
+`/Users/mimarusa/.copilot/session-state/d55001a6-b789-4936-a5b1-c2fcceeb558c/files/directive-v2-cutover.tfplan`
+
+**Validated by:** `azure-validate`
+
+### Deployment sequence
+
+1. [x] Apply only the saved cutover plan above.
+2. [x] Build and pin the v2 ingestion image in ACR.
+3. [x] Run managed-identity `preflight`, metadata-only `validate`, and inspect
+   the normalized IDs and warnings.
+4. [x] Run the guarded derived-data reset while preserving `directive-source`.
+5. [x] Publish once with the approved empty mandate mapping.
+6. [x] Run two fresh pinned cross-store verifications and smoke tests.
+7. [x] Prove a second unchanged run performs no paid or publication work.
+8. [x] Delete the complete v1 Search graph only through guarded finalize.
+
+### Deployment proof
+
+Verified on 2026-08-15 UTC.
+
+| Item | Result |
+| --- | --- |
+| Published corpus | `MP/23/0141:v1` and `MP/25/0277:v1.1` |
+| Search | `directive-chunks-v2` contains exactly 45 documents; all 45 are current |
+| Cross-store state | 2 catalog versions, 2 current pointers, 82 content records, 4 required artifacts, and 2 source-state records |
+| Mandates | Active empty snapshot, 0 assignments, checksum `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| Source protection | The 2 approved PDFs remain unchanged at 183,445 and 181,975 bytes |
+| Validation digest | `79421579a91668b58ad89f6a419aaf0220f9d90d55554bafe9048232b7dba22c` |
+| Published state digest | `a62d5c8bb6a2c0ace77ccab451eb0ba9415531c5f62b5d3980cfa59d9c2d8c30` |
+| Idempotency | Unchanged rerun skipped both sources with 0 changed documents and no mandate change |
+| Ingestion | Image `sha256:1262bfb27657b5c89a5b26fa2e9a787e45a56fbcb341d02e65236422dbab2709`; job remains `directive-ingest maintenance` |
+| Backend | Revision `ca-agmem-backend--0000063` on `sha256:f1c7c8a841377d259a736eb732e19dff94a57bc1e1f20be1b9f96584816d05c5`, healthy and latest-ready |
+| Frontend | Revision `ca-agmem-frontend--0000030` on `sha256:478478382ee418e807eb8d05078b4e3dc92ad4ba3f3f04516af96bae97fbe50e`, healthy and latest-ready |
+| Directive Hosted Agent | Version 5 active on `sha256:9fa233316235d92a03026538a5e72c9f91eeb85aad043985e2eb774a0d3ff557` |
+| Live acceptance | Readiness, both exact Markdown/PDF routes, weak-ETag `304`, and the authenticated directive-agent chat path succeeded |
+| Legacy cleanup | `directive-kb-v1`, `directive-chunks-ks-v1`, and `directive-chunks-v1` are absent; v2 remains present |
+
 ## Current release: Hosted Agent readiness deadlock
 
 Deployed: 2026-08-14

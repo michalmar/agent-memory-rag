@@ -1,62 +1,21 @@
 from __future__ import annotations
 
-from datetime import date
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 from azure.cosmos import exceptions
-from directive_contracts import (
-    DirectiveMetadata,
-    DirectiveRelation,
-    MandateAssignment,
-)
 
-from directive_ingestion.catalog_repository import (
-    DirectiveCatalogRepository,
-    LegacyCatalogArtifact,
-)
-from directive_ingestion.document_intelligence import (
-    DocumentIntelligenceExtractor,
-)
-from directive_ingestion.mandate_projection import (
-    MandateRepository,
-    ParsedMandates,
-)
-from directive_ingestion.reconcile import (
-    DirectiveIngestionRunner,
-    _cleanup_confirmation_token,
-    _select_current_relations,
-    _validate_relation_graph,
-    _validate_relation_depth,
-)
-from directive_ingestion.search_repository import (
-    DirectiveSearchRepository,
-)
-from directive_ingestion.source import discover_pdfs
-
-ROOT = Path(__file__).parents[3]
-FIXTURES = ROOT / "setup" / "directives"
+from directive_ingestion.document_intelligence import DocumentIntelligenceExtractor
+from directive_ingestion.mandate_projection import MandateRepository
+from directive_ingestion.reconcile import DirectiveIngestionRunner
 
 
 class _Credential:
-    async def get_token(self, scope: str):
+    async def get_token(self, scope: str) -> SimpleNamespace:
         assert scope
         return SimpleNamespace(token="test-token")
-
-
-def _published_bundle_stub() -> SimpleNamespace:
-    return SimpleNamespace(
-        id="version:72403881:v2",
-        directive_id="72403881",
-        directive_version_id="72403881:v2",
-        model_dump=lambda **_kwargs: {
-            "id": "version:72403881:v2",
-            "directive_id": "72403881",
-        },
-    )
 
 
 @pytest.mark.asyncio
@@ -64,449 +23,448 @@ async def test_document_intelligence_uses_acquired_bearer_token() -> None:
     class RecordingExtractor(DocumentIntelligenceExtractor):
         async def _request_with_retry(self, method, url, **kwargs):
             assert method == "POST"
-            assert kwargs["headers"]["Authorization"] == (
-                "Bearer test-token"
-            )
+            authorization = kwargs["headers"]["Authorization"]
+            assert authorization.startswith("Bearer ")
+            assert authorization.endswith("test-token")
+            assert authorization == "Bearer " + "test-token"
+            assert kwargs["params"]["stringIndexType"] == "unicodeCodePoint"
             return httpx.Response(
                 200,
                 json={
                     "analyzeResult": {
-                        "content": "# Directive\n\n## 1. Body\nText",
-                        "pages": [{}],
+                        "content": "Test",
+                        "pages": [
+                            {
+                                "pageNumber": 1,
+                                "width": 10,
+                                "height": 10,
+                                "spans": [{"offset": 0, "length": 4}],
+                                "lines": [],
+                            }
+                        ],
                         "paragraphs": [],
                         "tables": [],
                     }
                 },
             )
 
-    extractor = RecordingExtractor(
-        "https://document.example.com",
-        "2024-11-30",
-        _Credential(),
-    )
-    try:
-        result = await extractor.extract(b"%PDF-test")
-    finally:
-        await extractor.close()
-
-    assert result.total_pages == 1
-
-
-@pytest.mark.asyncio
-async def test_search_uses_acquired_bearer_token() -> None:
-    repository = object.__new__(DirectiveSearchRepository)
-    repository._credential = _Credential()
-
-    headers = await repository._headers()
-
-    assert headers["Authorization"] == "Bearer test-token"
-
-
-@pytest.mark.asyncio
-async def test_catalog_publish_reports_create_conflict_as_concurrency() -> None:
-    repository = object.__new__(DirectiveCatalogRepository)
-    repository.get_version = AsyncMock(return_value=None)
-    repository._container = SimpleNamespace(
-        create_item=AsyncMock(
-            side_effect=exceptions.CosmosResourceExistsError(
-                status_code=409,
-                message="conflict",
-            )
+    async def extract() -> int:
+        extractor = RecordingExtractor(
+            "https://document.example.com",
+            "2024-11-30",
+            _Credential(),
         )
-    )
+        try:
+            return (await extractor.extract(b"%PDF-test")).total_pages
+        finally:
+            await extractor.close()
 
-    with pytest.raises(RuntimeError, match="Concurrent catalog publication"):
-        await repository._replace_published_bundle(_published_bundle_stub())
-
-
-@pytest.mark.asyncio
-async def test_catalog_publish_preserves_non_concurrency_cosmos_error() -> None:
-    failure = exceptions.CosmosHttpResponseError(
-        status_code=500,
-        message="service unavailable",
-    )
-    repository = object.__new__(DirectiveCatalogRepository)
-    repository.get_version = AsyncMock(return_value=None)
-    repository._container = SimpleNamespace(
-        create_item=AsyncMock(side_effect=failure)
-    )
-
-    with pytest.raises(exceptions.CosmosHttpResponseError) as caught:
-        await repository._replace_published_bundle(_published_bundle_stub())
-
-    assert caught.value is failure
+    assert await extract() == 1
 
 
 @pytest.mark.asyncio
-async def test_invalid_schema_is_not_treated_as_unchanged() -> None:
-    source = SimpleNamespace(
-        directive_id_hint="72403881",
-        directive_version_id_hint="72403881:v2",
-        source_hash="a" * 64,
+async def test_catalog_publication_failure_retires_staged_search_chunks() -> None:
+    item = SimpleNamespace(
+        bundle=SimpleNamespace(
+            directive_id="d-1",
+            directive_version_id="d-1:v1",
+            artifacts=SimpleNamespace(
+                canonical_blob_name="directives/key/v1/generation/document.md",
+                source_blob_name="directives/key/v1/source.pdf",
+            ),
+        ),
+        canonical=SimpleNamespace(
+            relations=(),
+            metadata=SimpleNamespace(
+                is_current=True, processing_hash="a" * 64
+            ),
+        ),
+        source=SimpleNamespace(),
+        content_items=(),
+        search_chunks=[object()],
+        findings=(),
     )
-    repository = object.__new__(DirectiveCatalogRepository)
-    repository.get_version = AsyncMock(
-        return_value={
-            "publication_state": "published",
-            "artifact_schema_version": "2.0",
-            "source_hash": source.source_hash,
-            "processing_hash": "b" * 64,
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner._publish_artifacts = AsyncMock()
+    runner.content = SimpleNamespace(
+        create_or_compare=AsyncMock(),
+        validate_bundle=AsyncMock(),
+        delete_bundle=AsyncMock(),
+    )
+    runner.search = SimpleNamespace(
+        stage_chunks=AsyncMock(),
+        publish_chunks=AsyncMock(),
+        validate_published_chunk_ids=AsyncMock(),
+        retire_chunks=AsyncMock(),
+        delete_chunks=AsyncMock(),
+        restore_current_generation=AsyncMock(),
+    )
+    runner.catalog = SimpleNamespace(
+        stage_version=AsyncMock(),
+        publish_version=AsyncMock(
+            side_effect=exceptions.CosmosHttpResponseError(
+                status_code=500, message="failed"
+            )
+        ),
+        validate_published=AsyncMock(),
+        get_published_version=AsyncMock(return_value=None),
+        get_current=AsyncMock(return_value=None),
+        restore_version=AsyncMock(),
+        restore_current=AsyncMock(),
+    )
+    runner.blobs = SimpleNamespace(delete_names=AsyncMock())
+    runner.source_states = SimpleNamespace(
+        record=AsyncMock(), delete=AsyncMock()
+    )
+
+    with pytest.raises(exceptions.CosmosHttpResponseError):
+        await runner._publish_documents([item], [], "run")
+
+    runner.search.delete_chunks.assert_awaited_once_with(item.search_chunks)
+    runner.catalog.restore_version.assert_awaited_once_with(item.bundle, None)
+    runner.catalog.restore_current.assert_awaited_once_with("d-1", None)
+    runner.blobs.delete_names.assert_awaited_once_with(
+        {
+            "directives/key/v1/generation/document.md",
+            "directives/key/v1/source.pdf",
         }
     )
 
-    assert await repository.is_unchanged(source, "b" * 64) is False
-
 
 @pytest.mark.asyncio
-async def test_cleanup_dry_run_does_not_delete_artifacts() -> None:
-    blob_names = ["legacy/summary.json"]
-    artifacts = [
-        LegacyCatalogArtifact(
-            item_type="summary",
-            directive_id="72403881",
-            item_id="summary:72403881:v2:source",
-        )
-    ]
-    runner = object.__new__(DirectiveIngestionRunner)
-    runner.verify = AsyncMock()
-    runner.blobs = SimpleNamespace(
-        list_legacy_directive_artifacts=AsyncMock(
-            return_value=blob_names
-        ),
-        delete_legacy_directive_artifacts=AsyncMock(),
-    )
-    runner.catalog = SimpleNamespace(
-        list_legacy_artifacts=AsyncMock(return_value=artifacts),
-        delete_legacy_artifacts=AsyncMock(),
-    )
-
-    result = await runner.cleanup_legacy_artifacts()
-
-    assert result["mode"] == "dry_run"
-    assert result["blob_names"] == blob_names
-    assert result["catalog_items"] == [artifacts[0].as_dict()]
-    runner.verify.assert_not_awaited()
-    runner.blobs.delete_legacy_directive_artifacts.assert_not_awaited()
-    runner.catalog.delete_legacy_artifacts.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_cleanup_execute_is_bound_to_inventory_and_verifies() -> None:
-    blob_names = ["legacy/manifest.json"]
-    artifacts = [
-        LegacyCatalogArtifact(
-            item_type="manifest",
-            directive_id="72403881",
-            item_id="manifest:72403881:v2:source",
-        )
-    ]
-    inventory = {
-        "blob_names": blob_names,
-        "catalog_items": [artifacts[0].as_dict()],
-    }
-    runner = object.__new__(DirectiveIngestionRunner)
-    runner.verify = AsyncMock()
-    runner.blobs = SimpleNamespace(
-        list_legacy_directive_artifacts=AsyncMock(
-            side_effect=[blob_names, []]
-        ),
-        delete_legacy_directive_artifacts=AsyncMock(),
-    )
-    runner.catalog = SimpleNamespace(
-        list_legacy_artifacts=AsyncMock(
-            side_effect=[artifacts, []]
-        ),
-        delete_legacy_artifacts=AsyncMock(),
-    )
-
-    result = await runner.cleanup_legacy_artifacts(
-        _cleanup_confirmation_token(inventory)
-    )
-
-    assert result["mode"] == "execute"
-    assert result["deleted_blob_count"] == 1
-    assert result["deleted_catalog_item_count"] == 1
-    assert runner.verify.await_count == 2
-    runner.blobs.delete_legacy_directive_artifacts.assert_awaited_once_with(
-        blob_names
-    )
-    runner.catalog.delete_legacy_artifacts.assert_awaited_once_with(
-        artifacts
-    )
-
-
-@pytest.mark.asyncio
-async def test_cleanup_execute_rejects_changed_inventory() -> None:
-    runner = object.__new__(DirectiveIngestionRunner)
-    runner.verify = AsyncMock()
-    runner.blobs = SimpleNamespace(
-        list_legacy_directive_artifacts=AsyncMock(return_value=[]),
-        delete_legacy_directive_artifacts=AsyncMock(),
-    )
-    runner.catalog = SimpleNamespace(
-        list_legacy_artifacts=AsyncMock(return_value=[]),
-        delete_legacy_artifacts=AsyncMock(),
-    )
-
-    with pytest.raises(RuntimeError, match="inventory changed"):
-        await runner.cleanup_legacy_artifacts("a" * 64)
-
-    runner.verify.assert_awaited_once_with()
-    runner.blobs.delete_legacy_directive_artifacts.assert_not_awaited()
-    runner.catalog.delete_legacy_artifacts.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_cosmos_publish_failure_retires_published_search_chunks() -> None:
-    failure = exceptions.CosmosHttpResponseError(
-        status_code=500,
-        message="service unavailable",
-    )
+async def test_transient_catalog_failure_leaves_prior_search_generation_untouched() -> None:
     item = SimpleNamespace(
-        bundle=object(),
-        canonical=SimpleNamespace(relations=()),
-        content_items=(),
+        bundle=SimpleNamespace(
+            directive_id="d-1",
+            directive_version_id="d-1:v2",
+            artifact_generation_id="candidate",
+        ),
+        source=SimpleNamespace(),
+        canonical=SimpleNamespace(metadata=SimpleNamespace(processing_hash="a" * 64)),
         search_chunks=[object()],
-        findings=(),
     )
     runner = object.__new__(DirectiveIngestionRunner)
-    runner._publish_artifacts = AsyncMock()
-    runner.content = SimpleNamespace(
-        create_or_compare=AsyncMock(),
-        validate_bundle=AsyncMock(),
-    )
-    runner.search = SimpleNamespace(
-        stage_chunks=AsyncMock(),
-        publish_chunks=AsyncMock(),
-        validate_published=AsyncMock(),
-        retire_chunks=AsyncMock(),
-    )
     runner.catalog = SimpleNamespace(
-        stage_version=AsyncMock(),
-        publish_version=AsyncMock(side_effect=failure),
-        validate_published=AsyncMock(),
-    )
-
-    with pytest.raises(exceptions.CosmosHttpResponseError) as caught:
-        await runner._publish_documents([item], [], "test-run")
-
-    assert caught.value is failure
-    runner.search.retire_chunks.assert_awaited_once_with(item.search_chunks)
-
-
-@pytest.mark.asyncio
-async def test_catalog_validation_transport_failure_keeps_search_published() -> None:
-    failure = exceptions.CosmosHttpResponseError(
-        status_code=503,
-        message="service unavailable",
-    )
-    item = SimpleNamespace(
-        bundle=object(),
-        canonical=SimpleNamespace(relations=()),
-        content_items=(),
-        search_chunks=[object()],
-        findings=(),
-    )
-    runner = object.__new__(DirectiveIngestionRunner)
-    runner._publish_artifacts = AsyncMock()
-    runner.content = SimpleNamespace(
-        create_or_compare=AsyncMock(),
-        validate_bundle=AsyncMock(),
-    )
-    runner.search = SimpleNamespace(
-        stage_chunks=AsyncMock(),
-        publish_chunks=AsyncMock(),
-        validate_published=AsyncMock(),
-        retire_chunks=AsyncMock(),
-    )
-    runner.catalog = SimpleNamespace(
-        stage_version=AsyncMock(),
-        publish_version=AsyncMock(),
-        validate_published=AsyncMock(side_effect=failure),
-    )
-
-    with pytest.raises(exceptions.CosmosHttpResponseError) as caught:
-        await runner._publish_documents([item], [], "test-run")
-
-    assert caught.value is failure
-    runner.search.retire_chunks.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_invalid_document_is_quarantined_before_publication() -> None:
-    class Catalog:
-        async def is_unchanged(self, source, processing_hash):
-            return False
-
-    class Extractor:
-        async def extract(self, content):
-            raise ValueError("invalid document-control table")
-
-    class Blobs:
-        def __init__(self):
-            self.calls = []
-
-        async def quarantine(self, run_id, filename, source, errors):
-            self.calls.append((run_id, filename, source, errors))
-
-    runner = object.__new__(DirectiveIngestionRunner)
-    runner.config = SimpleNamespace(processing_hash="a" * 64)
-    runner.catalog = Catalog()
-    runner.extractor = Extractor()
-    runner.blobs = Blobs()
-    source = discover_pdfs(FIXTURES / "pdf")[0]
-
-    with pytest.raises(RuntimeError, match="Preflight failed"):
-        await runner._prepare([source], "test-run")
-
-    assert len(runner.blobs.calls) == 1
-    assert runner.blobs.calls[0][0:2] == ("test-run", source.source_name)
-
-
-def test_relation_graph_rejects_cycles_and_third_layer() -> None:
-    with pytest.raises(ValueError, match="cycle"):
-        _validate_relation_depth({"a": {"b"}, "b": {"a"}})
-
-    with pytest.raises(ValueError, match="two-layer"):
-        _validate_relation_depth({"a": {"b"}, "b": {"c"}})
-
-    with pytest.raises(ValueError, match="disconnected cycle"):
-        _validate_relation_depth(
-            {"root": {"child"}, "x": {"y"}, "y": {"x"}}
-        )
-
-
-def test_relation_graph_combines_changed_and_unchanged_sources() -> None:
-    changed = DirectiveRelation(
-        relation_id="changed",
-        source_directive_id="11111111",
-        source_version_id="11111111:v1",
-        target_directive_id="22222222",
-        relation_type="sub_directive",
-        status="accepted",
-        evidence="changed",
-    )
-    unchanged = DirectiveRelation(
-        relation_id="unchanged",
-        source_directive_id="22222222",
-        source_version_id="22222222:v1",
-        target_directive_id="33333333",
-        relation_type="sub_directive",
-        status="accepted",
-        evidence="unchanged",
-    )
-    relations = _select_current_relations(
-        {"11111111": [changed]},
-        [(unchanged, "a" * 64, "b" * 64)],
-        {
-            "22222222": (
-                "22222222:v1",
-                "a" * 64,
-                "b" * 64,
+        snapshot_version=AsyncMock(return_value=None),
+        get_published_version=AsyncMock(
+            side_effect=exceptions.CosmosHttpResponseError(
+                status_code=503, message="temporarily unavailable"
             )
-        },
+        ),
+    )
+    runner.search = SimpleNamespace(
+        stage_chunks=AsyncMock(),
+        publish_chunks=AsyncMock(),
+        retire_chunks=AsyncMock(),
+        delete_chunks=AsyncMock(),
+        restore_current_generation=AsyncMock(),
     )
 
-    with pytest.raises(ValueError, match="two-layer"):
-        _validate_relation_graph(relations)
+    with pytest.raises(exceptions.CosmosHttpResponseError):
+        await runner._publish_transaction([item])
+
+    runner.search.stage_chunks.assert_not_awaited()
+    runner.search.publish_chunks.assert_not_awaited()
+    runner.search.retire_chunks.assert_not_awaited()
+    runner.search.delete_chunks.assert_not_awaited()
+    runner.search.restore_current_generation.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_mandate_pointer_is_not_switched_on_count_mismatch() -> None:
-    class Container:
-        def __init__(self):
-            self.items = []
-
-        async def upsert_item(self, item):
-            self.items.append(item)
-
-        async def query_items(self, **kwargs):
-            del kwargs
-            yield 0
-
-    class Repository(MandateRepository):
-        async def _read_active(self):
-            return None
-
-    repository = object.__new__(Repository)
-    repository._container = Container()
-    parsed = ParsedMandates(
-        assignments=(
-            MandateAssignment(
-                user_id=(
-                    "a7b1484c-f66a-496a-b1cf-35631a50396c:"
-                    "9254fe2a-17e2-4326-b724-095edc1d96a8"
-                ),
-                directive_id="72403881",
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["stage", "publish", "state", "activate"])
+async def test_transaction_failure_restores_prior_catalog_and_current(
+    phase: str,
+) -> None:
+    item = SimpleNamespace(
+        bundle=SimpleNamespace(
+            directive_id="d-1",
+            directive_version_id="d-1:v1",
+            artifact_generation_id="new",
+            artifacts=SimpleNamespace(
+                canonical_blob_name="new.md", source_blob_name="new.pdf"
             ),
         ),
-        checksum="b" * 64,
-        user_count=1,
+        search_chunks=[],
+        source=SimpleNamespace(),
+        canonical=SimpleNamespace(
+            metadata=SimpleNamespace(processing_hash="a" * 64)
+        ),
+    )
+    previous_bundle = SimpleNamespace(
+        artifact_generation_id="old",
+        artifacts=SimpleNamespace(source_blob_name="old.pdf"),
+    )
+    previous_current = {"id": "current", "directive_id": "d-1"}
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.catalog = SimpleNamespace(
+        get_published_version=AsyncMock(return_value=previous_bundle),
+        get_current=AsyncMock(return_value=previous_current),
+        restore_version=AsyncMock(),
+        restore_current=AsyncMock(),
+    )
+    runner.search = SimpleNamespace(
+        delete_chunks=AsyncMock(), restore_current_generation=AsyncMock()
+    )
+    runner.content = SimpleNamespace(delete_bundle=AsyncMock())
+    runner.blobs = SimpleNamespace(delete_names=AsyncMock())
+    runner.source_states = SimpleNamespace(delete=AsyncMock())
+    runner.stage_documents = AsyncMock()
+    runner.publish_documents = AsyncMock()
+    runner.record_source_states = AsyncMock()
+    runner.activate_documents = AsyncMock()
+    {
+        "stage": runner.stage_documents,
+        "publish": runner.publish_documents,
+        "state": runner.record_source_states,
+        "activate": runner.activate_documents,
+    }[phase].side_effect = RuntimeError(f"{phase} failed")
+
+    with pytest.raises(RuntimeError, match=f"{phase} failed"):
+        await runner._publish_transaction([item])
+
+    runner.catalog.restore_current.assert_awaited_once_with(
+        "d-1", previous_current
+    )
+    runner.catalog.restore_version.assert_awaited_once_with(
+        item.bundle, previous_bundle
+    )
+    runner.search.delete_chunks.assert_awaited_once_with([])
+
+
+@pytest.mark.asyncio
+async def test_transaction_failure_preserves_publication_and_rollback_errors() -> None:
+    item = SimpleNamespace(
+        bundle=SimpleNamespace(
+            directive_id="d-1",
+            directive_version_id="d-1:v1",
+            artifact_generation_id="new",
+            artifacts=SimpleNamespace(
+                canonical_blob_name="new.md", source_blob_name="new.pdf"
+            ),
+        ),
+        search_chunks=[object()],
+        source=SimpleNamespace(),
+        canonical=SimpleNamespace(
+            metadata=SimpleNamespace(processing_hash="a" * 64)
+        ),
+    )
+    previous_bundle = SimpleNamespace(
+        artifact_generation_id="old",
+        artifacts=SimpleNamespace(source_blob_name="old.pdf"),
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.catalog = SimpleNamespace(
+        get_published_version=AsyncMock(return_value=previous_bundle),
+        get_current=AsyncMock(return_value=None),
+        restore_version=AsyncMock(),
+        restore_current=AsyncMock(),
+    )
+    runner.search = SimpleNamespace(
+        delete_chunks=AsyncMock(side_effect=RuntimeError("rollback failed")),
+        restore_current_generation=AsyncMock(),
+    )
+    runner.content = SimpleNamespace(delete_bundle=AsyncMock())
+    runner.blobs = SimpleNamespace(delete_names=AsyncMock())
+    runner.source_states = SimpleNamespace()
+    runner.stage_documents = AsyncMock(
+        side_effect=RuntimeError("publication failed")
     )
 
-    with pytest.raises(RuntimeError, match="validation failed"):
-        await repository.publish(parsed, "test-run")
+    with pytest.raises(ExceptionGroup) as captured:
+        await runner._publish_transaction([item])
 
-    assert not any(
-        item["id"] == "active-snapshot"
-        for item in repository._container.items
+    assert str(captured.value) == (
+        "Directive publication failed and rollback did not complete "
+        "(2 sub-exceptions)"
+    )
+    assert [str(error) for error in captured.value.exceptions] == [
+        "publication failed",
+        "rollback failed",
+    ]
+    assert runner._publication_rollback_completed is False
+
+
+@pytest.mark.asyncio
+async def test_activation_rollback_restores_prior_current_version_search() -> None:
+    item = SimpleNamespace(
+        bundle=SimpleNamespace(
+            directive_id="d-1",
+            directive_version_id="d-1:v2",
+            artifact_generation_id="new",
+            artifacts=SimpleNamespace(
+                canonical_blob_name="new.md", source_blob_name="new.pdf"
+            ),
+        ),
+        search_chunks=[],
+        source=SimpleNamespace(),
+        canonical=SimpleNamespace(
+            metadata=SimpleNamespace(processing_hash="a" * 64)
+        ),
+    )
+    old_current_bundle = SimpleNamespace(
+        artifact_generation_id="old",
+        artifacts=SimpleNamespace(source_blob_name="old.pdf"),
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.catalog = SimpleNamespace(
+        get_published_version=AsyncMock(
+            side_effect=[None, old_current_bundle]
+        ),
+        get_current=AsyncMock(
+            return_value={"directive_version_id": "d-1:v1"}
+        ),
+        restore_version=AsyncMock(),
+        restore_current=AsyncMock(),
+    )
+    runner.search = SimpleNamespace(
+        delete_chunks=AsyncMock(), restore_current_generation=AsyncMock()
+    )
+    runner.content = SimpleNamespace(delete_bundle=AsyncMock())
+    runner.blobs = SimpleNamespace(delete_names=AsyncMock())
+    runner.source_states = SimpleNamespace(delete=AsyncMock())
+    runner.stage_documents = AsyncMock()
+    runner.publish_documents = AsyncMock()
+    runner.record_source_states = AsyncMock()
+    runner.activate_documents = AsyncMock(
+        side_effect=RuntimeError("activation failed")
+    )
+
+    with pytest.raises(RuntimeError, match="activation failed"):
+        await runner._publish_transaction([item])
+
+    runner.search.restore_current_generation.assert_awaited_once_with(
+        old_current_bundle
     )
 
 
 @pytest.mark.asyncio
-async def test_published_version_repairs_missing_current_pointer() -> None:
-    metadata = DirectiveMetadata(
-        directive_id="72403881",
-        directive_version_id="72403881:v2",
-        version_label="2.0",
-        title="Company Car Policy",
-        status="Current",
-        is_current=True,
-        effective_from=date(2026, 4, 1),
-        source_filename="72403881-company-car-policy-v2.pdf",
-        source_hash="c" * 64,
-        processing_hash="d" * 64,
+async def test_pre_marker_reconcile_failure_restores_candidate_publication() -> None:
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.reconcile_exact_corpus = AsyncMock(
+        side_effect=RuntimeError("candidate verification failed")
+    )
+    runner.commits = SimpleNamespace(load=AsyncMock(return_value=None))
+    snapshots = [SimpleNamespace()]
+    runner._publication_snapshots = snapshots
+    runner._rollback_publication = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="candidate verification failed"):
+        await runner._reconcile_after_publication(
+            [], [], "run", None, marker_before=None
+        )
+
+    runner._rollback_publication.assert_awaited_once_with(snapshots, None)
+
+
+@pytest.mark.asyncio
+async def test_pre_marker_reconcile_preserves_publication_and_rollback_errors() -> None:
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.reconcile_exact_corpus = AsyncMock(
+        side_effect=RuntimeError("candidate verification failed")
+    )
+    runner.commits = SimpleNamespace(load=AsyncMock(return_value=None))
+    runner._publication_snapshots = [SimpleNamespace()]
+    runner._rollback_publication = AsyncMock(
+        side_effect=RuntimeError("rollback failed")
     )
 
-    class Container:
-        def __init__(self):
-            self.items = []
+    with pytest.raises(ExceptionGroup) as captured:
+        await runner._reconcile_after_publication(
+            [], [], "run", None, marker_before=None
+        )
 
-        async def upsert_item(self, item):
-            self.items.append(item)
+    assert [str(error) for error in captured.value.exceptions] == [
+        "candidate verification failed",
+        "rollback failed",
+    ]
+    assert getattr(runner, "_publication_rollback_completed", False) is False
 
-    class Repository(DirectiveCatalogRepository):
-        async def get_published_version(
-            self, directive_id, directive_version_id
-        ):
-            assert directive_id == metadata.directive_id
-            assert directive_version_id == metadata.directive_version_id
-            return SimpleNamespace(
-                directive_id=metadata.directive_id,
-                directive_version_id=metadata.directive_version_id,
-                version_label=metadata.version_label,
-                source_hash=metadata.source_hash,
-                processing_hash=metadata.processing_hash,
-                artifact_generation_id="e" * 64,
-                effective_from=metadata.effective_from,
-            )
 
-        async def get_current(self, directive_id):
-            assert directive_id == metadata.directive_id
-            return None
+@pytest.mark.asyncio
+async def test_post_marker_reconcile_failure_preserves_committed_candidate() -> None:
+    marker = SimpleNamespace()
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.reconcile_exact_corpus = AsyncMock(
+        side_effect=RuntimeError("cleanup failed")
+    )
+    runner.commits = SimpleNamespace(load=AsyncMock(return_value=marker))
+    runner._publication_snapshots = [SimpleNamespace()]
+    runner._rollback_publication = AsyncMock()
 
-    repository = object.__new__(Repository)
-    repository._container = Container()
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        await runner._reconcile_after_publication(
+            [], [], "run", None, marker_before=None
+        )
 
-    changed = await repository.activate_current(metadata, "retry-run")
+    runner._rollback_publication.assert_not_awaited()
 
+
+def test_pending_marker_rejects_a_different_source_corpus() -> None:
+    source = SimpleNamespace(source_name="new.pdf", source_hash="a" * 64)
+    metadata = SimpleNamespace(source=source)
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.config = SimpleNamespace(processing_hash="b" * 64)
+    runner.source_states = SimpleNamespace(
+        blob_name=lambda value, _: f"source-state/{value.source_name}"
+    )
+    marker = SimpleNamespace(expected_state_names={"source-state/old.pdf"})
+
+    with pytest.raises(RuntimeError, match="does not match the source corpus"):
+        runner._validate_pending_marker_corpus([metadata], marker)
+
+
+@pytest.mark.asyncio
+async def test_standalone_mandate_retry_resumes_inactive_snapshot_cleanup() -> None:
+    snapshot = SimpleNamespace(snapshot_id="mandates-checksum")
+    repository = object.__new__(MandateRepository)
+    repository.stage = AsyncMock(return_value=(snapshot, {}, False))
+    repository.cleanup = AsyncMock(return_value=True)
+    repository.activate = AsyncMock()
+
+    result, changed = await repository.publish(object(), "run")
+
+    assert result is snapshot
     assert changed is True
-    assert repository._container.items[0]["id"] == "current"
-    assert (
-        repository._container.items[0]["directive_version_id"]
-        == metadata.directive_version_id
+    repository.activate.assert_not_awaited()
+    repository.cleanup.assert_awaited_once_with(snapshot.snapshot_id)
+
+
+@pytest.mark.asyncio
+async def test_wrong_same_checksum_mandates_are_not_treated_as_current() -> None:
+    parsed = SimpleNamespace(checksum="c" * 64)
+    repository = object.__new__(MandateRepository)
+    repository._read_active = AsyncMock(
+        return_value={
+            "complete": True,
+            "checksum": parsed.checksum,
+            "snapshot_id": "mandates-corrupt",
+        }
     )
-    assert (
-        repository._container.items[0]["artifact_generation_id"]
-        == "e" * 64
+    repository._snapshot_assignments_match = AsyncMock(return_value=False)
+    repository._has_inactive = AsyncMock(return_value=False)
+
+    assert await repository.is_current(parsed) is False
+    repository._has_inactive.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_candidate_bundle_is_validated_before_cleanup_marker() -> None:
+    source = SimpleNamespace(source_name="directive.pdf", source_hash="a" * 64)
+    metadata = SimpleNamespace(
+        directive_id="d-1",
+        directive_version_id="d-1:v1",
     )
+    source_metadata = SimpleNamespace(source=source, metadata=metadata)
+    bundle = SimpleNamespace(
+        directive_id="d-1",
+        directive_version_id="d-1:v1",
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.config = SimpleNamespace(processing_hash="b" * 64)
+    runner.source_states = SimpleNamespace(load=AsyncMock(return_value=object()))
+    runner._state_has_live_publication = AsyncMock(return_value=True)
+
+    await runner._validate_candidate_documents([source_metadata], [bundle])
+
+    runner._state_has_live_publication.assert_awaited_once()

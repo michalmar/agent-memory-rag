@@ -5,6 +5,7 @@ description = "Shared contracts for the project's Foundry agent runtimes"
 requires-python = ">=3.11"
 dependencies = [
   "pydantic>=2.7.0",
+  "directive-contracts>=0.1.0",
 ]
 
 [tool.setuptools]

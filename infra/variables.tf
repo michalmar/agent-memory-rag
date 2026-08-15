@@ -255,7 +255,13 @@ variable "directive_agent_release_id" {
 
 variable "directive_search_index_name" {
   type    = string
-  default = "directive-chunks-v1"
+  default = "directive-chunks-v2"
+}
+
+variable "directive_processing_version" {
+  type        = string
+  default     = "directive-v2-czech-layout"
+  description = "Processing contract version used by the manual directive ingestion job."
 }
 
 variable "directive_cosmos_database_name" {

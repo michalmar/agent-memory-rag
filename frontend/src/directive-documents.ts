@@ -1,9 +1,11 @@
 import type { CitationSource } from './client.js';
 
-const DIRECTIVE_ID = /^\d{8}$/;
-const DIRECTIVE_VERSION_ID = /^\d{8}:v\d+(?:\.\d+)?$/;
-const RELATIVE_DIRECTIVE_PDF =
-  /(?:^|\/)(\d{8})-[^/?#]+-v(\d+(?:\.\d+)?)\.pdf(?:[?#].*)?$/i;
+const MAX_DIRECTIVE_ID_LENGTH = 128;
+const MAX_DIRECTIVE_VERSION_LENGTH = 64;
+const MAX_DIRECTIVE_VERSION_ID_LENGTH = 200;
+const DIRECTIVE_VERSION_ID_PREFIX = ':v';
+const DIRECTIVE_VERSION = /^\d+(?:\.\d+)?$/;
+const SEPARATOR_SPACING = /\s*([/._-])\s*/gu;
 
 export type DirectiveDocumentTab = 'document' | 'pdf';
 export type DirectiveDocumentLoadStatus =
@@ -59,28 +61,38 @@ export class LatestRequest {
 export function toDirectiveDocumentReference(
   citation: CitationSource,
 ): DirectiveDocumentReference | null {
-  const directiveId = citation.directive_id;
-  const directiveVersionId = citation.directive_version_id;
-  if (
-    !directiveId
-    || !directiveVersionId
-    || !DIRECTIVE_ID.test(directiveId)
-    || !DIRECTIVE_VERSION_ID.test(directiveVersionId)
-    || !directiveVersionId.startsWith(`${directiveId}:`)
-  ) {
+  if (!citation.directive_id || !citation.directive_version_id) {
     return null;
   }
-  return {
-    directiveId,
-    directiveVersionId,
-    sourceName: citation.source_name,
-    ...(citation.version_label
-      ? { versionLabel: citation.version_label }
-      : {}),
-    ...(citation.effective_from
-      ? { effectiveFrom: citation.effective_from }
-      : {}),
-  };
+  try {
+    const directiveId = normalizeDirectiveId(citation.directive_id);
+    const directiveVersionId = validateDirectiveVersionId(
+      citation.directive_version_id,
+      directiveId,
+    );
+    if (citation.version_label !== undefined) {
+      const versionLabel = normalizeDirectiveVersion(citation.version_label);
+      const versionInId = directiveVersionId.slice(
+        directiveVersionId.lastIndexOf(DIRECTIVE_VERSION_ID_PREFIX)
+        + DIRECTIVE_VERSION_ID_PREFIX.length,
+      );
+      if (versionLabel !== versionInId) return null;
+    }
+    return {
+      directiveId,
+      directiveVersionId,
+      sourceName: citation.source_name,
+      ...(citation.version_label
+        ? { versionLabel: citation.version_label }
+        : {}),
+      ...(citation.effective_from
+        ? { effectiveFrom: citation.effective_from }
+        : {}),
+    };
+  } catch (error) {
+    if (error instanceof Error) return null;
+    throw error;
+  }
 }
 
 export function toDirectiveCitationTarget(
@@ -166,48 +178,24 @@ export function sameDirectiveDocument(
   );
 }
 
-export function directiveReferenceFromPdfHref(
-  href: string,
-  sourceName: string,
-): DirectiveDocumentReference | null {
-  const value = href.trim();
-  if (
-    !value
-    || /^[a-z][a-z\d+.-]*:/i.test(value)
-    || value.startsWith('//')
-  ) {
-    return null;
-  }
-  const match = RELATIVE_DIRECTIVE_PDF.exec(value);
-  if (!match) return null;
-
-  const directiveId = match[1];
-  const versionLabel = match[2];
-  const normalizedVersion = normalizeVersionLabel(versionLabel);
-  return {
-    directiveId,
-    directiveVersionId: `${directiveId}:v${normalizedVersion}`,
-    sourceName: sourceName.trim() || `${directiveId} directive`,
-    versionLabel,
-  };
-}
-
 export function directiveDocumentPath(
   directiveId: string,
   directiveVersionId: string,
 ): string {
-  return `/directives/${encodeURIComponent(directiveId)}/versions/${encodeURIComponent(
+  return `/directives/document?${directiveQuery(
+    directiveId,
     directiveVersionId,
-  )}/document`;
+  )}`;
 }
 
 export function directiveSourcePath(
   directiveId: string,
   directiveVersionId: string,
 ): string {
-  return `/directives/${encodeURIComponent(directiveId)}/versions/${encodeURIComponent(
+  return `/directives/source?${directiveQuery(
+    directiveId,
     directiveVersionId,
-  )}/source`;
+  )}`;
 }
 
 export function pdfUrlForPage(objectUrl: string, pageFrom?: number): string {
@@ -226,11 +214,116 @@ export function isAbortError(error: unknown): boolean {
   );
 }
 
-function normalizeVersionLabel(versionLabel: string): string {
-  const [wholePart, fractionPart = ''] = versionLabel.split('.');
-  const whole = wholePart.replace(/^0+(?=\d)/, '');
+export function normalizeDirectiveId(value: string): string {
+  if (typeof value !== 'string') {
+    throw new TypeError('Directive ID must be a string');
+  }
+  let normalized = value.normalize('NFKC');
+  if (/\p{Cc}/u.test(normalized)) {
+    throw new Error('Directive ID must not contain control characters');
+  }
+  normalized = normalized.trim().replace(/\s+/gu, ' ');
+  normalized = normalized.replace(SEPARATOR_SPACING, '$1');
+  if (!normalized) {
+    throw new Error('Directive ID must not be empty');
+  }
+  if (Array.from(normalized).length > MAX_DIRECTIVE_ID_LENGTH) {
+    throw new Error(
+      `Directive ID must not exceed ${MAX_DIRECTIVE_ID_LENGTH} characters`,
+    );
+  }
+  if (normalized.includes(':')) {
+    throw new Error("Directive ID must not contain ':'");
+  }
+  if (!/^[\p{L}\p{Nd} /._-]+$/u.test(normalized)) {
+    throw new Error(
+      'Directive ID may contain only Unicode letters, digits, spaces, /._- separators',
+    );
+  }
+  return normalized;
+}
+
+export function normalizeDirectiveVersion(value: string): string {
+  if (
+    typeof value !== 'string'
+    || !value
+    || Array.from(value).length > MAX_DIRECTIVE_VERSION_LENGTH
+    || !DIRECTIVE_VERSION.test(value)
+  ) {
+    throw new Error(
+      'Directive version must match digits with an optional decimal fraction',
+    );
+  }
+  const [wholePart, fractionPart = ''] = value.split('.');
+  const normalizedWhole = wholePart.replace(/^0+/, '') || '0';
   const fraction = fractionPart.replace(/0+$/, '');
-  return fraction ? `${whole}.${fraction}` : whole;
+  return fraction ? `${normalizedWhole}.${fraction}` : normalizedWhole;
+}
+
+export function buildDirectiveVersionId(
+  directiveId: string,
+  version: string,
+): string {
+  const value = `${normalizeDirectiveId(directiveId)}${DIRECTIVE_VERSION_ID_PREFIX}${
+    normalizeDirectiveVersion(version)
+  }`;
+  if (Array.from(value).length > MAX_DIRECTIVE_VERSION_ID_LENGTH) {
+    throw new Error('Directive version ID exceeds the 200-character contract limit');
+  }
+  return value;
+}
+
+export function validateDirectiveVersionId(
+  value: string,
+  directiveId?: string,
+): string {
+  if (
+    typeof value !== 'string'
+    || !value
+    || Array.from(value).length > MAX_DIRECTIVE_VERSION_ID_LENGTH
+  ) {
+    throw new Error('Directive version ID must be 1..200 characters');
+  }
+  const marker = value.lastIndexOf(DIRECTIVE_VERSION_ID_PREFIX);
+  if (marker <= 0) {
+    throw new Error("Directive version ID must use '<directive_id>:v<version>'");
+  }
+  const embeddedId = value.slice(0, marker);
+  const embeddedVersion = value.slice(
+    marker + DIRECTIVE_VERSION_ID_PREFIX.length,
+  );
+  if (value !== buildDirectiveVersionId(embeddedId, embeddedVersion)) {
+    throw new Error('Directive version ID is not canonical');
+  }
+  if (
+    directiveId !== undefined
+    && value !== buildDirectiveVersionId(directiveId, embeddedVersion)
+  ) {
+    throw new Error('Directive version ID does not belong to directive ID');
+  }
+  return value;
+}
+
+function directiveQuery(
+  directiveId: string,
+  directiveVersionId: string,
+): string {
+  const normalizedDirectiveId = normalizeDirectiveId(directiveId);
+  const normalizedDirectiveVersionId = validateDirectiveVersionId(
+    directiveVersionId,
+    normalizedDirectiveId,
+  );
+  return new URLSearchParams({
+    directive_id: normalizedDirectiveId,
+    directive_version_id: normalizedDirectiveVersionId,
+  }).toString();
+}
+
+export function directivePdfDownloadFilename(
+  documentSourceFilename: string | undefined,
+  pdfFilename: string | null,
+): string | null {
+  return documentSourceFilename ?? pdfFilename;
 }
 
 function headingMatchesTarget(

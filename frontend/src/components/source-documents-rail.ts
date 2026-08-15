@@ -96,8 +96,9 @@ export class SourceDocumentsRail extends LightDomElement {
         <div>
           <p class="rail-eyebrow" id="source-upload-title">Add source</p>
           <p class="source-upload-note">
-            Upload a PDF named
-            <code>12345678-policy-name-v1.pdf</code>. Existing files are never
+            Upload the source PDF with its actual filename. Directive identity
+            and version are read from pages 1 and 2. Uploading or deleting a
+            source does not trigger ingestion. Existing files are never
             overwritten.
           </p>
         </div>

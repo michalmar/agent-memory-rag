@@ -1,0 +1,23 @@
+{
+  "title": "Pokyn pro testovací prostředí",
+  "lines": [
+    "Metodický pokyn č.: MK_BETA-2",
+    "Verze",
+    "2.50",
+    "Účinnost od",
+    "9.3.2027",
+    "Pokyn pro testovací prostředí"
+  ],
+  "page_two_lines": [
+    "Metodický pokyn číslo: MK_BETA - 2",
+    "Verze: 2.5",
+    "Účinnost od: 09 . 03 . 2027",
+    "Administrativní tabulka"
+  ],
+  "expected": {
+    "directive_id": "MK_BETA-2",
+    "version_label": "2.50",
+    "effective_from": "2027-03-09",
+    "first_two_pages_markdown": "### Page 1\n\nMetodický pokyn č.: MK_BETA-2\nVerze\n2.50\nÚčinnost od\n9.3.2027\nPokyn pro testovací prostředí\n\n### Page 2\n\nMetodický pokyn číslo: MK_BETA - 2\nVerze: 2.5\nÚčinnost od: 09 . 03 . 2027\nAdministrativní tabulka"
+  }
+}

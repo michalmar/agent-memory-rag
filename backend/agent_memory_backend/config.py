@@ -201,7 +201,7 @@ class Settings:
                 "DIRECTIVE_MODEL_DEPLOYMENT", "gpt-5.6-sol"
             ),
             directive_search_index=_get(
-                "DIRECTIVE_SEARCH_INDEX", "directive-chunks-v1"
+                "DIRECTIVE_SEARCH_INDEX", "directive-chunks-v2"
             ),
             directive_search_api_version=_get(
                 "DIRECTIVE_SEARCH_API_VERSION", "2026-04-01"

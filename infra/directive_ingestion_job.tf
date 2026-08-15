@@ -30,7 +30,7 @@ locals {
     DIRECTIVE_SUMMARY_DEPLOYMENT           = azurerm_cognitive_deployment.directive.name
     DIRECTIVE_SUMMARY_MODEL                = var.directive_model_name
     DIRECTIVE_MANDATE_CSV                  = "/app/fixtures/mandatory/mand.csv"
-    DIRECTIVE_PROCESSING_VERSION           = "directive-v1"
+    DIRECTIVE_PROCESSING_VERSION           = var.directive_processing_version
     DIRECTIVE_CHUNK_TOKEN_LIMIT            = "800"
     DIRECTIVE_CHUNK_OVERLAP_TOKENS         = "120"
     DIRECTIVE_SUMMARY_BATCH_TOKENS         = "60000"
@@ -134,7 +134,7 @@ resource "azurerm_container_app_job" "directive_ingestion" {
       cpu     = 1
       memory  = "2Gi"
       command = ["directive-ingest"]
-      args    = ["run-daily"]
+      args    = ["maintenance"]
 
       dynamic "env" {
         for_each = local.directive_ingestion_env

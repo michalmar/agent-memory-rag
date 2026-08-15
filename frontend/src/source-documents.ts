@@ -10,10 +10,16 @@ export const DIRECTIVE_SOURCE_RETENTION_NOTICE =
   'Previously ingested content and citations will be retained.';
 
 const DIRECTIVE_SOURCE_FILENAME =
-  /^\d{8}-[^/\\]+-v\d+(?:\.\d+)?\.pdf$/i;
+  /\.pdf$/i;
 
 export function validateDirectiveSourceFilename(filename: string): boolean {
-  return filename.length <= 255 && DIRECTIVE_SOURCE_FILENAME.test(filename);
+  return (
+    Array.from(filename).length <= 255
+    && filename !== '.'
+    && filename !== '..'
+    && DIRECTIVE_SOURCE_FILENAME.test(filename)
+    && !/[\/\\\0\p{Cc}]/u.test(filename)
+  );
 }
 
 export function directiveSourceUploadError(

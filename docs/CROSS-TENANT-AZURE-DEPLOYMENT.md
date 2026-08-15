@@ -442,6 +442,8 @@ Before apply, verify:
 - the plan contains no source-tenant IDs, endpoints, or resource names;
 - no unrelated resource is destroyed or replaced;
 - the target operator is the principal for every `deployer_*` resource;
+- `azurerm_role_assignment.deployer_directive_source_reader` is included so the
+  operator can inventory the protected `directive-source` container;
 - the plan includes the managed-identity assignments and custom Foundry
   consumer role;
 - model and Search regions match the approved capacity decision.
@@ -507,7 +509,9 @@ assignment if that license is unavailable.
 ### 10.1 Release Search, Foundry IQ, and the Prompt Agent
 
 Terraform assigns the operator the required Foundry, Search, model, and Cosmos
-data roles. After propagation:
+data roles. After propagation, the release script installs the local
+`directive_contracts` and `agent_contracts` packages into its setup environment
+and verifies both imports before configuring remote assets:
 
 ```bash
 ./scripts/release_foundry_assets.sh all

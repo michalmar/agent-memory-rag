@@ -4,11 +4,10 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
 import type { DirectiveDocument } from '../client.js';
 import {
-  directiveReferenceFromPdfHref,
   locateDirectiveHeading,
+  directivePdfDownloadFilename,
   type DirectiveCitationTarget,
   type DirectiveDocumentLoadStatus,
-  type DirectiveDocumentOpenRequest,
   type DirectiveDocumentReference,
   type DirectiveDocumentTab,
 } from '../directive-documents.js';
@@ -22,10 +21,6 @@ import { LightDomElement } from './light-dom-element.js';
 export interface DirectiveDocumentViewerActions {
   close: () => void;
   selectTab: (tab: DirectiveDocumentTab) => void;
-  openLinkedDocument: (
-    request: DirectiveDocumentOpenRequest,
-    trigger?: HTMLElement,
-  ) => void;
   retryDocument: () => void;
   retryPdf: () => void;
 }
@@ -44,6 +39,7 @@ export class DirectiveDocumentViewer extends LightDomElement {
   @property() pdfStatus: DirectiveDocumentLoadStatus = 'idle';
   @property() pdfError = '';
   @property() pdfUrl: string | null = null;
+  @property() pdfFilename: string | null = null;
   @property({ attribute: false }) actions!: DirectiveDocumentViewerActions;
   @state() private citationLocationStatus:
     'idle' | 'locating' | 'located' | 'unavailable' = 'idle';
@@ -376,7 +372,7 @@ export class DirectiveDocumentViewer extends LightDomElement {
       );
     }
     return html`
-      <article class="document-markdown" @click=${this.onMarkdownClick}>
+      <article class="document-markdown">
         ${unsafeHTML(renderSafeDirectiveMarkdown(this.document.markdown))}
       </article>
     `;
@@ -398,6 +394,10 @@ export class DirectiveDocumentViewer extends LightDomElement {
         this.actions.retryPdf,
       );
     }
+    const downloadFilename = directivePdfDownloadFilename(
+      this.document?.source_filename,
+      this.pdfFilename,
+    );
     return html`
       <div class="document-pdf">
         <div class="document-pdf-actions">
@@ -412,17 +412,18 @@ export class DirectiveDocumentViewer extends LightDomElement {
             </span>
             Open in new tab
           </a>
-          <a
-            class="secondary-button"
-            href=${this.pdfUrl}
-            download=${this.document?.source_filename
-              ?? `${this.reference?.directiveId ?? 'directive'}.pdf`}
-          >
-            <span class="material-symbols-outlined" aria-hidden="true">
-              download
-            </span>
-            Download
-          </a>
+          ${downloadFilename
+            ? html`<a
+                class="secondary-button"
+                href=${this.pdfUrl}
+                download=${downloadFilename}
+              >
+                <span class="material-symbols-outlined" aria-hidden="true">
+                  download
+                </span>
+                Download
+              </a>`
+            : nothing}
         </div>
         <iframe
           class="document-pdf-frame"
@@ -458,25 +459,6 @@ export class DirectiveDocumentViewer extends LightDomElement {
       </div>
     `;
   }
-
-  private onMarkdownClick = (event: MouseEvent): void => {
-    const target = event.target instanceof Element ? event.target : null;
-    const button = target?.closest<HTMLButtonElement>(
-      'button[data-directive-pdf-href]',
-    );
-    const href = button?.dataset.directivePdfHref;
-    if (!button || !href) return;
-
-    const reference = directiveReferenceFromPdfHref(
-      href,
-      button.textContent ?? '',
-    );
-    if (!reference) return;
-    this.actions.openLinkedDocument(
-      { reference, initialTab: 'pdf' },
-      button,
-    );
-  };
 
   private onTabKeydown(
     event: KeyboardEvent,

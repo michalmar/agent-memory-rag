@@ -17,28 +17,27 @@ from directive_contracts import (
     PublishedDirectiveVersion,
     ReviewFinding,
     canonical_json_hash,
+    published_directive_version_item_id,
     serialized_json_size,
 )
 
-from .source import SourceDocument
+from .integrity import IntegrityValidationError
+
+_SNAPSHOT_UNSET = object()
 
 
-def version_item_id(directive_version_id: str) -> str:
-    return f"version:{directive_version_id}"
+@dataclass(frozen=True)
+class CatalogSlotSnapshot:
+    """Raw stable-slot state retained for conditional restoration."""
 
-
-@dataclass(frozen=True, order=True)
-class LegacyCatalogArtifact:
-    item_type: str
     directive_id: str
-    item_id: str
+    directive_version_id: str
+    payload: dict[str, Any]
+    etag: str
 
-    def as_dict(self) -> dict[str, str]:
-        return {
-            "id": self.item_id,
-            "directive_id": self.directive_id,
-            "type": self.item_type,
-        }
+
+def version_item_id(directive_id: str, version_label: str) -> str:
+    return published_directive_version_item_id(directive_id, version_label)
 
 
 class DirectiveCatalogRepository:
@@ -64,7 +63,7 @@ class DirectiveCatalogRepository:
     ) -> dict[str, Any] | None:
         try:
             return await self._container.read_item(
-                item=version_item_id(directive_version_id),
+                item=version_item_id(directive_id, directive_version_id.rsplit(":v", 1)[1]),
                 partition_key=directive_id,
             )
         except exceptions.CosmosResourceNotFoundError:
@@ -88,25 +87,25 @@ class DirectiveCatalogRepository:
             return None
         return _validate_published_bundle(item)
 
-    async def is_unchanged(
-        self, source: SourceDocument, processing_hash: str
-    ) -> bool:
-        item = await self.get_version(
-            source.directive_id_hint, source.directive_version_id_hint
+    async def snapshot_version(
+        self, directive_id: str, directive_version_id: str
+    ) -> CatalogSlotSnapshot | None:
+        """Read a stable slot without interpreting a possibly corrupt payload."""
+        payload = await self.get_version(directive_id, directive_version_id)
+        if payload is None:
+            return None
+        etag = payload.get("_etag")
+        if not isinstance(etag, str) or not etag:
+            raise IntegrityValidationError(
+                "Catalog version is missing an ETag: "
+                f"{directive_version_id}"
+            )
+        return CatalogSlotSnapshot(
+            directive_id=directive_id,
+            directive_version_id=directive_version_id,
+            payload=dict(payload),
+            etag=etag,
         )
-        if not (
-            item
-            and item.get("publication_state") == "published"
-            and item.get("artifact_schema_version") == "2.0"
-            and item.get("source_hash") == source.source_hash
-            and item.get("processing_hash") == processing_hash
-        ):
-            return False
-        try:
-            _validate_published_bundle(item)
-        except RuntimeError:
-            return False
-        return True
 
     async def stage_version(
         self,
@@ -114,11 +113,12 @@ class DirectiveCatalogRepository:
         relations: tuple[DirectiveRelation, ...],
         findings: tuple[ReviewFinding, ...],
     ) -> None:
+        _validate_empty_relations(relations)
         now = datetime.now(UTC).isoformat()
         await self._container.upsert_item(
             {
                 "id": (
-                    f"staging:{bundle.directive_version_id}:"
+                    f"staging:{bundle.id.removeprefix('version:')}:"
                     f"{bundle.artifact_generation_id}"
                 ),
                 "type": "staging",
@@ -136,7 +136,7 @@ class DirectiveCatalogRepository:
         await self._container.upsert_item(
             {
                 "id": (
-                    f"review:{bundle.directive_version_id}:"
+                    f"review:{bundle.id.removeprefix('version:')}:"
                     f"{bundle.artifact_generation_id}"
                 ),
                 "type": "review",
@@ -156,58 +156,21 @@ class DirectiveCatalogRepository:
                 "updated_at": now,
             }
         )
-        for relation in relations:
-            await self._container.upsert_item(
-                {
-                    "id": (
-                        f"relation:{relation.relation_id}:"
-                        f"{bundle.source_hash}:"
-                        f"{bundle.processing_hash}"
-                    ),
-                    "type": "relation",
-                    "directive_id": bundle.directive_id,
-                    **relation.model_dump(mode="json"),
-                    "source_hash": bundle.source_hash,
-                    "processing_hash": bundle.processing_hash,
-                    "artifact_generation_id": bundle.artifact_generation_id,
-                    "publication_state": "staged",
-                    "run_id": bundle.run_id,
-                    "updated_at": now,
-                }
-            )
-
     async def publish_version(
         self,
         bundle: PublishedDirectiveVersion,
         relations: tuple[DirectiveRelation, ...],
-    ) -> None:
+        *,
+        expected_snapshot: CatalogSlotSnapshot | None | object = _SNAPSHOT_UNSET,
+    ) -> str:
+        _validate_empty_relations(relations)
         if serialized_json_size(bundle) > PUBLISHED_BUNDLE_MAX_BYTES:
             raise RuntimeError(
                 "Published directive bundle exceeds "
                 f"{PUBLISHED_BUNDLE_MAX_BYTES} bytes: "
                 f"{bundle.directive_version_id}"
             )
-        now = datetime.now(UTC).isoformat()
-        for relation in relations:
-            await self._container.upsert_item(
-                {
-                    "id": (
-                        f"relation:{relation.relation_id}:"
-                        f"{bundle.source_hash}:"
-                        f"{bundle.processing_hash}"
-                    ),
-                    "type": "relation",
-                    "directive_id": bundle.directive_id,
-                    **relation.model_dump(mode="json"),
-                    "source_hash": bundle.source_hash,
-                    "processing_hash": bundle.processing_hash,
-                    "artifact_generation_id": bundle.artifact_generation_id,
-                    "publication_state": "published",
-                    "run_id": bundle.run_id,
-                    "published_at": now,
-                }
-            )
-        await self._replace_published_bundle(bundle)
+        return await self._replace_published_bundle(bundle, expected_snapshot)
 
     async def activate_current(
         self, metadata: DirectiveMetadata, run_id: str
@@ -258,38 +221,38 @@ class DirectiveCatalogRepository:
             expected.directive_id, expected.directive_version_id
         )
         if stored is None:
-            raise RuntimeError(
+            raise IntegrityValidationError(
                 f"Catalog version is not published: "
                 f"{expected.directive_version_id}"
             )
         if canonical_json_hash(stored) != canonical_json_hash(expected):
-            raise RuntimeError(
+            raise IntegrityValidationError(
                 f"Catalog bundle mismatch: {expected.directive_version_id}"
             )
 
     async def _replace_published_bundle(
-        self, bundle: PublishedDirectiveVersion
-    ) -> None:
+        self,
+        bundle: PublishedDirectiveVersion,
+        expected_snapshot: CatalogSlotSnapshot | None | object = _SNAPSHOT_UNSET,
+    ) -> str:
         payload = bundle.model_dump(mode="json")
-        existing = await self.get_version(
-            bundle.directive_id, bundle.directive_version_id
-        )
+        if expected_snapshot is _SNAPSHOT_UNSET:
+            expected_snapshot = await self.snapshot_version(
+                bundle.directive_id, bundle.directive_version_id
+            )
         try:
-            if existing is None:
-                await self._container.create_item(body=payload)
-                return
-            etag = existing.get("_etag")
-            if not isinstance(etag, str) or not etag:
-                raise RuntimeError(
-                    "Existing catalog version is missing an ETag: "
-                    f"{bundle.directive_version_id}"
+            if expected_snapshot is None:
+                response = await self._container.create_item(body=payload)
+                return _catalog_response_etag(
+                    response, bundle.directive_version_id
                 )
-            await self._container.replace_item(
+            response = await self._container.replace_item(
                 item=bundle.id,
                 body=payload,
-                etag=etag,
+                etag=expected_snapshot.etag,
                 match_condition=MatchConditions.IfNotModified,
             )
+            return _catalog_response_etag(response, bundle.directive_version_id)
         except (
             exceptions.CosmosResourceExistsError,
             exceptions.CosmosAccessConditionFailedError,
@@ -306,7 +269,7 @@ class DirectiveCatalogRepository:
             "c.type = 'version' AND c.publication_state = 'published'"
         )
         async for value in self._container.query_items(query=query):
-            if isinstance(value, str) and value.isdigit():
+            if isinstance(value, str):
                 values.add(value)
         return values
 
@@ -329,53 +292,99 @@ class DirectiveCatalogRepository:
             for bundle in await self.list_published_versions()
         ]
 
-    async def list_legacy_artifacts(self) -> list[LegacyCatalogArtifact]:
-        artifacts: list[LegacyCatalogArtifact] = []
-        query = (
-            "SELECT c.id, c.directive_id, c.type FROM c "
-            "WHERE c.type = 'manifest' OR c.type = 'summary'"
-        )
-        async for value in self._container.query_items(query=query):
-            item_id = value.get("id")
-            directive_id = value.get("directive_id")
-            item_type = value.get("type")
-            if not (
-                isinstance(item_id, str)
-                and isinstance(directive_id, str)
-                and directive_id.isdigit()
-                and item_type in {"manifest", "summary"}
-                and item_id.startswith(f"{item_type}:")
-            ):
-                raise RuntimeError(
-                    "Legacy catalog artifact has an unsafe identity"
-                )
-            artifacts.append(
-                LegacyCatalogArtifact(
-                    item_type=item_type,
-                    directive_id=directive_id,
-                    item_id=item_id,
-                )
-            )
-        return sorted(artifacts)
+    async def remove_absent_versions(
+        self, expected: set[tuple[str, str]]
+    ) -> list[PublishedDirectiveVersion]:
+        """Compatibility helper; prefer enumerate then delete for transactions."""
+        retired = await self.list_absent_versions(expected)
+        await self.delete_versions(retired)
+        return retired
 
-    async def delete_legacy_artifacts(
-        self, artifacts: list[LegacyCatalogArtifact]
+    async def list_absent_versions(
+        self, expected: set[tuple[str, str]]
+    ) -> list[PublishedDirectiveVersion]:
+        """Read stale bundles without mutating live catalog records."""
+        return [
+            bundle
+            for bundle in await self.list_published_versions()
+            if (bundle.directive_id, bundle.directive_version_id) not in expected
+        ]
+
+    async def delete_versions(
+        self, retired: list[PublishedDirectiveVersion]
     ) -> None:
-        for artifact in artifacts:
+        """Delete stale catalog records only after dependent stores are clean."""
+        for bundle in retired:
+            current = await self.get_current(bundle.directive_id)
             if (
-                artifact.item_type not in {"manifest", "summary"}
-                or not artifact.directive_id.isdigit()
-                or not artifact.item_id.startswith(
-                    f"{artifact.item_type}:"
-                )
+                current
+                and current.get("directive_version_id")
+                == bundle.directive_version_id
             ):
-                raise ValueError(
-                    "Refusing to delete a non-legacy catalog artifact"
+                await self._container.delete_item(
+                    item="current", partition_key=bundle.directive_id
                 )
             await self._container.delete_item(
-                item=artifact.item_id,
-                partition_key=artifact.directive_id,
+                item=bundle.id, partition_key=bundle.directive_id
             )
+
+    async def restore_version(
+        self,
+        expected: PublishedDirectiveVersion,
+        previous: CatalogSlotSnapshot | None,
+        candidate_etag: str,
+    ) -> None:
+        """Restore the stable version slot after a failed publication."""
+        if previous is not None:
+            payload = {
+                key: value
+                for key, value in previous.payload.items()
+                if not key.startswith("_")
+            }
+            try:
+                await self._container.replace_item(
+                    item=expected.id,
+                    body=payload,
+                    etag=candidate_etag,
+                    match_condition=MatchConditions.IfNotModified,
+                )
+            except exceptions.CosmosAccessConditionFailedError as exc:
+                raise RuntimeError(
+                    "Concurrent catalog publication prevented restoring "
+                    f"{expected.directive_version_id}"
+                ) from exc
+            return
+        try:
+            await self._container.delete_item(
+                item=expected.id,
+                partition_key=expected.directive_id,
+                etag=candidate_etag,
+                match_condition=MatchConditions.IfNotModified,
+            )
+        except exceptions.CosmosResourceNotFoundError:
+            pass
+        except exceptions.CosmosAccessConditionFailedError as exc:
+            raise RuntimeError(
+                "Concurrent catalog publication prevented restoring "
+                f"{expected.directive_version_id}"
+            ) from exc
+
+    async def restore_current(
+        self, directive_id: str, previous: dict[str, Any] | None
+    ) -> None:
+        """Restore a current pointer snapshot after failed activation."""
+        if previous is None:
+            try:
+                await self._container.delete_item(
+                    item="current", partition_key=directive_id
+                )
+            except exceptions.CosmosResourceNotFoundError:
+                pass
+            return
+        payload = {
+            key: value for key, value in previous.items() if not key.startswith("_")
+        }
+        await self._container.upsert_item(payload)
 
     async def list_published_version_labels(self) -> set[tuple[str, str]]:
         values: set[tuple[str, str]] = set()
@@ -454,6 +463,18 @@ class DirectiveCatalogRepository:
             )
         return values
 
+    async def list_relation_record_ids(self) -> set[str]:
+        """Enumerate every legacy relation record, regardless of its state."""
+        values: set[str] = set()
+        query = "SELECT VALUE c.id FROM c WHERE c.type = 'relation'"
+        async for value in self._container.query_items(query=query):
+            if not isinstance(value, str) or not value:
+                raise IntegrityValidationError(
+                    "Directive relation record has an invalid identity"
+                )
+            values.add(value)
+        return values
+
     async def record_run(
         self,
         run_id: str,
@@ -484,23 +505,49 @@ class DirectiveCatalogRepository:
         )
 
 
+def _validate_empty_relations(
+    relations: tuple[DirectiveRelation, ...],
+) -> None:
+    if relations:
+        raise ValueError("Directive relations are not supported by v2")
+
+
 def _validate_published_bundle(
     value: dict[str, Any],
 ) -> PublishedDirectiveVersion:
+    if not isinstance(value, dict):
+        raise IntegrityValidationError(
+            "Published directive version has an invalid artifact schema"
+        )
     application_fields = {
         key: item for key, item in value.items() if not key.startswith("_")
     }
     try:
         bundle = PublishedDirectiveVersion.model_validate(application_fields)
     except ValueError as exc:
-        raise RuntimeError(
+        raise IntegrityValidationError(
             "Published directive version has an invalid artifact schema"
         ) from exc
     size = serialized_json_size(bundle)
     if size > PUBLISHED_BUNDLE_MAX_BYTES:
-        raise RuntimeError(
+        raise IntegrityValidationError(
             f"Published directive bundle exceeds "
             f"{PUBLISHED_BUNDLE_MAX_BYTES} bytes: "
             f"{bundle.directive_version_id} ({size} bytes)"
         )
     return bundle
+
+
+def _catalog_response_etag(response: object, directive_version_id: str) -> str:
+    etag = (
+        response.get("_etag") or response.get("etag")
+        if isinstance(response, dict)
+        else getattr(response, "etag", None)
+        or getattr(response, "_etag", None)
+    )
+    if not isinstance(etag, str) or not etag:
+        raise RuntimeError(
+            "Catalog version replacement is missing an ETag: "
+            f"{directive_version_id}"
+        )
+    return etag

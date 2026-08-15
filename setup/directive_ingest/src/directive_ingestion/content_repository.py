@@ -13,6 +13,8 @@ from directive_contracts import (
     section_content_item_id,
 )
 
+from .integrity import IntegrityValidationError
+
 
 class DirectiveContentRepository:
     def __init__(
@@ -66,7 +68,7 @@ class DirectiveContentRepository:
                 partition_key=directive_version_id,
             )
         except exceptions.CosmosResourceNotFoundError as exc:
-            raise RuntimeError(
+            raise IntegrityValidationError(
                 f"Missing directive section-content item: {item_id}"
             ) from exc
         return _validate_content_record(value)
@@ -81,7 +83,13 @@ class DirectiveContentRepository:
         part_total = 0
         split_sections = 0
         for section_id, descriptor in bundle.section_content.items():
-            section = sections_by_id[section_id]
+            try:
+                section = sections_by_id[section_id]
+            except KeyError as exc:
+                raise IntegrityValidationError(
+                    "Published section-content descriptor is missing a "
+                    f"manifest section: {section_id}"
+                ) from exc
             parts: list[str] = []
             if descriptor.part_count > 1:
                 split_sections += 1
@@ -99,6 +107,7 @@ class DirectiveContentRepository:
                     bundle=bundle,
                     section_id=section_id,
                     section_ordinal=section.ordinal,
+                    section_hash=section.content_hash,
                     part_ordinal=part_ordinal,
                     part_count=descriptor.part_count,
                 )
@@ -109,7 +118,7 @@ class DirectiveContentRepository:
                 content.encode("utf-8")
             ).hexdigest()
             if content_hash != section.content_hash:
-                raise RuntimeError(
+                raise IntegrityValidationError(
                     "Reconstructed section content hash mismatch for "
                     f"{bundle.directive_version_id}/{section_id}"
                 )
@@ -119,17 +128,74 @@ class DirectiveContentRepository:
             "split_sections": split_sections,
         }
 
+    async def delete_bundle(self, bundle: PublishedDirectiveVersion) -> None:
+        for section_id, descriptor in bundle.section_content.items():
+            for part_ordinal in range(descriptor.part_count):
+                try:
+                    await self._container.delete_item(
+                        item=section_content_item_id(
+                            bundle.artifact_generation_id,
+                            section_id,
+                            part_ordinal,
+                        ),
+                        partition_key=bundle.directive_version_id,
+                    )
+                except exceptions.CosmosResourceNotFoundError:
+                    continue
+
+    async def list_item_ids(self) -> set[str]:
+        """Enumerate all content IDs so verify can reject orphaned generations."""
+        values: set[str] = set()
+        query = "SELECT VALUE c.id FROM c"
+        async for value in self._container.query_items(query=query):
+            if isinstance(value, str):
+                values.add(value)
+        return values
+
+    async def list_identities(self) -> set[tuple[str, str, str, str, str]]:
+        """Return partitioned identities and validated content hashes."""
+        values: set[tuple[str, str, str, str, str]] = set()
+        query = "SELECT * FROM c"
+        async for value in self._container.query_items(query=query):
+            item = _validate_content_record(value)
+            values.add(
+                (
+                    item.directive_version_id,
+                    item.id,
+                    item.directive_id,
+                    item.section_hash,
+                    item.part_hash,
+                )
+            )
+        return values
+
+    async def list_relation_record_ids(self) -> set[str]:
+        """Reject legacy relation payloads in the section-content container."""
+        values: set[str] = set()
+        query = "SELECT VALUE c.id FROM c WHERE c.type = 'relation'"
+        async for value in self._container.query_items(query=query):
+            if not isinstance(value, str) or not value:
+                raise IntegrityValidationError(
+                    "Directive relation content record has an invalid identity"
+                )
+            values.add(value)
+        return values
+
 
 def _validate_content_record(
     value: dict[str, Any],
 ) -> DirectiveSectionContent:
+    if not isinstance(value, dict):
+        raise IntegrityValidationError("Invalid directive section-content item")
     application_fields = {
         key: item for key, item in value.items() if not key.startswith("_")
     }
     try:
         return DirectiveSectionContent.model_validate(application_fields)
     except ValueError as exc:
-        raise RuntimeError("Invalid directive section-content item") from exc
+        raise IntegrityValidationError(
+            "Invalid directive section-content item"
+        ) from exc
 
 
 def _validate_expected_part(
@@ -138,6 +204,7 @@ def _validate_expected_part(
     bundle: PublishedDirectiveVersion,
     section_id: str,
     section_ordinal: int,
+    section_hash: str,
     part_ordinal: int,
     part_count: int,
 ) -> None:
@@ -154,10 +221,11 @@ def _validate_expected_part(
         or item.section_ordinal != section_ordinal
         or item.part_ordinal != part_ordinal
         or item.part_count != part_count
+        or item.section_hash != section_hash
         or item.part_hash
         != hashlib.sha256(item.content.encode("utf-8")).hexdigest()
     ):
-        raise RuntimeError(
+        raise IntegrityValidationError(
             "Directive section-content identity or hash mismatch for "
             f"{bundle.directive_version_id}/{section_id}/{part_ordinal}"
         )

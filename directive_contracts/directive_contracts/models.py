@@ -13,6 +13,15 @@ from pydantic import (
     model_validator,
 )
 
+from ._identity import (
+    build_directive_version_id,
+    normalize_directive_id,
+    normalize_directive_version,
+    published_directive_version_item_id,
+    validate_directive_version_id,
+)
+from .source_files import validate_directive_source_basename
+
 
 class ContractModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -25,21 +34,51 @@ class ReviewFinding(ContractModel):
 
 
 class DirectiveMetadata(ContractModel):
-    schema_version: Literal["1.0"] = "1.0"
-    directive_id: str = Field(pattern=r"^\d{8}$")
+    schema_version: Literal["2.0"] = "2.0"
+    directive_id: str
     directive_version_id: str
     version_label: str
     title: str
     aliases: list[str] = Field(default_factory=list)
-    status: str
-    is_current: bool
+    status: Literal["Current"]
+    is_current: Literal[True]
+    is_valid: Literal[True]
     effective_from: date
     effective_to: date | None = None
-    language: str = "en"
+    language: Literal["cs"] = "cs"
     document_type: Literal["directive", "sub_directive"] = "directive"
     source_filename: str
     source_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     processing_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("directive_id", mode="before")
+    @classmethod
+    def normalize_id(cls, value: str) -> str:
+        return normalize_directive_id(value)
+
+    @field_validator("version_label")
+    @classmethod
+    def validate_version_label(cls, value: str) -> str:
+        normalize_directive_version(value)
+        return value
+
+    @field_validator("source_filename")
+    @classmethod
+    def validate_source_filename(cls, value: str) -> str:
+        return validate_directive_source_basename(value)
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> DirectiveMetadata:
+        expected = build_directive_version_id(
+            self.directive_id, self.version_label
+        )
+        if self.directive_version_id != expected:
+            raise ValueError(
+                "Directive version ID does not match directive ID and version"
+            )
+        if self.effective_to is not None:
+            raise ValueError("Current directive metadata cannot have effective_to")
+        return self
 
 
 class DirectiveSection(ContractModel):
@@ -56,7 +95,7 @@ class DirectiveSection(ContractModel):
 
 
 class DirectiveManifest(ContractModel):
-    schema_version: Literal["2.0"] = "2.0"
+    schema_version: Literal["3.0"] = "3.0"
     directive_id: str
     directive_version_id: str
     source_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -65,8 +104,21 @@ class DirectiveManifest(ContractModel):
     total_tokens: int = Field(ge=0)
     sections: list[DirectiveSection]
 
+    @field_validator("directive_id", mode="before")
+    @classmethod
+    def normalize_id(cls, value: str) -> str:
+        return normalize_directive_id(value)
+
+    @field_validator("directive_version_id")
+    @classmethod
+    def validate_version_id(cls, value: str) -> str:
+        return validate_directive_version_id(value)
+
     @model_validator(mode="after")
     def validate_sections(self) -> DirectiveManifest:
+        validate_directive_version_id(
+            self.directive_version_id, self.directive_id
+        )
         section_ids = [section.section_id for section in self.sections]
         if len(section_ids) != len(set(section_ids)):
             raise ValueError("Manifest section IDs must be unique")
@@ -105,7 +157,7 @@ class DirectiveSectionContentDescriptor(ContractModel):
 class PublishedDirectiveVersion(DirectiveMetadata):
     id: str
     type: Literal["version"] = "version"
-    artifact_schema_version: Literal["2.0"] = "2.0"
+    artifact_schema_version: Literal["3.0"] = "3.0"
     artifact_generation_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     publication_state: Literal["published"] = "published"
     manifest: DirectiveManifest
@@ -117,7 +169,9 @@ class PublishedDirectiveVersion(DirectiveMetadata):
 
     @model_validator(mode="after")
     def validate_bundle(self) -> PublishedDirectiveVersion:
-        if self.id != f"version:{self.directive_version_id}":
+        if self.id != published_directive_version_item_id(
+            self.directive_id, self.version_label
+        ):
             raise ValueError("Published version item ID does not match version")
         if (
             self.manifest.directive_id != self.directive_id
@@ -159,7 +213,7 @@ class PublishedDirectiveVersion(DirectiveMetadata):
 class DirectiveSectionContent(ContractModel):
     id: str
     type: Literal["section_content"] = "section_content"
-    directive_id: str = Field(pattern=r"^\d{8}$")
+    directive_id: str
     directive_version_id: str
     artifact_generation_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     section_id: str
@@ -172,8 +226,21 @@ class DirectiveSectionContent(ContractModel):
     run_id: str
     created_at: datetime
 
+    @field_validator("directive_id", mode="before")
+    @classmethod
+    def normalize_id(cls, value: str) -> str:
+        return normalize_directive_id(value)
+
+    @field_validator("directive_version_id")
+    @classmethod
+    def validate_version_id(cls, value: str) -> str:
+        return validate_directive_version_id(value)
+
     @model_validator(mode="after")
     def validate_part_ordinal(self) -> DirectiveSectionContent:
+        validate_directive_version_id(
+            self.directive_version_id, self.directive_id
+        )
         if self.part_ordinal >= self.part_count:
             raise ValueError("Section part ordinal must be below part count")
         return self
@@ -187,6 +254,7 @@ class DirectiveChunk(ContractModel):
     title: str
     aliases: list[str]
     is_current: bool
+    is_valid: bool
     status: str
     effective_from: date
     effective_to: date | None = None
@@ -205,6 +273,23 @@ class DirectiveChunk(ContractModel):
     processing_hash: str
     publication_state: Literal["staged", "published", "retired"] = "staged"
 
+    @field_validator("directive_id", mode="before")
+    @classmethod
+    def normalize_id(cls, value: str) -> str:
+        return normalize_directive_id(value)
+
+    @field_validator("directive_version_id")
+    @classmethod
+    def validate_version_id(cls, value: str) -> str:
+        return validate_directive_version_id(value)
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> DirectiveChunk:
+        validate_directive_version_id(
+            self.directive_version_id, self.directive_id
+        )
+        return self
+
 
 class DirectiveRelation(ContractModel):
     relation_id: str
@@ -216,9 +301,26 @@ class DirectiveRelation(ContractModel):
     status: Literal["accepted", "needs_review"]
     evidence: str
 
+    @field_validator("source_directive_id", "target_directive_id", mode="before")
+    @classmethod
+    def normalize_directive_ids(cls, value: str) -> str:
+        return normalize_directive_id(value)
+
+    @field_validator("source_version_id")
+    @classmethod
+    def validate_source_version_id(cls, value: str) -> str:
+        return validate_directive_version_id(value)
+
+    @model_validator(mode="after")
+    def validate_source_identity(self) -> DirectiveRelation:
+        validate_directive_version_id(
+            self.source_version_id, self.source_directive_id
+        )
+        return self
+
 
 class DirectiveSummary(ContractModel):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     directive_id: str
     directive_version_id: str
     source_hash: str
@@ -229,11 +331,33 @@ class DirectiveSummary(ContractModel):
     strategy: Literal["full_document", "section_batches"]
     model_deployment: str
 
+    @field_validator("directive_id", mode="before")
+    @classmethod
+    def normalize_id(cls, value: str) -> str:
+        return normalize_directive_id(value)
+
+    @field_validator("directive_version_id")
+    @classmethod
+    def validate_version_id(cls, value: str) -> str:
+        return validate_directive_version_id(value)
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> DirectiveSummary:
+        validate_directive_version_id(
+            self.directive_version_id, self.directive_id
+        )
+        return self
+
 
 class MandateAssignment(ContractModel):
     user_id: str
-    directive_id: str = Field(pattern=r"^\d{8}$")
+    directive_id: str
     flag: Literal["M"] = "M"
+
+    @field_validator("directive_id", mode="before")
+    @classmethod
+    def normalize_id(cls, value: str) -> str:
+        return normalize_directive_id(value)
 
 
 class MandateSnapshot(ContractModel):

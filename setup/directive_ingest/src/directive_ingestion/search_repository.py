@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date
+from time import monotonic
 from typing import Any, Iterable
 
 import httpx
@@ -12,6 +13,13 @@ from directive_contracts import DirectiveChunk, DirectiveMetadata
 from .canonical import CanonicalDirective
 from .chunking import TextChunk
 from .config import IngestionConfig
+from .integrity import IntegrityValidationError
+
+_VISIBILITY_TIMEOUT_SECONDS = 600.0
+_VISIBILITY_INITIAL_BACKOFF_SECONDS = 1.0
+_VISIBILITY_MAX_BACKOFF_SECONDS = 10.0
+_VISIBILITY_REQUIRED_STABLE_OBSERVATIONS = 2
+_VISIBILITY_ID_BATCH_SIZE = 250
 
 
 class DirectiveSearchRepository:
@@ -55,7 +63,7 @@ class DirectiveSearchRepository:
             "publication_state eq 'published'"
         )
         current = await self._count_and_facet(
-            "publication_state eq 'published' and is_current eq true"
+            _published_current_valid_filter()
         )
         direct_query = await self._request(
             "POST",
@@ -63,7 +71,7 @@ class DirectiveSearchRepository:
             api_version=self._config.search_api_version,
             payload={
                 "search": "directive verification",
-                "filter": "publication_state eq 'published'",
+                "filter": _published_current_valid_filter(),
                 "vectorFilterMode": "preFilter",
                 "vectorQueries": [
                     {
@@ -178,6 +186,7 @@ class DirectiveSearchRepository:
                     title=directive.metadata.title,
                     aliases=directive.metadata.aliases,
                     is_current=False,
+                    is_valid=directive.metadata.is_valid,
                     status=directive.metadata.status,
                     effective_from=directive.metadata.effective_from,
                     effective_to=directive.metadata.effective_to,
@@ -228,6 +237,29 @@ class DirectiveSearchRepository:
             is_current=False,
         )
 
+    async def delete_chunks(self, chunks: Iterable[DirectiveChunk]) -> None:
+        await self._delete_keys([chunk.id for chunk in chunks])
+
+    async def delete_chunk_ids(self, chunk_ids: Iterable[str]) -> None:
+        await self._delete_keys(chunk_ids)
+
+    async def delete_generation(self, bundle: Any) -> None:
+        await self.delete_chunk_ids(
+            chunk_id
+            for section in bundle.manifest.sections
+            for chunk_id in section.chunk_ids
+        )
+
+    async def restore_current_generation(self, bundle: Any) -> None:
+        await self._merge_chunk_state(
+            [
+                chunk_id
+                for section in bundle.manifest.sections
+                for chunk_id in section.chunk_ids
+            ],
+            is_current=True,
+        )
+
     async def validate_published(
         self, directive: CanonicalDirective, expected_count: int
     ) -> None:
@@ -250,78 +282,111 @@ class DirectiveSearchRepository:
             detail=directive.metadata.directive_version_id,
         )
 
-    async def reconcile_generation(
-        self, metadata: DirectiveMetadata
+    async def validate_published_chunk_ids(
+        self, directive: CanonicalDirective, chunk_ids: Iterable[str]
     ) -> None:
-        directive_id = _odata_string(metadata.directive_id)
-        version_id = _odata_string(metadata.directive_version_id)
-        source_hash = _odata_string(metadata.source_hash)
-        processing_hash = _odata_string(metadata.processing_hash)
-        stale_filter = (
-            f"directive_id eq '{directive_id}' and "
-            f"directive_version_id eq '{version_id}' and "
-            "publication_state eq 'published' and "
-            f"(source_hash ne '{source_hash}' or "
-            f"processing_hash ne '{processing_hash}')"
+        """Wait until the just-published immutable document IDs are visible."""
+        expected = set(chunk_ids)
+        if not expected:
+            return
+        generation_filter = _generation_filter(
+            directive.metadata, publication_state="published"
         )
-        stale_keys = await self._find_keys(stale_filter)
-        await self._merge_chunk_state(
-            stale_keys,
-            publication_state="retired",
-            is_current=False,
-        )
-        if stale_keys:
-            await self._wait_for_count(
-                stale_filter,
-                0,
-                detail=f"retired generation {metadata.directive_version_id}",
+        for batch in _batches(sorted(expected), _VISIBILITY_ID_BATCH_SIZE):
+            expected_batch = set(batch)
+            await self._wait_for_exact_ids(
+                (
+                    f"({generation_filter}) and "
+                    f"({_id_filter(expected_batch)})"
+                ),
+                expected_batch,
+                detail=directive.metadata.directive_version_id,
             )
 
-    async def reconcile_current(self, metadata: DirectiveMetadata) -> None:
-        if not metadata.is_current:
-            return
-        directive_id = _odata_string(metadata.directive_id)
-        version_id = _odata_string(metadata.directive_version_id)
-        source_hash = _odata_string(metadata.source_hash)
-        processing_hash = _odata_string(metadata.processing_hash)
-        exact_generation_filter = (
-            f"directive_id eq '{directive_id}' and "
-            f"directive_version_id eq '{version_id}' and "
-            f"source_hash eq '{source_hash}' and "
-            f"processing_hash eq '{processing_hash}' and "
+    async def validate_current_generation(
+        self, bundle: Any
+    ) -> None:
+        """Require exactly the manifest's generation-scoped IDs to be live."""
+        expected_ids = {
+            chunk_id
+            for section in bundle.manifest.sections
+            for chunk_id in section.chunk_ids
+        }
+        filter_expression = (
+            f"directive_id eq '{_odata_string(bundle.directive_id)}' and "
+            "publication_state eq 'published' and is_current eq true and "
+            "is_valid eq true"
+        )
+        await self._wait_for_exact_ids(
+            filter_expression,
+            expected_ids,
+            detail=bundle.directive_version_id,
+        )
+
+    async def validate_exact_published(
+        self, bundles: Iterable[Any]
+    ) -> None:
+        expected_ids = {
+            chunk_id
+            for bundle in bundles
+            for section in bundle.manifest.sections
+            for chunk_id in section.chunk_ids
+        }
+        await self._wait_for_exact_ids(
+            "",
+            expected_ids,
+            detail="the whole published Search corpus",
+        )
+
+    async def reconcile_generation(
+        self, bundle: Any
+    ) -> None:
+        expected_ids = {
+            chunk_id
+            for section in bundle.manifest.sections
+            for chunk_id in section.chunk_ids
+        }
+        published_filter = (
+            f"directive_id eq '{_odata_string(bundle.directive_id)}' and "
             "publication_state eq 'published'"
         )
-        exact_keys = await self._find_keys(exact_generation_filter)
-        if not exact_keys:
+        visible_ids = await self._wait_for_expected_ids(
+            published_filter,
+            expected_ids,
+            detail=bundle.directive_version_id,
+        )
+        stale_keys = sorted(visible_ids - expected_ids)
+        await self._delete_keys(stale_keys)
+
+    async def reconcile_current(self, bundle: Any) -> None:
+        if not bundle.is_current:
+            return
+        expected_ids = {
+            chunk_id
+            for section in bundle.manifest.sections
+            for chunk_id in section.chunk_ids
+        }
+        if not expected_ids:
             raise RuntimeError(
                 "Current directive has no published Search chunks: "
-                f"{metadata.directive_version_id}"
+                f"{bundle.directive_version_id}"
             )
-        await self._merge_chunk_state(exact_keys, is_current=True)
-        await self._wait_for_count(
-            f"{exact_generation_filter} and is_current eq true",
-            len(exact_keys),
-            detail=f"current generation {metadata.directive_version_id}",
+        await self._merge_chunk_state(list(expected_ids), is_current=True)
+        current_filter = (
+            f"directive_id eq '{_odata_string(bundle.directive_id)}' and "
+            "publication_state eq 'published' and is_current eq true"
         )
-
-        stale_current_filter = (
-            f"directive_id eq '{directive_id}' and "
-            "publication_state eq 'published' and is_current eq true and "
-            f"(directive_version_id ne '{version_id}' or "
-            f"source_hash ne '{source_hash}' or "
-            f"processing_hash ne '{processing_hash}')"
+        visible_ids = await self._wait_for_expected_ids(
+            current_filter,
+            expected_ids,
+            detail=bundle.directive_version_id,
         )
-        stale_keys = await self._find_keys(stale_current_filter)
+        stale_keys = sorted(visible_ids - expected_ids)
         await self._merge_chunk_state(
             stale_keys,
             is_current=False,
         )
-        if stale_keys:
-            await self._wait_for_count(
-                stale_current_filter,
-                0,
-                detail=f"stale current chunks for {metadata.directive_id}",
-            )
+        await self.validate_current_generation(bundle)
 
     async def _find_keys(
         self,
@@ -332,26 +397,56 @@ class DirectiveSearchRepository:
     ) -> list[str]:
         keys: list[str] = []
         page_size = 1000
-        skip = 0
+        last_key: str | None = None
         while len(keys) < limit:
+            page_filter = filter_expression
+            if last_key is not None:
+                continuation = f"id gt '{_odata_string(last_key)}'"
+                page_filter = (
+                    f"({filter_expression}) and {continuation}"
+                    if filter_expression
+                    else continuation
+                )
+            payload: dict[str, Any] = {
+                "search": "*",
+                "select": "id",
+                "top": min(page_size, limit - len(keys)),
+                "orderby": "id asc",
+            }
+            if page_filter:
+                payload["filter"] = page_filter
             result = await self._request(
                 "POST",
                 f"/indexes/{self._config.search_index}/docs/search",
                 api_version=self._config.search_api_version,
-                payload={
-                    "search": "*",
-                    "filter": filter_expression,
-                    "select": "id",
-                    "top": min(page_size, limit - len(keys)),
-                    "skip": skip,
-                },
+                payload=payload,
             )
-            page = result.get("value", [])
-            page_keys = [
-                item["id"]
-                for item in page
-                if isinstance(item.get("id"), str)
-            ]
+            page = result.get("value")
+            if not isinstance(page, list):
+                raise RuntimeError("Search key enumeration returned an invalid page")
+            page_keys: list[str] = []
+            for item in page:
+                if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                    raise RuntimeError(
+                        "Search key enumeration returned a malformed key"
+                    )
+                page_keys.append(item["id"])
+            if not page_keys:
+                break
+            if len(set(page_keys)) != len(page_keys):
+                raise RuntimeError(
+                    "Search key enumeration returned duplicate keys in a page"
+                )
+            if any(
+                key <= previous
+                for previous, key in zip(
+                    (last_key, *page_keys[:-1]), page_keys, strict=True
+                )
+                if previous is not None
+            ):
+                raise RuntimeError(
+                    "Search key enumeration did not advance in ascending order"
+                )
             keys.extend(page_keys)
             requested = min(page_size, limit - (len(keys) - len(page_keys)))
             if len(page) < requested:
@@ -362,8 +457,21 @@ class DirectiveSearchRepository:
                         "Search reconciliation exceeded its bounded key limit"
                     )
                 return keys
-            skip += len(page)
+            last_key = page_keys[-1]
         return keys
+
+    async def _delete_keys(self, keys: Iterable[str]) -> None:
+        key_list = sorted(set(keys))
+        for batch in _batches(key_list, 500):
+            await self._upload_actions(
+                [{"id": key, "@search.action": "delete"} for key in batch]
+            )
+        for batch in _batches(key_list, _VISIBILITY_ID_BATCH_SIZE):
+            await self._wait_for_exact_ids(
+                _id_filter(set(batch)),
+                set(),
+                detail="deleted Search chunks",
+            )
 
     async def _merge_chunk_state(
         self,
@@ -394,7 +502,9 @@ class DirectiveSearchRepository:
         detail: str,
     ) -> None:
         actual = -1
-        for attempt in range(12):
+        deadline = monotonic() + _VISIBILITY_TIMEOUT_SECONDS
+        backoff = _VISIBILITY_INITIAL_BACKOFF_SECONDS
+        while True:
             result = await self._request(
                 "POST",
                 f"/indexes/{self._config.search_index}/docs/search",
@@ -410,10 +520,84 @@ class DirectiveSearchRepository:
             actual = int(result.get("@odata.count", -1))
             if actual == expected_count:
                 return
-            await asyncio.sleep(min(2**attempt, 10))
-        raise RuntimeError(
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(backoff, remaining))
+            backoff = min(backoff * 2, _VISIBILITY_MAX_BACKOFF_SECONDS)
+        raise IntegrityValidationError(
             f"Search visibility validation failed for {detail}: expected "
             f"{expected_count} chunks, found {actual}"
+        )
+
+    async def _wait_for_expected_ids(
+        self,
+        filter_expression: str,
+        expected_ids: set[str],
+        *,
+        detail: str,
+    ) -> set[str]:
+        actual_ids: set[str] = set()
+        stable_ids: set[str] | None = None
+        stable_observations = 0
+        deadline = monotonic() + _VISIBILITY_TIMEOUT_SECONDS
+        backoff = _VISIBILITY_INITIAL_BACKOFF_SECONDS
+        while True:
+            actual_ids = set(await self._find_keys(filter_expression))
+            if expected_ids.issubset(actual_ids):
+                if actual_ids == stable_ids:
+                    stable_observations += 1
+                else:
+                    stable_ids = actual_ids
+                    stable_observations = 1
+                if (
+                    stable_observations
+                    >= _VISIBILITY_REQUIRED_STABLE_OBSERVATIONS
+                ):
+                    return actual_ids
+            else:
+                stable_ids = None
+                stable_observations = 0
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(backoff, remaining))
+            backoff = min(backoff * 2, _VISIBILITY_MAX_BACKOFF_SECONDS)
+        raise IntegrityValidationError(
+            f"Search visibility validation failed for {detail}: expected chunk "
+            f"IDs {sorted(expected_ids)} to be present, found {sorted(actual_ids)}"
+        )
+
+    async def _wait_for_exact_ids(
+        self,
+        filter_expression: str,
+        expected_ids: set[str],
+        *,
+        detail: str,
+    ) -> None:
+        actual_ids: set[str] = set()
+        stable_observations = 0
+        deadline = monotonic() + _VISIBILITY_TIMEOUT_SECONDS
+        backoff = _VISIBILITY_INITIAL_BACKOFF_SECONDS
+        while True:
+            actual_ids = set(await self._find_keys(filter_expression))
+            if actual_ids == expected_ids:
+                stable_observations += 1
+                if (
+                    stable_observations
+                    >= _VISIBILITY_REQUIRED_STABLE_OBSERVATIONS
+                ):
+                    return
+            else:
+                stable_observations = 0
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(backoff, remaining))
+            backoff = min(backoff * 2, _VISIBILITY_MAX_BACKOFF_SECONDS)
+        raise IntegrityValidationError(
+            f"Search visibility validation failed for {detail}: expected exact "
+            f"chunk IDs {sorted(expected_ids)}, found {sorted(actual_ids)}"
         )
 
     async def _upload_actions(self, actions: list[dict[str, Any]]) -> None:
@@ -502,6 +686,33 @@ class DirectiveSearchRepository:
             raise RuntimeError(
                 "Existing directive index must make directive_id searchable "
                 "for semantic keyword prioritization"
+            )
+        identifier = fields.get("id") or {}
+        if (
+            identifier.get("type") != "Edm.String"
+            or identifier.get("key") is not True
+            or identifier.get("filterable") is not True
+            or identifier.get("sortable") is not True
+            or identifier.get("retrievable") is not True
+        ):
+            raise RuntimeError(
+                "Existing directive index requires a filterable, sortable, "
+                "retrievable id key"
+            )
+        for name in ("title", "content"):
+            if fields[name].get("analyzer") != "cs.microsoft":
+                raise RuntimeError(
+                    "Existing directive index requires the Czech cs.microsoft "
+                    f"analyzer for {name}"
+                )
+        is_valid = fields.get("is_valid") or {}
+        if (
+            is_valid.get("type") != "Edm.Boolean"
+            or is_valid.get("filterable") is not True
+            or is_valid.get("retrievable") is not True
+        ):
+            raise RuntimeError(
+                "Existing directive index requires filterable, retrievable is_valid"
             )
         vector_search = index.get("vectorSearch") or {}
         algorithms = {
@@ -629,6 +840,8 @@ class DirectiveSearchRepository:
                 "type": "Edm.String",
                 "key": True,
                 "filterable": True,
+                "sortable": True,
+                "retrievable": True,
             },
             *[
                 {
@@ -646,6 +859,7 @@ class DirectiveSearchRepository:
                 "searchable": True,
                 "filterable": True,
                 "retrievable": True,
+                "analyzer": "cs.microsoft",
             },
             {
                 "name": "aliases",
@@ -656,6 +870,12 @@ class DirectiveSearchRepository:
             },
             {
                 "name": "is_current",
+                "type": "Edm.Boolean",
+                "filterable": True,
+                "retrievable": True,
+            },
+            {
+                "name": "is_valid",
                 "type": "Edm.Boolean",
                 "filterable": True,
                 "retrievable": True,
@@ -703,6 +923,7 @@ class DirectiveSearchRepository:
                 "type": "Edm.String",
                 "searchable": True,
                 "retrievable": True,
+                "analyzer": "cs.microsoft",
             },
             {
                 "name": "content_vector",
@@ -729,6 +950,32 @@ def _search_date(value: date) -> str:
 
 def _odata_string(value: str) -> str:
     return value.replace("'", "''")
+
+
+def _published_current_valid_filter() -> str:
+    return (
+        "publication_state eq 'published' and is_current eq true "
+        "and is_valid eq true"
+    )
+
+
+def _generation_filter(
+    metadata: DirectiveMetadata, *, publication_state: str
+) -> str:
+    return (
+        f"directive_version_id eq '{_odata_string(metadata.directive_version_id)}' "
+        f"and source_hash eq '{_odata_string(metadata.source_hash)}' "
+        f"and processing_hash eq '{_odata_string(metadata.processing_hash)}' "
+        f"and publication_state eq '{publication_state}'"
+    )
+
+
+def _id_filter(ids: set[str]) -> str:
+    if not ids:
+        raise ValueError("Search visibility requires at least one chunk ID")
+    return " or ".join(
+        f"id eq '{_odata_string(chunk_id)}'" for chunk_id in sorted(ids)
+    )
 
 
 def _batches(values: list[Any], size: int) -> Iterable[list[Any]]:

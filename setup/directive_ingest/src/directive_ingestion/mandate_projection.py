@@ -10,12 +10,19 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from azure.core import MatchConditions
 from azure.cosmos import exceptions
 from azure.cosmos.aio import CosmosClient
-from directive_contracts import MandateAssignment, MandateSnapshot
+from directive_contracts import (
+    MandateAssignment,
+    MandateSnapshot,
+    mandate_assignment_item_id,
+    normalize_directive_id,
+)
 
 _CONTROL_PARTITION = "_control"
 _ACTIVE_ID = "active-snapshot"
+_UNSET = object()
 
 
 @dataclass(frozen=True)
@@ -63,6 +70,7 @@ def parse_mandates(
                     f"Mandate CSV row {row_number} has unsupported flag "
                     f"{flag!r}"
                 )
+            directive_id = normalize_directive_id(directive_id)
             if directive_id not in known_directive_ids:
                 raise ValueError(
                     f"Mandate CSV row {row_number} references unknown "
@@ -118,11 +126,50 @@ class MandateRepository:
     async def check_access(self) -> None:
         await self._container.read()
 
-    async def publish(
+    async def stage(
         self, parsed: ParsedMandates, run_id: str
-    ) -> tuple[MandateSnapshot, bool]:
+    ) -> tuple[MandateSnapshot, dict[str, Any] | None, bool]:
+        """Write candidate assignments without switching the active pointer."""
         active = await self._read_active()
+        if active is not None and self._snapshot_from_active(active) is None:
+            raise RuntimeError("Active mandate pointer has an invalid envelope")
+        active_snapshot_id = (
+            active.get("snapshot_id") if active is not None else None
+        )
+        if (
+            active
+            and active.get("complete") is True
+            and active.get("checksum") == parsed.checksum
+            and isinstance(active_snapshot_id, str)
+            and await self._snapshot_assignments_match(
+                active_snapshot_id, parsed
+            )
+        ):
+            snapshot = self._snapshot_from_active(active)
+            if (
+                snapshot is not None
+                and await self._snapshot_records_match(snapshot, parsed)
+            ):
+                return snapshot, active, False
+
         snapshot_id = f"mandates-{parsed.checksum}"
+        repair_snapshot_id = (
+            active_snapshot_id
+            if (
+                active
+                and active.get("complete") is True
+                and active.get("checksum") == parsed.checksum
+                and isinstance(active_snapshot_id, str)
+            )
+            else snapshot_id
+        )
+        repair_records = await self._snapshot_records(repair_snapshot_id)
+        if repair_records or repair_snapshot_id != snapshot_id:
+            snapshot_id += "-" + self._snapshot_records_digest(repair_records)
+        candidate_records = await self._snapshot_records(snapshot_id)
+        if candidate_records:
+            snapshot_id += "-" + self._snapshot_records_digest(candidate_records)
+
         snapshot = MandateSnapshot(
             snapshot_id=snapshot_id,
             checksum=parsed.checksum,
@@ -133,21 +180,12 @@ class MandateRepository:
                 active.get("snapshot_id") if active else None
             ),
         )
-        if (
-            active
-            and active.get("complete") is True
-            and active.get("checksum") == parsed.checksum
-        ):
-            return snapshot, False
 
         published_at = datetime.now(UTC).isoformat()
         for assignment in parsed.assignments:
             await self._container.upsert_item(
                 {
-                    "id": (
-                        f"assignment:{snapshot_id}:"
-                        f"{assignment.directive_id}"
-                    ),
+                    "id": self._assignment_item_id(snapshot_id, assignment),
                     "type": "assignment",
                     "user_id": assignment.user_id,
                     "directive_id": assignment.directive_id,
@@ -156,23 +194,6 @@ class MandateRepository:
                     "run_id": run_id,
                     "published_at": published_at,
                 }
-            )
-
-        actual_count = 0
-        query = (
-            "SELECT VALUE COUNT(1) FROM c WHERE "
-            "c.type = 'assignment' AND c.snapshot_id = @snapshot"
-        )
-        parameters = [{"name": "@snapshot", "value": snapshot_id}]
-        async for value in self._container.query_items(
-            query=query,
-            parameters=parameters,
-        ):
-            actual_count = int(value)
-        if actual_count != len(parsed.assignments):
-            raise RuntimeError(
-                "Mandate snapshot validation failed: expected "
-                f"{len(parsed.assignments)} assignments, found {actual_count}"
             )
 
         await self._container.upsert_item(
@@ -185,46 +206,411 @@ class MandateRepository:
                 "published_at": published_at,
             }
         )
-        await self._container.upsert_item(
-            {
-                "id": _ACTIVE_ID,
-                "type": "active_snapshot",
-                "user_id": _CONTROL_PARTITION,
-                **snapshot.model_dump(mode="json"),
-                "run_id": run_id,
-                "activated_at": datetime.now(UTC).isoformat(),
-            }
+        if not await self._snapshot_records_match(snapshot, parsed):
+            raise RuntimeError(
+                "Mandate snapshot validation failed: assignment or control "
+                "records do not match the candidate"
+            )
+        return snapshot, active, True
+
+    async def activate(
+        self,
+        snapshot: MandateSnapshot,
+        run_id: str,
+        previous: dict[str, Any] | None,
+    ) -> str:
+        """Switch the active pointer only if the staged snapshot is still live."""
+        payload = {
+            "id": _ACTIVE_ID,
+            "type": "active_snapshot",
+            "user_id": _CONTROL_PARTITION,
+            **snapshot.model_dump(mode="json"),
+            "run_id": run_id,
+            "activated_at": datetime.now(UTC).isoformat(),
+        }
+        try:
+            if previous is None:
+                response = await self._container.create_item(body=payload)
+            else:
+                response = await self._container.replace_item(
+                    item=_ACTIVE_ID,
+                    body=payload,
+                    etag=_active_etag(previous),
+                    match_condition=MatchConditions.IfNotModified,
+                )
+        except (
+            exceptions.CosmosResourceExistsError,
+            exceptions.CosmosAccessConditionFailedError,
+            exceptions.CosmosResourceNotFoundError,
+        ) as exc:
+            raise RuntimeError(
+                "Concurrent mandate activation prevented switching the active pointer"
+            ) from exc
+        return _active_response_etag(response)
+
+    async def restore_active(
+        self,
+        previous: dict[str, Any] | None,
+        candidate_etag: str,
+    ) -> None:
+        """Restore only the pointer produced by this failed activation."""
+        if not candidate_etag:
+            raise RuntimeError("Mandate activation candidate is missing an ETag")
+        if previous is None:
+            try:
+                await self._container.delete_item(
+                    item=_ACTIVE_ID,
+                    partition_key=_CONTROL_PARTITION,
+                    etag=candidate_etag,
+                    match_condition=MatchConditions.IfNotModified,
+                )
+            except exceptions.CosmosResourceNotFoundError:
+                pass
+            except exceptions.CosmosAccessConditionFailedError as exc:
+                raise RuntimeError(
+                    "Concurrent mandate activation prevented restoring the active "
+                    "pointer"
+                ) from exc
+            return
+        try:
+            await self._container.replace_item(
+                item=_ACTIVE_ID,
+                body={
+                    key: value
+                    for key, value in previous.items()
+                    if not key.startswith("_")
+                },
+                etag=candidate_etag,
+                match_condition=MatchConditions.IfNotModified,
+            )
+        except (
+            exceptions.CosmosAccessConditionFailedError,
+            exceptions.CosmosResourceNotFoundError,
+        ) as exc:
+            raise RuntimeError(
+                "Concurrent mandate activation prevented restoring the active "
+                "pointer"
+            ) from exc
+
+    async def discard_staged(self, snapshot: MandateSnapshot, run_id: str) -> None:
+        """Idempotently delete a candidate snapshot that was never committed."""
+        query = (
+            "SELECT c.id, c.user_id, c.run_id, c._etag FROM c WHERE "
+            "(c.type = 'assignment' OR c.type = 'snapshot') AND "
+            "c.snapshot_id = @snapshot"
         )
-        return snapshot, True
+        stale: list[tuple[str, str, str]] = []
+        async for value in self._container.query_items(
+            query=query,
+            parameters=[{"name": "@snapshot", "value": snapshot.snapshot_id}],
+        ):
+            item_id = value.get("id")
+            user_id = value.get("user_id")
+            item_run_id = value.get("run_id")
+            etag = value.get("_etag")
+            if (
+                isinstance(item_id, str)
+                and isinstance(user_id, str)
+                and item_run_id == run_id
+                and isinstance(etag, str)
+                and etag
+            ):
+                stale.append((item_id, user_id, etag))
+        for item_id, user_id, etag in stale:
+            try:
+                await self._container.delete_item(
+                    item=item_id,
+                    partition_key=user_id,
+                    etag=etag,
+                    match_condition=MatchConditions.IfNotModified,
+                )
+            except exceptions.CosmosResourceNotFoundError:
+                continue
+            except exceptions.CosmosAccessConditionFailedError as exc:
+                raise RuntimeError(
+                    "Concurrent mandate staging prevented discarding the candidate"
+                ) from exc
+
+    async def cleanup(self, active_snapshot_id: str) -> bool:
+        return await self._prune_inactive(active_snapshot_id)
+
+    async def publish(
+        self, parsed: ParsedMandates, run_id: str
+    ) -> tuple[MandateSnapshot, bool]:
+        """Compatibility API performing stage, activation, then cleanup."""
+        snapshot, previous, changed = await self.stage(parsed, run_id)
+        if not changed:
+            cleanup_changed = await self.cleanup(snapshot.snapshot_id)
+            return snapshot, cleanup_changed
+        await self.activate(snapshot, run_id, previous)
+        cleanup_changed = await self.cleanup(snapshot.snapshot_id)
+        return snapshot, changed or cleanup_changed
+
+    async def is_current(self, parsed: ParsedMandates) -> bool:
+        active = await self._read_active()
+        if not (
+            active
+            and active.get("complete") is True
+            and active.get("checksum") == parsed.checksum
+        ):
+            return False
+        snapshot_id = active.get("snapshot_id")
+        if not (
+            isinstance(snapshot_id, str)
+            and await self._snapshot_assignments_match(snapshot_id, parsed)
+        ):
+            return False
+        snapshot = self._snapshot_from_active(active)
+        return (
+            snapshot is not None
+            and await self._snapshot_records_match(snapshot, parsed)
+            and not await self._has_inactive(snapshot_id)
+        )
 
     async def verification_summary(self) -> dict[str, object]:
         active = await self._read_active()
         if not active or active.get("complete") is not True:
             raise RuntimeError("No complete active mandate snapshot exists")
-        snapshot_id = active.get("snapshot_id")
-        if not isinstance(snapshot_id, str):
-            raise RuntimeError("Active mandate snapshot has no snapshot ID")
-        actual_count = 0
-        query = (
-            "SELECT VALUE COUNT(1) FROM c WHERE "
-            "c.type = 'assignment' AND c.snapshot_id = @snapshot"
+        snapshot = self._snapshot_from_active(active)
+        if snapshot is None:
+            raise RuntimeError("Active mandate snapshot has invalid metadata")
+        if not await self._snapshot_structure_matches(snapshot):
+            raise RuntimeError(
+                "Active mandate assignment or control records are invalid"
+            )
+        if await self._has_inactive(snapshot.snapshot_id):
+            raise RuntimeError(
+                "Inactive mandate assignments or snapshots are present"
+            )
+        return {
+            "snapshot_id": snapshot.snapshot_id,
+            "checksum": snapshot.checksum,
+            "assignment_count": snapshot.assignment_count,
+            "user_count": snapshot.user_count,
+        }
+
+    async def validate_exact(self, parsed: ParsedMandates) -> dict[str, object]:
+        """Require active assignment content, checksum, and counts to match."""
+        summary = await self.verification_summary()
+        if summary["checksum"] != parsed.checksum:
+            raise RuntimeError("Active mandate snapshot checksum mismatch")
+        snapshot_id = summary["snapshot_id"]
+        if not await self._snapshot_assignments_match(snapshot_id, parsed):
+            raise RuntimeError("Active mandate assignments do not match CSV")
+        return summary
+
+    async def _snapshot_assignments_match(
+        self, snapshot_id: str, parsed: ParsedMandates
+    ) -> bool:
+        records = await self._snapshot_records(snapshot_id)
+        expected_assignments = sorted(
+            (
+                "assignment",
+                self._assignment_item_id(snapshot_id, assignment),
+                assignment.user_id,
+                assignment.directive_id,
+                "M",
+            )
+            for assignment in parsed.assignments
         )
+        actual_assignments = sorted(
+            (
+                record.get("type"),
+                record.get("id"),
+                record.get("user_id"),
+                record.get("directive_id"),
+                record.get("flag"),
+            )
+            for record in records
+            if record.get("type") == "assignment"
+        )
+        controls = [
+            record for record in records if record.get("type") == "snapshot"
+        ]
+        return (
+            len(records) == len(expected_assignments) + 1
+            and actual_assignments == expected_assignments
+            and len(controls) == 1
+            and self._control_record_matches(
+                controls[0],
+                snapshot_id,
+                parsed.checksum,
+                len(parsed.assignments),
+                parsed.user_count,
+            )
+        )
+
+    async def _snapshot_records_match(
+        self, snapshot: MandateSnapshot, parsed: ParsedMandates
+    ) -> bool:
+        if not await self._snapshot_assignments_match(
+            snapshot.snapshot_id, parsed
+        ):
+            return False
+        controls = [
+            record
+            for record in await self._snapshot_records(snapshot.snapshot_id)
+            if record.get("type") == "snapshot"
+        ]
+        return len(controls) == 1 and self._control_record_matches(
+            controls[0],
+            snapshot.snapshot_id,
+            snapshot.checksum,
+            snapshot.assignment_count,
+            snapshot.user_count,
+            snapshot.previous_snapshot_id,
+        )
+
+    async def _snapshot_structure_matches(self, snapshot: MandateSnapshot) -> bool:
+        records = await self._snapshot_records(snapshot.snapshot_id)
+        assignments = [
+            record for record in records if record.get("type") == "assignment"
+        ]
+        controls = [
+            record for record in records if record.get("type") == "snapshot"
+        ]
+        return (
+            len(records) == snapshot.assignment_count + 1
+            and len(assignments) == snapshot.assignment_count
+            and all(
+                self._assignment_record_matches(record, snapshot.snapshot_id)
+                for record in assignments
+            )
+            and len(controls) == 1
+            and self._control_record_matches(
+                controls[0],
+                snapshot.snapshot_id,
+                snapshot.checksum,
+                snapshot.assignment_count,
+                snapshot.user_count,
+                snapshot.previous_snapshot_id,
+            )
+        )
+
+    async def _snapshot_records(self, snapshot_id: str) -> list[dict[str, Any]]:
+        query = (
+            "SELECT c.id, c.type, c.user_id, c.directive_id, c.flag, "
+            "c.snapshot_id, c.schema_version, c.checksum, "
+            "c.assignment_count, c.user_count, c.complete, "
+            "c.previous_snapshot_id FROM c WHERE "
+            "(c.type = 'assignment' OR c.type = 'snapshot') AND "
+            "c.snapshot_id = @snapshot"
+        )
+        records: list[dict[str, Any]] = []
         async for value in self._container.query_items(
             query=query,
             parameters=[{"name": "@snapshot", "value": snapshot_id}],
         ):
-            actual_count = int(value)
-        expected_count = int(active.get("assignment_count", -1))
-        if actual_count != expected_count:
-            raise RuntimeError(
-                "Active mandate snapshot count mismatch: expected "
-                f"{expected_count}, found {actual_count}"
+            if not isinstance(value, dict):
+                raise RuntimeError("Mandate snapshot record is invalid")
+            records.append(value)
+        return records
+
+    @staticmethod
+    def _assignment_item_id(
+        snapshot_id: str, assignment: MandateAssignment
+    ) -> str:
+        return mandate_assignment_item_id(
+            snapshot_id,
+            assignment.directive_id,
+        )
+
+    @classmethod
+    def _assignment_record_matches(
+        cls, record: dict[str, Any], snapshot_id: str
+    ) -> bool:
+        user_id = record.get("user_id")
+        directive_id = record.get("directive_id")
+        if not isinstance(user_id, str) or not isinstance(directive_id, str):
+            return False
+        try:
+            expected_id = cls._assignment_item_id(
+                snapshot_id,
+                MandateAssignment(user_id=user_id, directive_id=directive_id),
             )
-        return {
-            "snapshot_id": snapshot_id,
-            "assignment_count": actual_count,
-            "user_count": int(active.get("user_count", -1)),
-        }
+        except ValueError:
+            return False
+        return (
+            record.get("type") == "assignment"
+            and record.get("snapshot_id") == snapshot_id
+            and record.get("flag") == "M"
+            and record.get("id") == expected_id
+        )
+
+    @staticmethod
+    def _control_record_matches(
+        record: dict[str, Any],
+        snapshot_id: str,
+        checksum: str,
+        assignment_count: int,
+        user_count: int,
+        previous_snapshot_id: str | None | object = _UNSET,
+    ) -> bool:
+        return (
+            record.get("id") == f"snapshot:{snapshot_id}"
+            and record.get("type") == "snapshot"
+            and record.get("user_id") == _CONTROL_PARTITION
+            and record.get("snapshot_id") == snapshot_id
+            and record.get("schema_version") == "1.0"
+            and record.get("checksum") == checksum
+            and record.get("assignment_count") == assignment_count
+            and record.get("user_count") == user_count
+            and record.get("complete") is True
+            and (
+                previous_snapshot_id is _UNSET
+                or record.get("previous_snapshot_id") == previous_snapshot_id
+            )
+        )
+
+    @staticmethod
+    def _snapshot_records_digest(records: list[dict[str, Any]]) -> str:
+        canonical = "\n".join(
+            repr(
+                tuple(
+                    record.get(field)
+                    for field in (
+                        "id",
+                        "type",
+                        "user_id",
+                        "directive_id",
+                        "flag",
+                        "snapshot_id",
+                        "schema_version",
+                        "checksum",
+                        "assignment_count",
+                        "user_count",
+                        "complete",
+                        "previous_snapshot_id",
+                    )
+                )
+            )
+            for record in sorted(
+                records,
+                key=lambda record: (
+                    str(record.get("id")),
+                    str(record.get("user_id")),
+                ),
+            )
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()[:16]
+
+    @staticmethod
+    def _snapshot_from_active(
+        active: dict[str, Any]
+    ) -> MandateSnapshot | None:
+        try:
+            snapshot = MandateSnapshot.model_validate(
+                {
+                    field: active.get(field)
+                    for field in MandateSnapshot.model_fields
+                    if field in active
+                }
+            )
+        except ValueError:
+            return None
+        if not _active_record_matches(active, snapshot):
+            return None
+        return snapshot
 
     async def _read_active(self) -> dict[str, Any] | None:
         try:
@@ -233,3 +619,78 @@ class MandateRepository:
             )
         except exceptions.CosmosResourceNotFoundError:
             return None
+
+    async def _has_inactive(self, active_snapshot_id: str) -> bool:
+        query = (
+            "SELECT VALUE COUNT(1) FROM c WHERE "
+            "(c.type = 'assignment' OR c.type = 'snapshot') AND "
+            "c.snapshot_id != @snapshot"
+        )
+        async for value in self._container.query_items(
+            query=query,
+            parameters=[{"name": "@snapshot", "value": active_snapshot_id}],
+        ):
+            return int(value) != 0
+        raise RuntimeError("Mandate inactive-record query returned no count")
+
+    async def _prune_inactive(self, active_snapshot_id: str) -> bool:
+        query = (
+            "SELECT c.id, c.user_id FROM c WHERE "
+            "(c.type = 'assignment' OR c.type = 'snapshot') AND "
+            "c.snapshot_id != @snapshot"
+        )
+        stale: list[tuple[str, str]] = []
+        async for value in self._container.query_items(
+            query=query,
+            parameters=[{"name": "@snapshot", "value": active_snapshot_id}],
+        ):
+            item_id = value.get("id")
+            user_id = value.get("user_id")
+            if not isinstance(item_id, str) or not isinstance(user_id, str):
+                raise RuntimeError("Inactive mandate record has invalid identity")
+            stale.append((item_id, user_id))
+        for item_id, user_id in stale:
+            await self._container.delete_item(item=item_id, partition_key=user_id)
+        return bool(stale)
+
+
+def _active_etag(active: dict[str, Any]) -> str:
+    etag = active.get("_etag")
+    if not isinstance(etag, str) or not etag:
+        raise RuntimeError("Active mandate pointer is missing an ETag")
+    return etag
+
+
+def _active_record_matches(
+    active: dict[str, Any], snapshot: MandateSnapshot
+) -> bool:
+    """Validate the active-pointer envelope before using its snapshot fields."""
+    required_fields = {
+        "id",
+        "type",
+        "user_id",
+        *MandateSnapshot.model_fields,
+    }
+    return required_fields <= active.keys() and (
+        active.get("id") == _ACTIVE_ID
+        and active.get("type") == "active_snapshot"
+        and active.get("user_id") == _CONTROL_PARTITION
+        and active.get("schema_version") == snapshot.schema_version
+        and active.get("snapshot_id") == snapshot.snapshot_id
+        and active.get("checksum") == snapshot.checksum
+        and active.get("assignment_count") == snapshot.assignment_count
+        and active.get("user_count") == snapshot.user_count
+        and active.get("complete") is snapshot.complete
+        and active.get("previous_snapshot_id") == snapshot.previous_snapshot_id
+    )
+
+
+def _active_response_etag(response: object) -> str:
+    etag = (
+        response.get("_etag") or response.get("etag")
+        if isinstance(response, dict)
+        else getattr(response, "_etag", None) or getattr(response, "etag", None)
+    )
+    if not isinstance(etag, str) or not etag:
+        raise RuntimeError("Mandate activation response is missing an ETag")
+    return etag

@@ -12,6 +12,7 @@ from directive_ingestion.source import (
     BlobDirectiveSource,
     DirectiveSourceError,
     LocalDirectiveSource,
+    discover_pdfs,
 )
 
 
@@ -116,15 +117,14 @@ def _blob_source(
 
 
 @pytest.mark.asyncio
-async def test_local_source_uses_shared_validation(tmp_path: Path) -> None:
-    (tmp_path / "12345678-policy-v2.pdf").write_bytes(b"%PDF-local")
+async def test_local_source_retains_exact_safe_basename(tmp_path: Path) -> None:
+    (tmp_path / "Pokyn interní 2026.PDF").write_bytes(b"%PDF-local")
 
     documents = await LocalDirectiveSource(tmp_path).discover()
 
-    assert [item.source_name for item in documents] == [
-        "12345678-policy-v2.pdf"
-    ]
-    assert documents[0].directive_version_id_hint == "12345678:v2"
+    assert [item.source_name for item in documents] == ["Pokyn interní 2026.PDF"]
+    assert len(documents[0].source_hash) == 64
+    assert not hasattr(documents[0], "directive_id_hint")
 
 
 @pytest.mark.asyncio
@@ -132,8 +132,8 @@ async def test_blob_source_lists_prefix_and_downloads_with_etag(
     monkeypatch,
 ) -> None:
     properties = [
-        _properties("incoming/12345678-zeta-v2.pdf", '"etag-2"'),
-        _properties("incoming/12345678-alpha-v1.pdf", '"etag-1"'),
+        _properties("incoming/záznam zeta.pdf", '"etag-2"'),
+        _properties("incoming/záznam alpha.pdf", '"etag-1"'),
     ]
     container = _Container(
         properties,
@@ -147,8 +147,8 @@ async def test_blob_source_lists_prefix_and_downloads_with_etag(
     documents = await source.discover()
 
     assert [item.source_name for item in documents] == [
-        "12345678-alpha-v1.pdf",
-        "12345678-zeta-v2.pdf",
+        "záznam alpha.pdf",
+        "záznam zeta.pdf",
     ]
     assert container.prefixes == ["incoming/"]
     assert container.blobs[properties[0].name].calls[0][
@@ -168,7 +168,7 @@ async def test_blob_source_rejects_empty_container(monkeypatch) -> None:
 async def test_blob_source_rejects_oversized_corpus_before_download(
     monkeypatch,
 ) -> None:
-    properties = [_properties("12345678-policy-v1.pdf", '"etag-1"')]
+    properties = [_properties("policy.pdf", '"etag-1"')]
     properties[0].size = 101
     container = _Container(
         properties,
@@ -188,7 +188,7 @@ async def test_blob_source_rejects_oversized_corpus_before_download(
 
 @pytest.mark.asyncio
 async def test_blob_source_surfaces_etag_change(monkeypatch) -> None:
-    properties = [_properties("12345678-policy-v1.pdf", '"etag-1"')]
+    properties = [_properties("policy.pdf", '"etag-1"')]
     container = _Container(
         properties,
         {properties[0].name: b"%PDF-policy"},
@@ -203,19 +203,27 @@ async def test_blob_source_surfaces_etag_change(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_blob_source_rejects_duplicate_identity(monkeypatch) -> None:
+async def test_blob_source_rejects_duplicate_content_hash(monkeypatch) -> None:
     properties = [
-        _properties("12345678-policy-v1.pdf", '"etag-1"'),
-        _properties("12345678-copy-v1.0.pdf", '"etag-2"'),
+        _properties("policy-a.pdf", '"etag-1"'),
+        _properties("policy-b.pdf", '"etag-2"'),
     ]
     container = _Container(
         properties,
         {
             properties[0].name: b"%PDF-policy",
-            properties[1].name: b"%PDF-copy",
+            properties[1].name: b"%PDF-policy",
         },
     )
     source = _blob_source(monkeypatch, container)
 
-    with pytest.raises(ValueError, match="Duplicate directive"):
+    with pytest.raises(ValueError, match="Duplicate directive source content"):
         await source.discover()
+
+
+def test_discovery_rejects_duplicate_content_hashes(tmp_path: Path) -> None:
+    (tmp_path / "a.pdf").write_bytes(b"%PDF-same")
+    (tmp_path / "b.pdf").write_bytes(b"%PDF-same")
+
+    with pytest.raises(ValueError, match="Duplicate directive source content"):
+        discover_pdfs(tmp_path)

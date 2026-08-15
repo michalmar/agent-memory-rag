@@ -4,19 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from typing import Any
 
-from azure.core.exceptions import ResourceExistsError
+from azure.core import MatchConditions
+from azure.core.exceptions import (
+    ResourceExistsError,
+    ResourceModifiedError,
+    ResourceNotFoundError,
+)
 from azure.storage.blob import ContentSettings
 from azure.storage.blob.aio import BlobServiceClient
 
-
-_LEGACY_DIRECTIVE_ARTIFACT = re.compile(
-    r"^directives/\d+/[^/]+/[0-9a-f]{64}/generations/"
-    r"[0-9a-f]{64}/(?:manifest\.json|summary\.json|"
-    r"sections/[^/]+\.md)$"
-)
+from .integrity import IntegrityValidationError
 
 
 class BlobArtifactRepository:
@@ -43,41 +42,16 @@ class BlobArtifactRepository:
             names.add(blob.name)
         return names
 
-    async def list_legacy_directive_artifacts(self) -> list[str]:
-        return sorted(
-            name
-            for name in await self.list_names("directives/")
-            if _is_legacy_directive_artifact(name)
-        )
-
-    async def delete_legacy_directive_artifacts(
-        self, blob_names: list[str]
-    ) -> None:
-        invalid = [
-            name
-            for name in blob_names
-            if not _is_legacy_directive_artifact(name)
-        ]
-        if invalid:
-            raise ValueError(
-                "Refusing to delete non-legacy directive artifacts: "
-                + ", ".join(invalid)
-            )
-        for blob_name in blob_names:
-            await self._container.delete_blob(
-                blob_name, delete_snapshots="include"
-            )
-
     async def put_immutable(
         self,
         blob_name: str,
         content: bytes,
         content_type: str,
-    ) -> None:
+    ) -> str:
         content_hash = hashlib.sha256(content).hexdigest()
         blob = self._container.get_blob_client(blob_name)
         try:
-            await blob.upload_blob(
+            response = await blob.upload_blob(
                 content,
                 overwrite=False,
                 metadata={"content_sha256": content_hash},
@@ -90,6 +64,11 @@ class BlobArtifactRepository:
                 raise RuntimeError(
                     f"Immutable artifact collision at {blob_name}"
                 ) from None
+            etag = getattr(properties, "etag", None)
+            if not isinstance(etag, str) or not etag:
+                raise RuntimeError(f"State artifact is missing an ETag: {blob_name}")
+            return etag
+        return _response_etag(response, blob_name)
 
     async def put_json(self, blob_name: str, value: object) -> None:
         content = json.dumps(
@@ -101,23 +80,237 @@ class BlobArtifactRepository:
         ).encode()
         await self.put_immutable(blob_name, content, "application/json")
 
-    async def content_hash(self, blob_name: str) -> str:
-        properties = await self._container.get_blob_client(
-            blob_name
-        ).get_blob_properties()
-        value = properties.metadata.get("content_sha256")
-        if not isinstance(value, str) or len(value) != 64:
+    async def replace_json(
+        self,
+        blob_name: str,
+        value: object,
+        *,
+        expected_etag: str | None = None,
+        require_absent: bool = False,
+    ) -> str:
+        """Replace mutable internal state with an optimistic-concurrency guard."""
+        content = json.dumps(
+            value,
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        ).encode()
+        blob = self._container.get_blob_client(blob_name)
+        if require_absent:
+            try:
+                response = await blob.upload_blob(
+                    content,
+                    overwrite=False,
+                    metadata={"content_sha256": hashlib.sha256(content).hexdigest()},
+                    content_settings=ContentSettings(content_type="application/json"),
+                )
+            except ResourceExistsError as exc:
+                raise RuntimeError(
+                    f"Concurrent source-state replacement prevented at {blob_name}"
+                ) from exc
+            return _response_etag(response, blob_name)
+        try:
+            properties = await blob.get_blob_properties()
+        except ResourceNotFoundError as exc:
+            if expected_etag is not None:
+                raise RuntimeError(
+                    f"Concurrent source-state replacement prevented at {blob_name}"
+                ) from exc
+            try:
+                response = await blob.upload_blob(
+                    content,
+                    overwrite=False,
+                    metadata={"content_sha256": hashlib.sha256(content).hexdigest()},
+                    content_settings=ContentSettings(content_type="application/json"),
+                )
+            except ResourceExistsError as exc:
+                raise RuntimeError(
+                    f"Concurrent source-state replacement prevented at {blob_name}"
+                ) from exc
+            return _response_etag(response, blob_name)
+        etag = expected_etag or getattr(properties, "etag", None)
+        if not isinstance(etag, str) or not etag:
+            raise RuntimeError(f"State artifact is missing an ETag: {blob_name}")
+        try:
+            response = await blob.upload_blob(
+                content,
+                overwrite=True,
+                etag=etag,
+                match_condition=MatchConditions.IfNotModified,
+                metadata={"content_sha256": hashlib.sha256(content).hexdigest()},
+                content_settings=ContentSettings(content_type="application/json"),
+            )
+        except ResourceExistsError as exc:
             raise RuntimeError(
-                f"Artifact is missing a valid content hash: {blob_name}"
+                f"Concurrent source-state replacement prevented at {blob_name}"
+            ) from exc
+        return _response_etag(response, blob_name)
+
+    async def get_json(self, blob_name: str) -> dict[str, Any] | None:
+        """Point-read an internal JSON artifact without enumerating its prefix."""
+        blob = self._container.get_blob_client(blob_name)
+        try:
+            stream = await blob.download_blob()
+            value = json.loads((await stream.readall()).decode("utf-8"))
+        except ResourceNotFoundError:
+            return None
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise IntegrityValidationError(
+                f"Invalid JSON artifact: {blob_name}"
+            ) from exc
+        if not isinstance(value, dict):
+            raise IntegrityValidationError(
+                f"JSON artifact must be an object: {blob_name}"
             )
         return value
+
+    async def read_bytes_with_etag(
+        self, blob_name: str
+    ) -> tuple[bytes, str] | None:
+        blob = self._container.get_blob_client(blob_name)
+        try:
+            stream = await blob.download_blob()
+            etag = getattr(getattr(stream, "properties", None), "etag", None)
+            if not isinstance(etag, str) or not etag:
+                raise RuntimeError(f"State artifact is missing an ETag: {blob_name}")
+            return await stream.readall(), etag
+        except ResourceNotFoundError:
+            return None
+
+    async def read_bytes_with_metadata_and_etag(
+        self, blob_name: str
+    ) -> tuple[bytes, dict[str, str], str] | None:
+        """Read one artifact's bytes, metadata, and ETag from one response."""
+        blob = self._container.get_blob_client(blob_name)
+        try:
+            stream = await blob.download_blob()
+            properties = getattr(stream, "properties", None)
+            etag = getattr(properties, "etag", None)
+            if not isinstance(etag, str) or not etag:
+                raise RuntimeError(f"State artifact is missing an ETag: {blob_name}")
+            raw_metadata = getattr(properties, "metadata", None)
+            metadata = (
+                dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+            )
+            if not all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in metadata.items()
+            ):
+                raise RuntimeError(
+                    f"Artifact has invalid metadata: {blob_name}"
+                )
+            return await stream.readall(), metadata, etag
+        except ResourceNotFoundError:
+            return None
+
+    async def restore_bytes(
+        self,
+        blob_name: str,
+        content: bytes,
+        candidate_etag: str,
+        *,
+        content_type: str = "application/json",
+        metadata: dict[str, str] | None = None,
+    ) -> None:
+        blob = self._container.get_blob_client(blob_name)
+        await blob.upload_blob(
+            content,
+            overwrite=True,
+            etag=candidate_etag,
+            match_condition=MatchConditions.IfNotModified,
+            metadata=metadata
+            if metadata is not None
+            else {"content_sha256": hashlib.sha256(content).hexdigest()},
+            content_settings=ContentSettings(content_type=content_type),
+        )
+
+    async def replace_bytes(
+        self,
+        blob_name: str,
+        content: bytes,
+        content_type: str,
+        *,
+        expected_etag: str,
+    ) -> str:
+        """Conditionally replace a mutable repair target from trusted bytes."""
+        if not expected_etag:
+            raise RuntimeError(
+                f"Artifact replacement requires an ETag: {blob_name}"
+            )
+        blob = self._container.get_blob_client(blob_name)
+        try:
+            response = await blob.upload_blob(
+                content,
+                overwrite=True,
+                etag=expected_etag,
+                match_condition=MatchConditions.IfNotModified,
+                metadata={"content_sha256": hashlib.sha256(content).hexdigest()},
+                content_settings=ContentSettings(content_type=content_type),
+            )
+        except (ResourceExistsError, ResourceModifiedError) as exc:
+            raise RuntimeError(
+                f"Concurrent artifact replacement prevented at {blob_name}"
+            ) from exc
+        return _response_etag(response, blob_name)
+
+    async def delete_if_etag(self, blob_name: str, candidate_etag: str) -> None:
+        await self._container.delete_blob(
+            blob_name,
+            delete_snapshots="include",
+            etag=candidate_etag,
+            match_condition=MatchConditions.IfNotModified,
+        )
+
+    async def content_hash(self, blob_name: str) -> str:
+        blob = self._container.get_blob_client(blob_name)
+        try:
+            properties = await blob.get_blob_properties()
+            content = await (await blob.download_blob()).readall()
+        except ResourceNotFoundError as exc:
+            raise IntegrityValidationError(
+                f"Expected artifact is missing: {blob_name}"
+            ) from exc
+        metadata = getattr(properties, "metadata", None)
+        value = metadata.get("content_sha256") if isinstance(metadata, dict) else None
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise IntegrityValidationError(
+                f"Artifact is missing a valid content hash: {blob_name}"
+            )
+        actual_hash = hashlib.sha256(content).hexdigest()
+        if actual_hash != value:
+            raise IntegrityValidationError(
+                f"Artifact payload hash does not match metadata: {blob_name}"
+            )
+        return actual_hash
+
+    async def read_text(self, blob_name: str) -> str:
+        try:
+            stream = await self._container.get_blob_client(
+                blob_name
+            ).download_blob()
+            content = await stream.readall()
+        except ResourceNotFoundError as exc:
+            raise IntegrityValidationError(
+                f"Expected artifact is missing: {blob_name}"
+            ) from exc
+        try:
+            return content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise IntegrityValidationError(
+                f"Artifact is not valid UTF-8 text: {blob_name}"
+            ) from exc
 
     async def validate_hash(
         self, blob_name: str, expected_hash: str
     ) -> None:
         actual_hash = await self.content_hash(blob_name)
         if actual_hash != expected_hash:
-            raise RuntimeError(
+            raise IntegrityValidationError(
                 f"Artifact hash mismatch at {blob_name}"
             )
 
@@ -142,6 +335,22 @@ class BlobArtifactRepository:
     async def exists(self, blob_name: str) -> bool:
         return await self._container.get_blob_client(blob_name).exists()
 
+    async def delete_names(self, names: set[str]) -> None:
+        for name in sorted(names):
+            try:
+                await self._container.delete_blob(
+                    name, delete_snapshots="include"
+                )
+            except ResourceNotFoundError:
+                continue
 
-def _is_legacy_directive_artifact(blob_name: str) -> bool:
-    return _LEGACY_DIRECTIVE_ARTIFACT.fullmatch(blob_name) is not None
+
+def _response_etag(response: object, blob_name: str) -> str:
+    etag = (
+        response.get("etag")
+        if isinstance(response, dict)
+        else getattr(response, "etag", None)
+    )
+    if not isinstance(etag, str) or not etag:
+        raise RuntimeError(f"State artifact is missing an ETag: {blob_name}")
+    return etag

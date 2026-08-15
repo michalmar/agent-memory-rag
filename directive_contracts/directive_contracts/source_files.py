@@ -1,47 +1,31 @@
-"""Shared directive source filename and prefix validation."""
+"""Shared directive source basename and prefix validation."""
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
-from decimal import Decimal
-
-DIRECTIVE_SOURCE_FILENAME_PATTERN = (
-    r"(?i)^\d{8}-[^/\\]+-v\d+(?:\.\d+)?\.pdf$"
-)
-_SOURCE_FILENAME = re.compile(
-    r"^(?P<directive_id>\d{8})-[^/\\]+-v"
-    r"(?P<version>\d+(?:\.\d+)?)\.pdf$",
-    re.IGNORECASE,
-)
+import unicodedata
 
 
-@dataclass(frozen=True, slots=True)
-class DirectiveSourceIdentity:
-    filename: str
-    directive_id: str
-    version: str
-
-    @property
-    def directive_version_id(self) -> str:
-        normalized = format(Decimal(self.version).normalize(), "f")
-        return f"{self.directive_id}:v{normalized}"
-
-
-def parse_directive_source_filename(value: str) -> DirectiveSourceIdentity:
+def validate_directive_source_basename(value: str) -> str:
+    """Validate and return an exact, storage-safe PDF basename."""
+    if not isinstance(value, str):
+        raise TypeError("Directive source basename must be a string")
+    if not value:
+        raise ValueError("Directive PDF filename must not be empty")
     if len(value) > 255:
         raise ValueError("Directive PDF filename must not exceed 255 characters")
-    match = _SOURCE_FILENAME.fullmatch(value)
-    if match is None:
+    if value in {".", ".."}:
+        raise ValueError("Directive PDF filename must not be '.' or '..'")
+    if not value.lower().endswith(".pdf"):
+        raise ValueError("Directive source basename must end with .pdf")
+    if any(
+        char in "/\\\0" or unicodedata.category(char) == "Cc"
+        for char in value
+    ):
         raise ValueError(
-            "Directive PDF filename must start with an eight-digit ID and "
-            f"end with -v<number>.pdf: {value}"
+            "Directive source basename must not contain path separators, NUL, "
+            "or control characters"
         )
-    return DirectiveSourceIdentity(
-        filename=value,
-        directive_id=match.group("directive_id"),
-        version=match.group("version"),
-    )
+    return value
 
 
 def normalize_directive_source_prefix(value: str | None) -> str:
