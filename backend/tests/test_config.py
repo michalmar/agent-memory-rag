@@ -113,6 +113,7 @@ class SettingsTests(unittest.TestCase):
             "COSMOS_ENDPOINT": "https://example.documents.azure.com",
             "SEARCH_ENDPOINT": "https://example.search.windows.net",
             "DIRECTIVE_SEARCH_INDEX": "directive-index",
+            "DIRECTIVE_PUBLICATION_GATE_ENABLED": "true",
             "DIRECTIVE_BLOB_ENDPOINT": "https://example.blob.core.windows.net",
         }
         with patch.dict(os.environ, environment, clear=True):
@@ -122,10 +123,12 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings.directive_data_configured)
         self.assertEqual(settings.directive_search_index, "directive-index")
         self.assertEqual(settings.directive_search_api_version, "2026-04-01")
+        self.assertTrue(settings.directive_publication_gate_enabled)
 
-    def test_directive_search_defaults_to_v2(self) -> None:
+    def test_directive_v3_rollout_defaults_are_safe(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             get_settings.cache_clear()
             settings = get_settings()
 
-        self.assertEqual(settings.directive_search_index, "directive-chunks-v2")
+        self.assertEqual(settings.directive_search_index, "directive-chunks-v3")
+        self.assertFalse(settings.directive_publication_gate_enabled)

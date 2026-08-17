@@ -52,9 +52,27 @@ directive_assert_execution_mode_json() {
   jq -e \
     --arg expected_argument "$expected_argument" \
     '
+      (if $expected_argument == "verify-deep"
+       then ["verify", "--deep-source-audit"]
+       else [$expected_argument]
+       end) as $expected_args |
       (.command | if type == "array" then . else [.] end) == ["directive-ingest"] and
-      (.args | if type == "array" then . else [.] end) == [$expected_argument]
+      (.args | if type == "array" then . else [.] end) == $expected_args
     ' <<<"$container_json" >/dev/null
+}
+
+directive_execution_approval_kind() {
+  case "$1" in
+    run-daily)
+      printf '%s\n' publication
+      ;;
+    verify | verify-deep)
+      printf '%s\n' verification
+      ;;
+    *)
+      printf '%s\n' none
+      ;;
+  esac
 }
 
 directive_assert_execution_override_json() {
@@ -70,13 +88,18 @@ import sys
 
 expected_argument, expected_image, expected_cpu, expected_memory, raw = sys.argv[1:]
 container = json.loads(raw)
+expected_args = (
+    ["verify", "--deep-source-audit"]
+    if expected_argument == "verify-deep"
+    else [expected_argument]
+)
 if not isinstance(container, dict):
     raise SystemExit("execution container is not an object")
 if container.get("name") != "directive-ingestion":
     raise SystemExit("execution container name is not pinned")
 if container.get("image") != expected_image:
     raise SystemExit("execution image is not pinned")
-if container.get("command") != ["directive-ingest"] or container.get("args") != [expected_argument]:
+if container.get("command") != ["directive-ingest"] or container.get("args") != expected_args:
     raise SystemExit("execution command is not pinned")
 resources = container.get("resources")
 if not isinstance(resources, dict):
@@ -98,15 +121,16 @@ directive_render_execution_env_vars() {
   local expected_validation_digest="${5:-}"
   local expected_environment_digest="${6:-}"
   local expected_source_digest="${7:-}"
+  local expected_validation_evidence_digest="${8:-}"
   python3 - "$raw_env_json" "$expected_argument" \
     "$expected_processing_version" "$expected_search_index" \
     "$expected_validation_digest" "$expected_environment_digest" \
-    "$expected_source_digest" <<'PY'
+    "$expected_source_digest" "$expected_validation_evidence_digest" <<'PY'
 import json
 import sys
 
 raw, mode, processing_version, search_index, validation_digest, \
-    environment_digest, source_digest = sys.argv[1:]
+    environment_digest, source_digest, validation_evidence_digest = sys.argv[1:]
 try:
     env = json.loads(raw)
 except json.JSONDecodeError as exc:
@@ -117,6 +141,7 @@ approval_names = {
     "DIRECTIVE_APPROVED_VALIDATION_DIGEST",
     "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST",
     "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST",
+    "DIRECTIVE_APPROVED_VALIDATION_EVIDENCE_DIGEST",
 }
 values = {}
 for item in env:
@@ -138,10 +163,23 @@ if (
     values.get("DIRECTIVE_PROCESSING_VERSION") != processing_version
     or values.get("DIRECTIVE_SEARCH_INDEX") != search_index
 ):
-    raise SystemExit("job environment is not the expected v2 configuration")
+    raise SystemExit("job environment is not the expected target configuration")
 for name in approval_names:
     values.pop(name, None)
-if mode in {"run-daily", "verify"}:
+if mode == "run-daily":
+    expected_approvals = {
+        "DIRECTIVE_APPROVED_VALIDATION_DIGEST": validation_digest,
+        "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST": environment_digest,
+        "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST": source_digest,
+        "DIRECTIVE_APPROVED_VALIDATION_EVIDENCE_DIGEST": validation_evidence_digest,
+    }
+    if any(
+        len(value) != 64 or any(character not in "0123456789abcdef" for character in value)
+        for value in expected_approvals.values()
+    ):
+        raise SystemExit("execution approval digest is invalid")
+    values.update(expected_approvals)
+elif mode in {"verify", "verify-deep"}:
     expected_approvals = {
         "DIRECTIVE_APPROVED_VALIDATION_DIGEST": validation_digest,
         "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST": environment_digest,
@@ -152,9 +190,13 @@ if mode in {"run-daily", "verify"}:
         for value in expected_approvals.values()
     ):
         raise SystemExit("execution approval digest is invalid")
+    if validation_evidence_digest:
+        raise SystemExit("verify execution must not receive a validation evidence digest override")
     values.update(expected_approvals)
 elif any((validation_digest, environment_digest, source_digest)):
     raise SystemExit("unapproved execution received approval values")
+elif validation_evidence_digest:
+    raise SystemExit("unapproved execution received a validation evidence digest")
 for name, value in sorted(values.items()):
     print(f"{name}\t{value}")
 PY
@@ -171,13 +213,17 @@ directive_assert_job_start_override_args() {
 import sys
 
 expected_argument, expected_image, expected_cpu, expected_memory, *args = sys.argv[1:]
+expected_args = (
+    ["verify", "--deep-source-audit"]
+    if expected_argument == "verify-deep"
+    else [expected_argument]
+)
 required = {
     "--container-name": "directive-ingestion",
     "--image": expected_image,
     "--cpu": expected_cpu,
     "--memory": expected_memory,
     "--command": "directive-ingest",
-    "--args": expected_argument,
 }
 for flag, expected in required.items():
     try:
@@ -186,6 +232,13 @@ for flag, expected in required.items():
         raise SystemExit(f"job start is missing {flag}")
     if position + 1 >= len(args) or args[position + 1] != expected:
         raise SystemExit(f"job start has an invalid {flag}")
+try:
+    args_start = args.index("--args") + 1
+    args_end = args.index("--env-vars", args_start)
+except ValueError:
+    raise SystemExit("job start has an invalid --args section")
+if args[args_start:args_end] != expected_args:
+    raise SystemExit("job start has invalid execution arguments")
 if args.count("--env-vars") != 1:
     raise SystemExit("job start must carry exactly one complete environment override")
 env_start = args.index("--env-vars") + 1
@@ -212,7 +265,9 @@ directive_build_job_start_override_args() {
   local memory="$7"
   shift 7
   [[ "$container_name" == directive-ingestion ]] || return 1
+  [[ "$expected_argument" != verify-deep ]] || return 1
   [[ "$#" -gt 0 ]] || return 1
+  local execution_args=("$expected_argument")
   DIRECTIVE_JOB_START_ARGS=(
     --name "$job_name"
     --resource-group "$resource_group"
@@ -221,7 +276,7 @@ directive_build_job_start_override_args() {
     --cpu "$cpu"
     --memory "$memory"
     --command directive-ingest
-    --args "$expected_argument"
+    --args "${execution_args[@]}"
     --env-vars
     "$@"
     --query name
@@ -230,6 +285,81 @@ directive_build_job_start_override_args() {
   directive_assert_job_start_override_args \
     "$expected_argument" "$image" "$cpu" "$memory" \
     "${DIRECTIVE_JOB_START_ARGS[@]}"
+}
+
+directive_render_job_execution_override_json() {
+  local expected_argument="$1"
+  local container_name="$2"
+  local image="$3"
+  local cpu="$4"
+  local memory="$5"
+  shift 5
+  python3 - "$expected_argument" "$container_name" "$image" "$cpu" \
+    "$memory" "$@" <<'PY'
+import json
+import re
+import sys
+
+mode, container_name, image, raw_cpu, memory, *raw_env = sys.argv[1:]
+if mode != "verify-deep":
+    raise SystemExit("execution-template override is reserved for deep verification")
+if container_name != "directive-ingestion":
+    raise SystemExit("execution container name is not pinned")
+if not image or not memory:
+    raise SystemExit("execution image or memory is missing")
+try:
+    cpu = float(raw_cpu)
+except ValueError as exc:
+    raise SystemExit("execution CPU is invalid") from exc
+if cpu <= 0:
+    raise SystemExit("execution CPU must be positive")
+if not raw_env:
+    raise SystemExit("execution environment override is missing")
+
+env = []
+names = set()
+for entry in raw_env:
+    name, separator, value = entry.partition("=")
+    if (
+        not separator
+        or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
+        or name in names
+        or any(character in value for character in "\r\n")
+    ):
+        raise SystemExit("execution environment override is malformed")
+    names.add(name)
+    env.append({"name": name, "value": value})
+
+payload = {
+    "containers": [
+        {
+            "name": container_name,
+            "image": image,
+            "command": ["directive-ingest"],
+            "args": ["verify", "--deep-source-audit"],
+            "env": env,
+            "resources": {"cpu": cpu, "memory": memory},
+        }
+    ]
+}
+print(json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+PY
+}
+
+directive_build_job_start_yaml_args() {
+  local job_name="$1"
+  local resource_group="$2"
+  local override_file="$3"
+  [[ -n "$job_name" && -n "$resource_group" && -f "$override_file" ]] || return 1
+  DIRECTIVE_JOB_START_ARGS=(
+    --name "$job_name"
+    --resource-group "$resource_group"
+    --yaml "$override_file"
+    --query name
+    --output tsv
+  )
+  [[ "${DIRECTIVE_JOB_START_ARGS[*]}" == \
+    "--name $job_name --resource-group $resource_group --yaml $override_file --query name --output tsv" ]]
 }
 
 directive_assert_approved_execution_json() {
@@ -241,24 +371,32 @@ directive_assert_approved_execution_json() {
   local expected_validation_digest="$6"
   local expected_processing_version="$7"
   local expected_search_index="$8"
+  local expected_validation_evidence_digest="${9:-}"
   directive_assert_execution_override_json \
     "$container_json" "$expected_argument" "$expected_image" 1 2Gi || return
   python3 - "$expected_image" "$expected_environment_digest" \
     "$expected_source_digest" "$expected_validation_digest" \
     "$expected_processing_version" "$expected_search_index" \
-    "$expected_argument" "$container_json" <<'PY'
+    "$expected_argument" "$expected_validation_evidence_digest" \
+    "$container_json" <<'PY'
 import json
 import sys
 
 expected_image, expected_environment_digest, expected_source_digest, \
     expected_validation_digest, expected_processing_version, \
-    expected_search_index, expected_argument = sys.argv[1:8]
-container = json.loads(sys.argv[8])
+    expected_search_index, expected_argument, \
+    expected_validation_evidence_digest = sys.argv[1:9]
+container = json.loads(sys.argv[9])
+expected_args = (
+    ["verify", "--deep-source-audit"]
+    if expected_argument == "verify-deep"
+    else [expected_argument]
+)
 if not isinstance(container, dict):
     raise SystemExit("execution container is not an object")
 command = container.get("command")
 args = container.get("args")
-if command != ["directive-ingest"] or args != [expected_argument]:
+if command != ["directive-ingest"] or args != expected_args:
     raise SystemExit("approved execution command is not pinned")
 if container.get("image") != expected_image:
     raise SystemExit("publication execution image is not pinned")
@@ -274,6 +412,14 @@ expected = {
     "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST": expected_environment_digest,
     "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST": expected_source_digest,
 }
+if expected_argument == "run-daily":
+    expected["DIRECTIVE_APPROVED_VALIDATION_EVIDENCE_DIGEST"] = (
+        expected_validation_evidence_digest
+    )
+elif env.get("DIRECTIVE_APPROVED_VALIDATION_EVIDENCE_DIGEST") not in {None, ""}:
+    raise SystemExit(
+        "verification execution must not carry a validation evidence digest override"
+    )
 if any(env.get(key) != value for key, value in expected.items()):
     raise SystemExit("publication execution approval/configuration overrides are not exact")
 PY
@@ -301,8 +447,9 @@ if names & {
     "DIRECTIVE_APPROVED_VALIDATION_DIGEST",
     "DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST",
     "DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST",
+  "DIRECTIVE_APPROVED_VALIDATION_EVIDENCE_DIGEST",
 }:
-    raise SystemExit("approval overrides are not permitted for this execution")
+  raise SystemExit("approval overrides are not permitted for this execution")
 PY
 }
 
@@ -316,18 +463,26 @@ directive_select_new_approved_execution_names() {
   local expected_validation_digest="$7"
   local expected_processing_version="$8"
   local expected_search_index="$9"
-  python3 - "$before_json" "$current_json" "$expected_argument" \
+  local expected_validation_evidence_digest="${10:-}"
+  local before_file current_file status
+  before_file="$(mktemp)"
+  current_file="$(mktemp)"
+  printf '%s' "$before_json" >"$before_file"
+  printf '%s' "$current_json" >"$current_file"
+  if python3 - "$before_file" "$current_file" "$expected_argument" \
     "$expected_image" "$expected_environment_digest" "$expected_source_digest" \
     "$expected_validation_digest" "$expected_processing_version" \
-    "$expected_search_index" <<'PY'
+    "$expected_search_index" "$expected_validation_evidence_digest" <<'PY'
 import json
+import pathlib
 import sys
 
-before = json.loads(sys.argv[1])
-current = json.loads(sys.argv[2])
+before = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+current = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
 expected_argument, expected_image, expected_environment_digest, \
     expected_source_digest, expected_validation_digest, \
-    expected_processing_version, expected_search_index = sys.argv[3:]
+    expected_processing_version, expected_search_index, \
+    expected_validation_evidence_digest = sys.argv[3:]
 before_names = {
     item.get("name") for item in before if isinstance(item, dict)
 }
@@ -355,6 +510,18 @@ for item in current:
             and env.get("DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST") == expected_environment_digest
             and env.get("DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST") == expected_source_digest
             and env.get("DIRECTIVE_APPROVED_VALIDATION_DIGEST") == expected_validation_digest
+            and (
+                (
+                    expected_argument == "run-daily"
+                    and env.get("DIRECTIVE_APPROVED_VALIDATION_EVIDENCE_DIGEST")
+                    == expected_validation_evidence_digest
+                )
+                or (
+                    expected_argument != "run-daily"
+                    and env.get("DIRECTIVE_APPROVED_VALIDATION_EVIDENCE_DIGEST")
+                    in {None, ""}
+                )
+            )
             and env.get("DIRECTIVE_PROCESSING_VERSION") == expected_processing_version
             and env.get("DIRECTIVE_SEARCH_INDEX") == expected_search_index
         ):
@@ -366,6 +533,13 @@ for name in sorted(set(matches)):
 if len(set(matches)) != 1:
     raise SystemExit(2)
 PY
+  then
+    status=0
+  else
+    status=$?
+  fi
+  rm -f "$before_file" "$current_file"
+  return "$status"
 }
 
 directive_assert_cosmos_recreation_plan() {
@@ -431,6 +605,7 @@ validate_keys = {
     "directive_version_ids", "mandate_count", "mandate_user_count",
     "mandate_checksum", "warnings", "warning_count", "failures",
     "source_inventory_digest",
+    "validation_evidence_digest",
     "validation_digest",
 }
 verify_keys = {
@@ -472,7 +647,7 @@ def digest(value):
 
 if not isinstance(record, dict) or record.get("record_schema") != schema:
     raise SystemExit("unexpected producer record schema")
-expected_keys = validate_keys if schema == "directive.validate.v2" else verify_keys
+expected_keys = validate_keys if schema == "directive.validate.v3" else verify_keys
 if set(record) != expected_keys:
     raise SystemExit("producer record has missing or unexpected top-level fields")
 if record.get("success") is not True or not isinstance(record.get("run_id"), str) or not record["run_id"]:
@@ -505,7 +680,7 @@ if record.get("processing_version") != processing_version:
     raise SystemExit("producer processing version does not match")
 if not isinstance(record.get("processing_hash"), str) or not _hex64(record["processing_hash"]):
     raise SystemExit("producer processing hash is invalid")
-if record.get("source_inventory_digest") != source_digest:
+if source_digest and record.get("source_inventory_digest") != source_digest:
     raise SystemExit("producer source inventory digest does not match")
 if not _int(record.get("source_count")) or record["source_count"] <= 0:
     raise SystemExit("producer source_count is invalid")
@@ -541,7 +716,7 @@ if len({(item["code"], item["severity"]) for item in warnings}) != len(warnings)
 if _has_float(record):
     raise SystemExit("producer record must be float-free")
 
-if schema == "directive.validate.v2":
+if schema == "directive.validate.v3":
     if not _int(record.get("mandate_count")) or record["mandate_count"] < 0:
         raise SystemExit("validation mandate_count is invalid")
     if not _int(record.get("mandate_user_count")) or record["mandate_user_count"] < 0:
@@ -550,9 +725,31 @@ if schema == "directive.validate.v2":
         raise SystemExit("validation failures must be an array")
     if not _hex64(record.get("mandate_checksum")):
         raise SystemExit("validation mandate_checksum is invalid")
+    if not _hex64(record.get("validation_evidence_digest")):
+        raise SystemExit("validation validation_evidence_digest is invalid")
     if not _hex64(record.get("validation_digest")) or digest({
-        k: v for k, v in record.items()
-        if k not in {"run_id", "validation_digest"}
+        key: record[key]
+        for key in (
+            "record_schema",
+            "success",
+            "environment",
+            "environment_digest",
+            "processing_version",
+            "processing_hash",
+            "search_index",
+            "source_count",
+            "directive_count",
+            "normalized_directive_ids",
+            "directive_version_ids",
+            "mandate_count",
+            "mandate_user_count",
+            "mandate_checksum",
+            "warnings",
+            "warning_count",
+            "failures",
+            "source_inventory_digest",
+            "validation_evidence_digest",
+        )
     }) != record["validation_digest"]:
         raise SystemExit("validation_digest does not match the visible producer record")
 else:

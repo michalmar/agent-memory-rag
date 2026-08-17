@@ -9,6 +9,7 @@ export COPILOT_HOME="${COPILOT_HOME:-$HOME/.copilot}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_BUILD_CONTEXT="${REPO_BUILD_CONTEXT:-$REPO_ROOT}"
 INFRA_DIR="$REPO_ROOT/infra"
 AGENT_KIND="support"
 IMAGE_TAG=""
@@ -99,7 +100,7 @@ ACR_LOGIN="$(tf acr_login_server)"
 case "$AGENT_KIND" in
   support)
     AGENT_NAME="$(tf foundry_hosted_agent_name)"
-    DOCKERFILE="$REPO_ROOT/agents/customer-support-maf/src/customer-support-maf/Dockerfile"
+    DOCKERFILE="$REPO_BUILD_CONTEXT/agents/customer-support-maf/src/customer-support-maf/Dockerfile"
     AZD_PROJECT_DIR="$REPO_ROOT/agents/customer-support-maf"
     IMAGE_ENV_VAR="HOSTED_AGENT_IMAGE"
     ;;
@@ -108,7 +109,7 @@ case "$AGENT_KIND" in
     DIRECTIVE_RELEASE_ID="$(
       tf directive_agent_release_id
     )"
-    DOCKERFILE="$REPO_ROOT/agents/directive-rag-maf/src/directive-rag-maf/Dockerfile"
+    DOCKERFILE="$REPO_BUILD_CONTEXT/agents/directive-rag-maf/src/directive-rag-maf/Dockerfile"
     AZD_PROJECT_DIR="$REPO_ROOT/agents/directive-rag-maf"
     IMAGE_ENV_VAR="DIRECTIVE_HOSTED_AGENT_IMAGE"
     ;;
@@ -141,7 +142,7 @@ az acr build \
   -r "$ACR_NAME" \
   -t "${AGENT_NAME}:${IMAGE_TAG}" \
   -f "$DOCKERFILE" \
-  "$REPO_ROOT"
+  "$REPO_BUILD_CONTEXT"
 
 if [[ "$CONFIGURE_AZD" == true ]]; then
   (

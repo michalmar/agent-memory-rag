@@ -117,6 +117,9 @@ describe('chat event reducer', () => {
     expect(
       readProgress({ stage: 'hidden_reasoning', status: 'in_progress' }),
     ).toBeUndefined();
+    expect(
+      readProgress({ stage: 'following_references', status: 'in_progress' }),
+    ).toBeUndefined();
 
     let state = createChatEventState(assistantTurn(), 0);
     state = reduceChatEvent(state, {

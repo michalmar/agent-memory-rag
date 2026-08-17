@@ -38,6 +38,7 @@ class HostedAgentRuntimeTests(unittest.TestCase):
                 runtime,
                 "install_agent365_identity_middleware",
             ) as install_middleware,
+            patch.object(runtime, "close_gateway_transport_sync") as close_transport,
         ):
             runtime.run_hosted_agent(build_agent)
 
@@ -49,6 +50,7 @@ class HostedAgentRuntimeTests(unittest.TestCase):
             agent_id="published-agent",
         )
         server.run.assert_called_once_with()
+        close_transport.assert_called_once_with()
 
     def test_runs_without_middleware_before_publication(self) -> None:
         server = SimpleNamespace(run=Mock())
@@ -72,11 +74,38 @@ class HostedAgentRuntimeTests(unittest.TestCase):
                 runtime,
                 "install_agent365_identity_middleware",
             ) as install_middleware,
+            patch.object(runtime, "close_gateway_transport_sync") as close_transport,
         ):
             runtime.run_hosted_agent(Mock(return_value=object()))
 
         install_middleware.assert_not_called()
         server.run.assert_called_once_with()
+        close_transport.assert_called_once_with()
+
+    def test_closes_transport_even_when_server_run_fails(self) -> None:
+        server = SimpleNamespace(run=Mock(side_effect=RuntimeError("boom")))
+        server_factory = Mock(return_value=server)
+
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "agent_framework_foundry_hosting": self._hosting_module(
+                        server_factory
+                    )
+                },
+            ),
+            patch.object(
+                runtime,
+                "configure_observability_identity",
+                return_value=("deployment-tenant", None),
+            ),
+            patch.object(runtime, "close_gateway_transport_sync") as close_transport,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                runtime.run_hosted_agent(Mock(return_value=object()))
+
+        close_transport.assert_called_once_with()
 
 
 if __name__ == "__main__":

@@ -4,13 +4,9 @@ import { hasCitations } from './citations.js';
 import { SHIPPING_STATUS_TEMPLATE } from './templates/shipping-status.js';
 
 const DIRECTIVE_TOOLS = new Set([
-  'resolve_directive',
+  'get_directive',
   'search_directives',
-  'get_directive_manifest',
   'get_directive_content',
-  'search_within_directive',
-  'get_related_directives',
-  'get_precomputed_summary',
   'get_user_directive_mandates',
 ]);
 

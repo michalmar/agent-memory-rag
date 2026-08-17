@@ -126,6 +126,15 @@ class MandateRepository:
     async def check_access(self) -> None:
         await self._container.read()
 
+    async def get_active_snapshot(self) -> MandateSnapshot | None:
+        active = await self._read_active()
+        if active is None:
+            return None
+        snapshot = self._snapshot_from_active(active)
+        if snapshot is None:
+            raise RuntimeError("Active mandate snapshot is invalid")
+        return snapshot
+
     async def stage(
         self, parsed: ParsedMandates, run_id: str
     ) -> tuple[MandateSnapshot, dict[str, Any] | None, bool]:

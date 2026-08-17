@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -94,12 +95,56 @@ class DirectiveToolExecutor:
             async with asyncio.timeout(
                 settings.directive_tool_timeout_seconds
             ):
-                with span("directive.tool", {"agent.tool.name": name}):
-                    outcome = await self._execute(
-                        name,
-                        validated,
-                        user_id=user_id,
-                        settings=settings,
+                with span("directive.tool", {"agent.tool.name": name}) as current_span:
+                    try:
+                        outcome = await self._execute(
+                            name,
+                            validated,
+                            user_id=user_id,
+                            settings=settings,
+                        )
+                    except DirectiveDataUnavailable as exc:
+                        if "publication" in str(exc).casefold():
+                            current_span.set_attribute(
+                                "directive.publication_gate_unavailable",
+                                True,
+                            )
+                        raise
+                    result_bytes = len(
+                        json.dumps(
+                            outcome.data,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            default=str,
+                        ).encode("utf-8")
+                    )
+                    current_span.set_attribute("agent.tool.status", outcome.status)
+                    current_span.set_attribute(
+                        "agent.tool.citation_count",
+                        len(outcome.citations),
+                    )
+                    current_span.set_attribute(
+                        "agent.tool.result_bytes",
+                        result_bytes,
+                    )
+                    current_span.set_attribute(
+                        "agent.tool.result_estimated_tokens",
+                        (result_bytes + 3) // 4,
+                    )
+                    current_span.set_attribute(
+                        "agent.tool.continuation_call",
+                        bool(validated.get("cursor", 0)),
+                    )
+                    current_span.set_attribute(
+                        "agent.tool.manifest_coverage",
+                        any(
+                            bool(
+                                (citation.coverage or {}).get(
+                                    "manifest_complete"
+                                )
+                            )
+                            for citation in outcome.citations
+                        ),
                     )
         except TimeoutError as exc:
             raise ToolExecutionError(
@@ -132,20 +177,12 @@ class DirectiveToolExecutor:
         user_id: str,
         settings: Settings,
     ) -> _Outcome:
-        if name == "resolve_directive":
-            return await self._resolve(arguments, settings)
+        if name == "get_directive":
+            return await self._get_directive(arguments)
         if name == "search_directives":
             return await self._search_directives(arguments, settings)
-        if name == "get_directive_manifest":
-            return await self._manifest(arguments)
         if name == "get_directive_content":
             return await self._content(arguments, settings)
-        if name == "search_within_directive":
-            return await self._search_within(arguments, settings)
-        if name == "get_related_directives":
-            return await self._related(arguments, settings)
-        if name == "get_precomputed_summary":
-            return await self._summary(arguments)
         if name == "get_user_directive_mandates":
             return await self._mandate_status(
                 arguments,
@@ -154,113 +191,56 @@ class DirectiveToolExecutor:
             )
         raise ToolExecutionError("UNKNOWN_TOOL", f"unknown directive tool: {name}")
 
-    async def _resolve(
+    async def _get_directive(
         self,
         arguments: dict[str, Any],
-        settings: Settings,
     ) -> _Outcome:
-        directive_id = arguments.get("directive_id")
-        if directive_id:
-            record = await self._catalog.resolve_version(
-                directive_id,
-                directive_version_id=arguments.get("directive_version_id"),
-                version_label=arguments.get("version_label"),
-                as_of=arguments.get("as_of"),
-            )
-            if record is None:
-                return _Outcome(
-                    data={
-                        "resolution_status": "not_found",
-                        "candidates": [],
-                    }
-                )
-            version = self._catalog.public_version(record)
+        bundle = await self._catalog.get_current_published_version(
+            arguments["directive_id"]
+        )
+        if bundle is None:
+            return _not_found()
+        version = self._catalog.public_version(bundle)
+        view = arguments.get("view", "metadata")
+        if view == "metadata":
             return _Outcome(
-                data={
-                    "resolution_status": "resolved",
-                    "directive": version,
-                    "candidates": [version],
-                },
+                data={"directive": version},
                 citations=(_version_citation(version),),
             )
-
-        query = arguments["query"]
-        search = await self._search.retrieve(
-            intents=[query],
-            current_only=not (
-                arguments.get("version_label") or arguments.get("as_of")
-            ),
-            max_results=min(10, settings.directive_max_search_results),
-        )
-        candidates: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for reference in search["references"]:
-            source = reference.get("source_data") or {}
-            candidate_id = source.get("directive_id")
-            if (
-                not isinstance(candidate_id, str)
-                or candidate_id in seen
-            ):
-                continue
-            seen.add(candidate_id)
-            record = await self._catalog.resolve_version(
-                candidate_id,
-                version_label=arguments.get("version_label"),
-                as_of=arguments.get("as_of"),
+        if view == "manifest":
+            manifest = bundle.manifest
+            return _Outcome(
+                data={
+                    "directive": version,
+                    "manifest": _public_manifest(manifest),
+                    "coverage": {
+                        "total_sections": len(manifest.sections),
+                        "total_pages": manifest.total_pages,
+                        "total_tokens": manifest.total_tokens,
+                    },
+                },
+                citations=(
+                    _version_citation(
+                        version,
+                        page_from=1,
+                        page_to=manifest.total_pages,
+                        coverage={"manifest_complete": True},
+                    ),
+                ),
             )
-            if record is not None:
-                candidates.append(self._catalog.public_version(record))
-        status = (
-            "resolved"
-            if len(candidates) == 1
-            else "ambiguous"
-            if candidates
-            else "not_found"
-        )
-        data: dict[str, Any] = {
-            "resolution_status": status,
-            "candidates": candidates,
-        }
-        if len(candidates) == 1:
-            data["directive"] = candidates[0]
-        return _Outcome(
-            data=data,
-            citations=tuple(_version_citation(item) for item in candidates),
-        )
-
-    async def _search_directives(
-        self,
-        arguments: dict[str, Any],
-        settings: Settings,
-    ) -> _Outcome:
-        max_results = _bounded_results(arguments, settings)
-        result = await self._search.retrieve(
-            intents=arguments["intents"],
-            current_only=arguments.get("current_only", True),
-            max_results=max_results,
-            directive_ids=arguments.get("directive_ids"),
-            directive_version_id=arguments.get("directive_version_id"),
-        )
-        return _Outcome(
-            data=result,
-            citations=_search_citations(
-                result["references"],
-                retrieval_strategy="discovery",
-            ),
-        )
-
-    async def _manifest(self, arguments: dict[str, Any]) -> _Outcome:
-        bundle = await self._published_bundle(arguments)
+        summary = bundle.summary
         manifest = bundle.manifest
-        version = self._catalog.public_version(bundle)
         return _Outcome(
             data={
                 "directive": version,
-                "manifest": _public_manifest(manifest),
+                "summary": _public_summary(summary),
                 "coverage": {
-                    "total_sections": len(manifest.sections),
-                    "total_pages": manifest.total_pages,
-                    "total_tokens": manifest.total_tokens,
+                    "covered_section_count": len(summary.covered_section_ids),
+                    "total_section_count": summary.total_section_count,
+                    "complete": (
+                        len(summary.covered_section_ids)
+                        == summary.total_section_count
+                    ),
                 },
             },
             citations=(
@@ -268,7 +248,36 @@ class DirectiveToolExecutor:
                     version,
                     page_from=1,
                     page_to=manifest.total_pages,
-                    coverage={"manifest_complete": True},
+                    retrieval_strategy="precomputed_summary",
+                    coverage={
+                        "covered_section_count": len(summary.covered_section_ids),
+                        "total_section_count": summary.total_section_count,
+                    },
+                ),
+            ),
+        )
+
+    async def _search_directives(
+        self,
+        arguments: dict[str, Any],
+        settings: Settings,
+    ) -> _Outcome:
+        await self._catalog.ensure_publication_readable()
+        max_results = _bounded_results(arguments, settings)
+        result = await self._search.retrieve(
+            intents=arguments["intents"],
+            max_results=max_results,
+            directive_ids=arguments.get("directive_ids"),
+            section_ids=arguments.get("section_ids"),
+        )
+        return _Outcome(
+            data=result,
+            citations=_search_citations(
+                result["references"],
+                retrieval_strategy=(
+                    "focused"
+                    if arguments.get("directive_ids") or arguments.get("section_ids")
+                    else "discovery"
                 ),
             ),
         )
@@ -278,7 +287,7 @@ class DirectiveToolExecutor:
         arguments: dict[str, Any],
         settings: Settings,
     ) -> _Outcome:
-        bundle = await self._published_bundle(arguments)
+        bundle = await self._current_bundle(arguments["directive_id"])
         manifest = bundle.manifest
         version = self._catalog.public_version(bundle)
         requested_tokens = arguments.get(
@@ -386,140 +395,6 @@ class DirectiveToolExecutor:
             citations=citations,
         )
 
-    async def _search_within(
-        self,
-        arguments: dict[str, Any],
-        settings: Settings,
-    ) -> _Outcome:
-        record = await self._catalog.get_version_record(
-            arguments["directive_id"],
-            arguments["directive_version_id"],
-        )
-        if record is None:
-            return _not_found()
-        result = await self._search.retrieve(
-            intents=arguments["intents"],
-            current_only=False,
-            max_results=_bounded_results(arguments, settings),
-            directive_ids=[arguments["directive_id"]],
-            directive_version_id=arguments["directive_version_id"],
-            section_ids=arguments.get("section_ids"),
-        )
-        return _Outcome(
-            data=result,
-            citations=_search_citations(
-                result["references"],
-                retrieval_strategy="focused",
-            ),
-        )
-
-    async def _related(
-        self,
-        arguments: dict[str, Any],
-        settings: Settings,
-    ) -> _Outcome:
-        depth = arguments.get("depth", 1)
-        if depth > settings.directive_max_related_depth:
-            raise ToolExecutionError(
-                "RELATED_DEPTH_EXCEEDED",
-                "Related-directive depth exceeds the configured limit",
-            )
-        source = await self._catalog.get_version_record(
-            arguments["directive_id"],
-            arguments["directive_version_id"],
-        )
-        if source is None:
-            return _not_found()
-
-        relation_types = set(arguments.get("relation_types") or [])
-        visited = {arguments["directive_id"]}
-        frontier = [(source, 0)]
-        related: list[dict[str, Any]] = []
-        relation_ids: set[str] = set()
-        while frontier:
-            record, level = frontier.pop(0)
-            if level >= depth:
-                continue
-            relations = await self._catalog.get_relations(
-                record["directive_id"],
-                record["directive_version_id"],
-                relation_types or None,
-            )
-            for relation in relations:
-                if relation.relation_id in relation_ids:
-                    continue
-                relation_ids.add(relation.relation_id)
-                target_id = relation.target_directive_id
-                target = await self._catalog.resolve_version(
-                    target_id,
-                    version_label=relation.target_version_label,
-                )
-                item: dict[str, Any] = {
-                    "depth": level + 1,
-                    "relation": relation.model_dump(mode="json"),
-                    "target": (
-                        self._catalog.public_version(target)
-                        if target is not None
-                        else None
-                    ),
-                }
-                related.append(item)
-                if target is not None and target_id not in visited:
-                    visited.add(target_id)
-                    frontier.append((target, level + 1))
-        citations = tuple(
-            _version_citation(
-                item["target"],
-                retrieval_strategy="linked",
-            )
-            for item in related
-            if item["target"] is not None
-        )
-        return _Outcome(
-            data={
-                "source": self._catalog.public_version(source),
-                "related": related,
-                "max_depth": depth,
-            },
-            citations=citations,
-        )
-
-    async def _summary(self, arguments: dict[str, Any]) -> _Outcome:
-        bundle = await self._published_bundle(arguments)
-        manifest = bundle.manifest
-        summary = bundle.summary
-        version = self._catalog.public_version(bundle)
-        return _Outcome(
-            data={
-                "directive": version,
-                "summary": _public_summary(summary),
-                "coverage": {
-                    "covered_section_count": len(
-                        summary.covered_section_ids
-                    ),
-                    "total_section_count": summary.total_section_count,
-                    "complete": (
-                        len(summary.covered_section_ids)
-                        == summary.total_section_count
-                    ),
-                },
-            },
-            citations=(
-                _version_citation(
-                    version,
-                    page_from=1,
-                    page_to=manifest.total_pages,
-                    retrieval_strategy="precomputed_summary",
-                    coverage={
-                        "covered_section_count": len(
-                            summary.covered_section_ids
-                        ),
-                        "total_section_count": summary.total_section_count,
-                    },
-                ),
-            ),
-        )
-
     async def _mandate_status(
         self,
         arguments: dict[str, Any],
@@ -533,6 +408,7 @@ class DirectiveToolExecutor:
                 "TOO_MANY_DIRECTIVES",
                 "Mandate lookup exceeds the selected-directive limit",
             )
+        await self._catalog.ensure_publication_readable()
         result = await self._mandates.lookup(user_id, directive_ids)
         return _Outcome(
             status="partial" if result["degraded"] else "ok",
@@ -542,18 +418,14 @@ class DirectiveToolExecutor:
             ),
         )
 
-    async def _published_bundle(
-        self,
-        arguments: dict[str, Any],
-    ) -> PublishedDirectiveVersion:
-        bundle = await self._catalog.get_published_version(
-            arguments["directive_id"],
-            arguments["directive_version_id"],
+    async def _current_bundle(self, directive_id: str) -> PublishedDirectiveVersion:
+        bundle = await self._catalog.get_current_published_version(
+            directive_id
         )
         if bundle is None:
             raise ToolExecutionError(
                 "DIRECTIVE_NOT_FOUND",
-                "The requested directive version was not found",
+                "The requested directive was not found",
             )
         return bundle
 
@@ -616,7 +488,7 @@ def _public_summary(bundle_summary: DirectiveSummary) -> dict[str, Any]:
 def _not_found() -> _Outcome:
     return _Outcome(
         status="not_found",
-        data={"message": "The requested directive version was not found"},
+        data={"message": "The requested directive was not found"},
         error_code="DIRECTIVE_NOT_FOUND",
     )
 

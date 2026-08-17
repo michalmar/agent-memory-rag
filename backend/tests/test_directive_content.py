@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 import unittest
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from azure.cosmos import exceptions
 from directive_contracts import (
@@ -121,13 +123,16 @@ def _bundle_and_items(
 
 
 class _CatalogContainer:
-    def __init__(self, value: dict) -> None:
-        self.value = value
+    def __init__(self, items: dict[tuple[str, str], dict]) -> None:
+        self.items = items
         self.reads: list[tuple[str, str]] = []
 
     async def read_item(self, *, item: str, partition_key: str):
         self.reads.append((item, partition_key))
-        return self.value
+        value = self.items.get((item, partition_key))
+        if value is None:
+            raise exceptions.CosmosResourceNotFoundError(message="missing")
+        return value
 
 
 class _ContentContainer:
@@ -156,10 +161,30 @@ class _ContentContainer:
 
 
 class DirectiveCatalogBundleTests(unittest.IsolatedAsyncioTestCase):
-    async def test_exact_version_is_one_validated_point_read(self) -> None:
+    @staticmethod
+    def _committed_gate() -> dict[str, str | None]:
+        return {
+            "id": "directive-publication-gate",
+            "directive_id": "_control",
+            "type": "publication_gate",
+            "state": "committed",
+            "committed_revision": "rev-1",
+            "candidate_revision": None,
+            "run_id": "run-1",
+            "updated_at": "2026-08-16T12:00:00+00:00",
+            "_etag": "gate-etag",
+        }
+
+    async def test_exact_version_reads_gate_then_bundle(self) -> None:
         bundle, _ = _bundle_and_items(["content"])
         container = _CatalogContainer(
-            {**bundle.model_dump(mode="json"), "_etag": "etag"}
+            {
+                ("directive-publication-gate", "_control"): self._committed_gate(),
+                (
+                    published_directive_version_item_id(_DIRECTIVE_ID, "1"),
+                    _DIRECTIVE_ID,
+                ): {**bundle.model_dump(mode="json"), "_etag": "etag"},
+            }
         )
         repository = DirectiveCatalogRepository()
         repository._container = container
@@ -171,17 +196,29 @@ class DirectiveCatalogBundleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, bundle)
         self.assertEqual(
             container.reads,
-            [(published_directive_version_item_id(_DIRECTIVE_ID, "1"), _DIRECTIVE_ID)],
+            [
+                ("directive-publication-gate", "_control"),
+                (
+                    published_directive_version_item_id(_DIRECTIVE_ID, "1"),
+                    _DIRECTIVE_ID,
+                ),
+            ],
         )
 
     async def test_legacy_version_is_rejected_without_fallback(self) -> None:
         container = _CatalogContainer(
             {
-                "id": f"version:{_VERSION_ID}",
-                "type": "version",
-                "directive_id": _DIRECTIVE_ID,
-                "directive_version_id": _VERSION_ID,
-                "publication_state": "published",
+                ("directive-publication-gate", "_control"): self._committed_gate(),
+                (
+                    published_directive_version_item_id(_DIRECTIVE_ID, "1"),
+                    _DIRECTIVE_ID,
+                ): {
+                    "id": f"version:{_VERSION_ID}",
+                    "type": "version",
+                    "directive_id": _DIRECTIVE_ID,
+                    "directive_version_id": _VERSION_ID,
+                    "publication_state": "published",
+                }
             }
         )
         repository = DirectiveCatalogRepository()
@@ -192,13 +229,21 @@ class DirectiveCatalogBundleTests(unittest.IsolatedAsyncioTestCase):
                 _DIRECTIVE_ID, _VERSION_ID
             )
 
-        self.assertEqual(len(container.reads), 1)
+        self.assertEqual(len(container.reads), 2)
 
     async def test_catalog_rejects_returned_human_identity_mismatch(self) -> None:
         bundle, _ = _bundle_and_items(["content"])
         item = bundle.model_dump(mode="json")
         item["directive_version_id"] = "ČD/42-A:v2"
-        container = _CatalogContainer(item)
+        container = _CatalogContainer(
+            {
+                ("directive-publication-gate", "_control"): self._committed_gate(),
+                (
+                    published_directive_version_item_id(_DIRECTIVE_ID, "1"),
+                    _DIRECTIVE_ID,
+                ): item
+            }
+        )
         repository = DirectiveCatalogRepository()
         repository._container = container
 
@@ -207,6 +252,172 @@ class DirectiveCatalogBundleTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(result)
+
+    async def test_publication_gate_blocks_online_reads(self) -> None:
+        bundle, _ = _bundle_and_items(["content"])
+        container = _CatalogContainer(
+            {
+                ("directive-publication-gate", "_control"): {
+                    "id": "directive-publication-gate",
+                    "directive_id": "_control",
+                    "type": "publication_gate",
+                    "state": "activating",
+                    "committed_revision": "rev-1",
+                    "candidate_revision": "rev-2",
+                    "run_id": "run-1",
+                    "updated_at": "2026-08-16T12:00:00+00:00",
+                    "_etag": "gate-etag",
+                },
+                (
+                    published_directive_version_item_id(_DIRECTIVE_ID, "1"),
+                    _DIRECTIVE_ID,
+                ): bundle.model_dump(mode="json"),
+            }
+        )
+        repository = DirectiveCatalogRepository()
+        repository._container = container
+
+        with self.assertRaisesRegex(
+            DirectiveDataUnavailable,
+            "publication is unavailable",
+        ):
+            await repository.get_published_version(_DIRECTIVE_ID, _VERSION_ID)
+
+    async def test_missing_publication_gate_fails_closed(self) -> None:
+        bundle, _ = _bundle_and_items(["content"])
+        container = _CatalogContainer(
+            {
+                (
+                    published_directive_version_item_id(_DIRECTIVE_ID, "1"),
+                    _DIRECTIVE_ID,
+                ): bundle.model_dump(mode="json")
+            }
+        )
+        repository = DirectiveCatalogRepository()
+        repository._container = container
+
+        with patch(
+            "agent_memory_backend.directive_catalog.get_settings",
+            return_value=SimpleNamespace(
+                directive_publication_gate_enabled=True
+            ),
+        ):
+            with self.assertRaisesRegex(
+                DirectiveDataUnavailable,
+                "publication gate is unavailable",
+            ):
+                await repository.get_published_version(
+                    _DIRECTIVE_ID, _VERSION_ID
+                )
+        self.assertEqual(
+            container.reads,
+            [("directive-publication-gate", "_control")],
+        )
+
+    async def test_missing_publication_gate_is_legacy_committed_when_disabled(
+        self,
+    ) -> None:
+        bundle, _ = _bundle_and_items(["content"])
+        container = _CatalogContainer(
+            {
+                (
+                    published_directive_version_item_id(_DIRECTIVE_ID, "1"),
+                    _DIRECTIVE_ID,
+                ): bundle.model_dump(mode="json")
+            }
+        )
+        repository = DirectiveCatalogRepository()
+        repository._container = container
+
+        with patch(
+            "agent_memory_backend.directive_catalog.get_settings",
+            return_value=SimpleNamespace(
+                directive_publication_gate_enabled=False
+            ),
+        ):
+            result = await repository.get_published_version(
+                _DIRECTIVE_ID, _VERSION_ID
+            )
+
+        self.assertEqual(result, bundle)
+        self.assertEqual(
+            container.reads,
+            [
+                ("directive-publication-gate", "_control"),
+                (
+                    published_directive_version_item_id(_DIRECTIVE_ID, "1"),
+                    _DIRECTIVE_ID,
+                ),
+            ],
+        )
+
+    async def test_malformed_publication_gate_fails_closed(self) -> None:
+        bundle, _ = _bundle_and_items(["content"])
+        container = _CatalogContainer(
+            {
+                ("directive-publication-gate", "_control"): {
+                    "id": "directive-publication-gate",
+                    "directive_id": "_control",
+                    "type": "publication_gate",
+                    "state": "committed",
+                    "committed_revision": "",
+                    "candidate_revision": None,
+                    "run_id": "run-1",
+                    "updated_at": "2026-08-16T12:00:00+00:00",
+                    "_etag": "gate-etag",
+                },
+                (
+                    published_directive_version_item_id(_DIRECTIVE_ID, "1"),
+                    _DIRECTIVE_ID,
+                ): bundle.model_dump(mode="json"),
+            }
+        )
+        repository = DirectiveCatalogRepository()
+        repository._container = container
+
+        with self.assertRaisesRegex(
+            DirectiveDataUnavailable,
+            "publication gate is invalid",
+        ):
+            await repository.get_published_version(_DIRECTIVE_ID, _VERSION_ID)
+        self.assertEqual(
+            container.reads,
+            [("directive-publication-gate", "_control")],
+        )
+
+    async def test_recovery_required_publication_gate_fails_closed(self) -> None:
+        bundle, _ = _bundle_and_items(["content"])
+        container = _CatalogContainer(
+            {
+                ("directive-publication-gate", "_control"): {
+                    "id": "directive-publication-gate",
+                    "directive_id": "_control",
+                    "type": "publication_gate",
+                    "state": "recovery_required",
+                    "committed_revision": "rev-1",
+                    "candidate_revision": "rev-2",
+                    "run_id": "run-1",
+                    "updated_at": "2026-08-16T12:00:00+00:00",
+                    "_etag": "gate-etag",
+                },
+                (
+                    published_directive_version_item_id(_DIRECTIVE_ID, "1"),
+                    _DIRECTIVE_ID,
+                ): bundle.model_dump(mode="json"),
+            }
+        )
+        repository = DirectiveCatalogRepository()
+        repository._container = container
+
+        with self.assertRaisesRegex(
+            DirectiveDataUnavailable,
+            "publication is unavailable",
+        ):
+            await repository.get_published_version(_DIRECTIVE_ID, _VERSION_ID)
+        self.assertEqual(
+            container.reads,
+            [("directive-publication-gate", "_control")],
+        )
 
     def test_public_catalog_metadata_omits_internal_hashes(self) -> None:
         bundle, _ = _bundle_and_items(["content"])

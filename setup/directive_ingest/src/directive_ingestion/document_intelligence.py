@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+import json
+from dataclasses import asdict, dataclass
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from pydantic import TypeAdapter, ValidationError
+
+from .config import RetryPolicyConfig
+from .provider_retry import RetryBudget, retry_provider_call
+from .run_metrics import IngestionRunMetrics
 
 _SCOPE = "https://cognitiveservices.azure.com/.default"
 
@@ -149,6 +155,125 @@ class ExtractedDocument:
         raise ValueError(f"Unknown page number: {page_number}")
 
 
+_EXTRACTED_DOCUMENT_ADAPTER = TypeAdapter(ExtractedDocument)
+
+
+def extracted_document_to_payload(
+    document: ExtractedDocument,
+) -> dict[str, Any]:
+    """Return the canonical JSON-compatible extraction representation."""
+    return json.loads(
+        json.dumps(
+            asdict(document),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+    )
+
+
+def extracted_document_from_payload(payload: Any) -> ExtractedDocument:
+    """Restore and validate a cached extraction without trusting cached types."""
+    if not isinstance(payload, dict):
+        raise RuntimeError("Cached extraction result must be an object")
+    try:
+        document = _EXTRACTED_DOCUMENT_ADAPTER.validate_python(payload)
+    except ValidationError as exc:
+        raise RuntimeError("Cached extraction result has an invalid schema") from exc
+    if extracted_document_to_payload(document) != payload:
+        raise RuntimeError("Cached extraction result contains unknown or coerced fields")
+    _validate_extracted_document(document)
+    return document
+
+
+def _validate_extracted_document(document: ExtractedDocument) -> None:
+    if not document.markdown.strip():
+        raise RuntimeError("Cached extraction content must be non-empty")
+    if not document.pages:
+        raise RuntimeError("Cached extraction must contain pages")
+    if tuple(page.page_number for page in document.pages) != tuple(
+        range(1, len(document.pages) + 1)
+    ):
+        raise RuntimeError("Cached extraction pages must be ordered")
+    flattened_spans = tuple(
+        span for page in document.pages for span in page.spans
+    )
+    if flattened_spans != document.content_spans:
+        raise RuntimeError("Cached extraction page spans disagree")
+    _validate_page_spans(document.content_spans, len(document.markdown))
+    pages_by_number = {page.page_number: page for page in document.pages}
+    for page in document.pages:
+        if page.width <= 0 or page.height <= 0:
+            raise RuntimeError("Cached extraction page geometry is invalid")
+    for line in document.lines:
+        page = pages_by_number.get(line.page_number)
+        if page is None or not line.text.strip():
+            raise RuntimeError("Cached extraction line is invalid")
+        _validate_polygon_in_page(line.polygon, page, "cached line polygon")
+    for paragraph in document.paragraphs:
+        if not paragraph.text.strip() or not paragraph.bounding_regions:
+            raise RuntimeError("Cached extraction paragraph is invalid")
+        for region in paragraph.bounding_regions:
+            page = pages_by_number.get(region.page_number)
+            if page is None:
+                raise RuntimeError(
+                    "Cached extraction paragraph references an unknown page"
+                )
+            _validate_polygon_in_page(
+                region.polygon,
+                page,
+                "cached paragraph polygon",
+            )
+    for table in document.tables:
+        if table.row_count < 1 or table.column_count < 1:
+            raise RuntimeError("Cached extraction table dimensions are invalid")
+        _validate_table_occupancy(
+            list(table.cells),
+            table.row_count,
+            table.column_count,
+        )
+        for region in table.bounding_regions:
+            page = pages_by_number.get(region.page_number)
+            if page is None:
+                raise RuntimeError(
+                    "Cached extraction table references an unknown page"
+                )
+            _validate_polygon_in_page(
+                region.polygon,
+                page,
+                "cached table polygon",
+            )
+        for cell in table.cells:
+            page = pages_by_number.get(cell.page_number)
+            if page is None:
+                raise RuntimeError(
+                    "Cached extraction table cell references an unknown page"
+                )
+            _validate_polygon_in_page(
+                cell.polygon,
+                page,
+                "cached table cell polygon",
+            )
+            if (
+                cell.row_index < 0
+                or cell.column_index < 0
+                or cell.row_span < 1
+                or cell.column_span < 1
+                or cell.row_index + cell.row_span > table.row_count
+                or cell.column_index + cell.column_span > table.column_count
+            ):
+                raise RuntimeError(
+                    "Cached extraction table cell is outside table bounds"
+                )
+    _validate_nested_records(
+        document.content_spans,
+        document.lines,
+        document.paragraphs,
+        document.tables,
+        len(document.markdown),
+    )
+
+
 class DocumentIntelligenceExtractor:
     def __init__(
         self,
@@ -157,23 +282,37 @@ class DocumentIntelligenceExtractor:
         credential: Any,
         *,
         timeout_seconds: float = 1200,
+        retry_policy: RetryPolicyConfig | None = None,
     ) -> None:
         self._endpoint = endpoint.rstrip("/")
         self._api_version = api_version
         self._credential = credential
         self._timeout_seconds = timeout_seconds
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(120))
+        self._retry_policy = retry_policy or RetryPolicyConfig(
+            5,
+            1.0,
+            30.0,
+            0.2,
+            12,
+        )
+        self._metrics: IngestionRunMetrics | None = None
+
+    def attach_metrics(self, metrics: IngestionRunMetrics | None) -> None:
+        self._metrics = metrics
 
     async def close(self) -> None:
         await self._client.aclose()
 
     async def check_access(self) -> None:
+        budget = RetryBudget(self._retry_policy.stage_retry_budget)
         headers = await self._authorization_headers()
         response = await self._request_with_retry(
             "GET",
             f"{self._endpoint}/documentintelligence/documentModels/prebuilt-layout",
             headers=headers,
             params={"api-version": self._api_version},
+            budget=budget,
         )
         if not isinstance(response.json(), dict):
             raise RuntimeError(
@@ -181,6 +320,7 @@ class DocumentIntelligenceExtractor:
             )
 
     async def extract(self, pdf: bytes) -> ExtractedDocument:
+        budget = RetryBudget(self._retry_policy.stage_retry_budget)
         headers = await self._authorization_headers()
         response = await self._request_with_retry(
             "POST",
@@ -193,13 +333,14 @@ class DocumentIntelligenceExtractor:
                 "stringIndexType": "unicodeCodePoint",
             },
             content=pdf,
+            budget=budget,
         )
         if response.status_code == 200:
             payload = response.json()
         elif response.status_code == 202:
             operation_url = response.headers.get("operation-location", "")
             self._validate_operation_url(operation_url)
-            payload = await self._poll(operation_url, headers)
+            payload = await self._poll(operation_url, headers, budget)
         else:
             raise RuntimeError(
                 "Document Intelligence analyze returned unexpected HTTP "
@@ -215,12 +356,20 @@ class DocumentIntelligenceExtractor:
         return {"Authorization": f"Bearer {value}"}
 
     async def _poll(
-        self, operation_url: str, headers: dict[str, str]
+        self,
+        operation_url: str,
+        headers: dict[str, str],
+        budget: RetryBudget,
     ) -> dict[str, Any]:
         deadline = asyncio.get_running_loop().time() + self._timeout_seconds
         while asyncio.get_running_loop().time() < deadline:
+            if self._metrics is not None:
+                self._metrics.increment("document_intelligence_poll_count")
             response = await self._request_with_retry(
-                "GET", operation_url, headers=headers
+                "GET",
+                operation_url,
+                headers=headers,
+                budget=budget,
             )
             payload = response.json()
             if not isinstance(payload, dict):
@@ -236,22 +385,42 @@ class DocumentIntelligenceExtractor:
         raise TimeoutError("Document Intelligence analysis timed out")
 
     async def _request_with_retry(
-        self, method: str, url: str, **kwargs: Any
+        self,
+        method: str,
+        url: str,
+        *,
+        budget: RetryBudget,
+        **kwargs: Any,
     ) -> httpx.Response:
-        for attempt in range(5):
+        async def operation() -> httpx.Response:
             response = await self._client.request(method, url, **kwargs)
-            if response.status_code not in {408, 429, 500, 502, 503, 504}:
-                response.raise_for_status()
-                return response
-            if attempt == 4:
-                response.raise_for_status()
-            retry_after = response.headers.get("retry-after")
-            try:
-                delay = float(retry_after) if retry_after else 2**attempt
-            except ValueError:
-                delay = 2**attempt
-            await asyncio.sleep(min(delay, 30))
-        raise AssertionError("unreachable")
+            response.raise_for_status()
+            return response
+
+        return await retry_provider_call(
+            operation,
+            policy=self._retry_policy,
+            budget=budget,
+            on_attempt=self._record_request,
+            on_retry=self._record_retry,
+            on_throttle=self._record_throttle,
+        )
+
+    def _record_request(self) -> None:
+        if self._metrics is not None:
+            self._metrics.increment("document_intelligence_requests")
+
+    def _record_retry(self, error: Exception) -> None:
+        del error
+        if self._metrics is None:
+            return
+        self._metrics.increment("retry_count")
+        self._metrics.increment("retry_document_intelligence")
+
+    def _record_throttle(self, error: Exception) -> None:
+        del error
+        if self._metrics is not None:
+            self._metrics.increment("throttle_document_intelligence")
 
     def _validate_operation_url(self, operation_url: str) -> None:
         expected = urlparse(self._endpoint)

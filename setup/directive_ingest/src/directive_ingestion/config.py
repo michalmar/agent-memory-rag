@@ -28,6 +28,35 @@ def _integer(name: str, default: int, minimum: int) -> int:
     return value
 
 
+def _number(name: str, default: float, minimum: float) -> float:
+    raw = os.getenv(name, str(default))
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+    if value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class RetryPolicyConfig:
+    max_attempts: int
+    base_delay_seconds: float
+    max_delay_seconds: float
+    jitter_ratio: float
+    stage_retry_budget: int
+    operation_timeout_seconds: float = 180.0
+
+
+@dataclass(frozen=True, slots=True)
+class ConcurrencyConfig:
+    document_intelligence: int
+    embeddings: int
+    summaries: int
+    search_indexing: int
+
+
 @dataclass(frozen=True)
 class IngestionConfig:
     azure_client_id: str
@@ -63,6 +92,15 @@ class IngestionConfig:
     chunk_overlap_tokens: int
     summary_batch_tokens: int
     summary_full_document_tokens: int
+    summary_max_input_tokens: int
+    summary_max_output_tokens: int
+    embedding_max_item_tokens: int
+    embedding_max_items_per_request: int
+    embedding_max_aggregate_tokens: int
+    table_max_rows_per_part: int
+    table_max_chars_per_part: int
+    retry_policy: RetryPolicyConfig
+    concurrency: ConcurrencyConfig
 
     @classmethod
     def from_environment(cls) -> "IngestionConfig":
@@ -94,7 +132,7 @@ class IngestionConfig:
             ),
             search_endpoint=_required("AZURE_SEARCH_ENDPOINT").rstrip("/"),
             search_index=os.getenv(
-                "DIRECTIVE_SEARCH_INDEX", "directive-chunks-v2"
+                "DIRECTIVE_SEARCH_INDEX", "directive-chunks-v3"
             ),
             search_api_version=os.getenv(
                 "AZURE_SEARCH_API_VERSION", "2026-04-01"
@@ -146,7 +184,8 @@ class IngestionConfig:
                 )
             ),
             processing_version=os.getenv(
-                "DIRECTIVE_PROCESSING_VERSION", "directive-v2-czech-layout"
+                "DIRECTIVE_PROCESSING_VERSION",
+                "directive-v3-bounded-ingestion",
             ),
             chunk_token_limit=_integer(
                 "DIRECTIVE_CHUNK_TOKEN_LIMIT", 800, 128
@@ -159,6 +198,95 @@ class IngestionConfig:
             ),
             summary_full_document_tokens=_integer(
                 "DIRECTIVE_SUMMARY_FULL_DOCUMENT_TOKENS", 180000, 1000
+            ),
+            summary_max_input_tokens=_integer(
+                "DIRECTIVE_SUMMARY_MAX_INPUT_TOKENS",
+                900000,
+                1000,
+            ),
+            summary_max_output_tokens=_integer(
+                "DIRECTIVE_SUMMARY_MAX_OUTPUT_TOKENS",
+                16000,
+                256,
+            ),
+            embedding_max_item_tokens=_integer(
+                "DIRECTIVE_EMBEDDING_MAX_ITEM_TOKENS",
+                8192,
+                128,
+            ),
+            embedding_max_items_per_request=_integer(
+                "DIRECTIVE_EMBEDDING_MAX_ITEMS_PER_REQUEST",
+                256,
+                1,
+            ),
+            embedding_max_aggregate_tokens=_integer(
+                "DIRECTIVE_EMBEDDING_MAX_AGGREGATE_TOKENS",
+                240000,
+                128,
+            ),
+            table_max_rows_per_part=_integer(
+                "DIRECTIVE_TABLE_MAX_ROWS_PER_PART",
+                25,
+                1,
+            ),
+            table_max_chars_per_part=_integer(
+                "DIRECTIVE_TABLE_MAX_CHARS_PER_PART",
+                12000,
+                512,
+            ),
+            retry_policy=RetryPolicyConfig(
+                max_attempts=_integer(
+                    "DIRECTIVE_PROVIDER_MAX_ATTEMPTS",
+                    5,
+                    1,
+                ),
+                base_delay_seconds=_number(
+                    "DIRECTIVE_PROVIDER_RETRY_BASE_SECONDS",
+                    1.0,
+                    0.0,
+                ),
+                max_delay_seconds=_number(
+                    "DIRECTIVE_PROVIDER_RETRY_MAX_SECONDS",
+                    30.0,
+                    0.0,
+                ),
+                jitter_ratio=_number(
+                    "DIRECTIVE_PROVIDER_RETRY_JITTER_RATIO",
+                    0.2,
+                    0.0,
+                ),
+                stage_retry_budget=_integer(
+                    "DIRECTIVE_STAGE_RETRY_BUDGET",
+                    12,
+                    0,
+                ),
+                operation_timeout_seconds=_number(
+                    "DIRECTIVE_PROVIDER_OPERATION_TIMEOUT_SECONDS",
+                    180.0,
+                    1.0,
+                ),
+            ),
+            concurrency=ConcurrencyConfig(
+                document_intelligence=_integer(
+                    "DIRECTIVE_DOCUMENT_INTELLIGENCE_CONCURRENCY",
+                    4,
+                    1,
+                ),
+                embeddings=_integer(
+                    "DIRECTIVE_EMBEDDING_CONCURRENCY",
+                    2,
+                    1,
+                ),
+                summaries=_integer(
+                    "DIRECTIVE_SUMMARY_CONCURRENCY",
+                    2,
+                    1,
+                ),
+                search_indexing=_integer(
+                    "DIRECTIVE_SEARCH_INDEXING_CONCURRENCY",
+                    2,
+                    1,
+                ),
             ),
         )
         if config.chunk_overlap_tokens >= config.chunk_token_limit:
@@ -173,6 +301,38 @@ class IngestionConfig:
         if config.source_kind == "azure_blob" and not config.source_container:
             raise ValueError(
                 "DIRECTIVE_SOURCE_CONTAINER is required in azure_blob mode"
+            )
+        if (
+            config.summary_batch_tokens > config.summary_max_input_tokens
+            or config.summary_full_document_tokens
+            > config.summary_max_input_tokens
+        ):
+            raise ValueError(
+                "Summary thresholds must not exceed "
+                "DIRECTIVE_SUMMARY_MAX_INPUT_TOKENS"
+            )
+        if config.embedding_max_item_tokens > 8192:
+            raise ValueError(
+                "DIRECTIVE_EMBEDDING_MAX_ITEM_TOKENS exceeds provider limit"
+            )
+        if config.embedding_max_items_per_request > 2048:
+            raise ValueError(
+                "DIRECTIVE_EMBEDDING_MAX_ITEMS_PER_REQUEST exceeds provider limit"
+            )
+        if config.embedding_max_aggregate_tokens > 300000:
+            raise ValueError(
+                "DIRECTIVE_EMBEDDING_MAX_AGGREGATE_TOKENS exceeds provider limit"
+            )
+        if (
+            config.retry_policy.max_delay_seconds
+            < config.retry_policy.base_delay_seconds
+        ):
+            raise ValueError(
+                "Provider retry maximum delay must be at least the base delay"
+            )
+        if config.retry_policy.jitter_ratio > 1:
+            raise ValueError(
+                "DIRECTIVE_PROVIDER_RETRY_JITTER_RATIO must not exceed 1"
             )
         return config
 
@@ -189,6 +349,19 @@ class IngestionConfig:
             "summary_full_document_tokens": (
                 self.summary_full_document_tokens
             ),
+            "summary_max_input_tokens": self.summary_max_input_tokens,
+            "summary_max_output_tokens": self.summary_max_output_tokens,
+            "embedding_max_item_tokens": self.embedding_max_item_tokens,
+            "embedding_max_items_per_request": (
+                self.embedding_max_items_per_request
+            ),
+            "embedding_max_aggregate_tokens": (
+                self.embedding_max_aggregate_tokens
+            ),
+            "table_max_rows_per_part": self.table_max_rows_per_part,
+            "table_max_chars_per_part": self.table_max_chars_per_part,
+            "retry_policy": asdict(self.retry_policy),
+            "concurrency": asdict(self.concurrency),
             "embedding_deployment": self.embedding_deployment,
             "embedding_model": self.embedding_model,
             "embedding_dimensions": self.embedding_dimensions,

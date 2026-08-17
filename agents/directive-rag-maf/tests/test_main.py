@@ -28,7 +28,7 @@ import gateway_tools
 
 
 class DirectiveHostedAgentTests(unittest.TestCase):
-    def test_agent_registers_only_eight_directive_tools(self) -> None:
+    def test_agent_registers_only_four_current_directive_tools(self) -> None:
         captured = {}
 
         def agent_factory(**kwargs):
@@ -54,19 +54,18 @@ class DirectiveHostedAgentTests(unittest.TestCase):
         self.assertEqual(
             {tool.name for tool in captured["tools"]},
             {
-                "resolve_directive",
+                "get_directive",
                 "search_directives",
-                "get_directive_manifest",
                 "get_directive_content",
-                "search_within_directive",
-                "get_related_directives",
-                "get_precomputed_summary",
                 "get_user_directive_mandates",
             },
         )
         self.assertNotIn("knowledge_base_retrieve", captured["tools"])
         self.assertNotIn("get_order_status", captured["tools"])
-        self.assertIn("own retrieval planning", captured["instructions"])
+        self.assertIn(
+            "own retrieval planning",
+            " ".join(captured["instructions"].split()),
+        )
         self.assertEqual(captured["default_options"], {"store": True})
 
     def test_iteration_ceiling_is_independent_and_bounded(self) -> None:
@@ -103,6 +102,33 @@ class DirectiveHostedAgentTests(unittest.TestCase):
         invoke_gateway_tool.assert_awaited_once_with(
             "get_user_directive_mandates",
             {"directive_ids": ["ČD/42-A"]},
+            timeout_env_var="DIRECTIVE_TOOL_HTTP_TIMEOUT_SECONDS",
+            default_timeout=180.0,
+        )
+
+    def test_get_directive_wrapper_uses_consolidated_contract(self) -> None:
+        invoke_gateway_tool = AsyncMock(
+            return_value={"status": "ok", "data": {}}
+        )
+
+        with patch.object(
+            gateway_tools,
+            "invoke_gateway_tool",
+            new=invoke_gateway_tool,
+        ):
+            asyncio.run(
+                gateway_tools.get_directive(
+                    "ČD/42-A",
+                    view="manifest",
+                )
+            )
+
+        invoke_gateway_tool.assert_awaited_once_with(
+            "get_directive",
+            {
+                "directive_id": "ČD/42-A",
+                "view": "manifest",
+            },
             timeout_env_var="DIRECTIVE_TOOL_HTTP_TIMEOUT_SECONDS",
             default_timeout=180.0,
         )

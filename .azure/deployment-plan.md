@@ -1,10 +1,248 @@
 # Azure Deployment Plan - Azure Blob Directive Source
 
-> **Status:** Deployed
+> **Status:** Validated
 >
-> **Current release status:** Deployed
+> **Current release status:** Deployed; live rollback/recovery exercise pending
 
 Generated: 2026-07-25T20:33:12Z
+
+## Current release: bounded v3 directive ingestion
+
+Approved: 2026-08-16
+
+This release deploys fail-closed publication-gate awareness before replacing
+the current derived v2 directive corpus with the bounded
+`directive-v3-bounded-ingestion` output in `directive-chunks-v3`. The cutover is
+destructive only for derived directive data: it preserves the
+`directive-source` PDF corpus and does not retain parallel indexes, aliases,
+fallbacks, or backup generations.
+
+Automated Cosmos item TTL and Blob lifecycle rules remain disabled for this
+release. Diagnostic records, extraction caches, quarantine artifacts, and
+evidence therefore remain retained until explicitly removed. Retention periods
+and lifecycle automation are deferred to a future operational/data-owner review;
+stable publication data and source/canonical artifacts must never expire.
+
+### All validation checks pass
+
+- [x] Terraform and Azure CLI installations.
+- [x] Authentication, exact subscription, tenant, resource group, and East US
+      2 target confirmed.
+- [x] Terraform initialization, recursive formatting, and syntax validation.
+- [x] Saved Terraform plan reviewed with state access and policy compatibility.
+- [x] No unresolved azd Go-template variables.
+- [x] Static managed-identity and least-privilege RBAC review.
+- [x] Ingestion, contracts, backend, Hosted Agent, frontend, hosting, and
+      infrastructure guard suites pass.
+- [x] Frontend production build passes.
+- [x] No ingestion execution is active and the preserved source corpus matches
+      the approved inventory.
+- [x] Saved plan contains no unapproved resource deletion or replacement.
+- [x] Backend gate-awareness deployment can precede all live data mutation.
+
+### Validation proof
+
+Validated at `2026-08-16T20:02:29Z`.
+
+| Check | Result |
+| --- | --- |
+| Toolchain and authentication | Terraform 1.13.3, Azure CLI 2.80.0, subscription `ME-MngEnvMCAP372348-mimarusa-1` (`7bc68c68-f434-49ad-ab3e-b883ec39da86`), tenant `a7b1484c-f66a-496a-b1cf-35631a50396c`, and isolated Azure CLI profile confirmed |
+| Target | Existing `rg-agent-memory-rag` resources confirmed in East US 2; Search remains in its existing West Europe location |
+| Terraform | Initialization, recursive formatting, syntax validation, 98-resource state access, and exact saved-plan contract assertions passed |
+| Saved cutover plan | The original combined two-update plan is superseded and must not be applied; staged plans isolate ingestion maintenance configuration from the later backend gate/index switch |
+| Drift exclusion | Refreshed preview exposed an unrelated resource-group policy tag and storage-network drift; both are excluded from the approved plan and will not be changed |
+| Plan integrity | SHA-256 `68e5e3206f9a75f0be931bd6118997922fa690511c81a1a853d254bb41cac6a1` |
+| Azure Policy | Effective subscription and management-group assignments reviewed; the plan creates or deletes no Azure resource and introduces no policy conflict |
+| Static RBAC | Backend and ingestion identities retain resource-scoped Search data/service, Cosmos data, Blob data, Document Intelligence, OpenAI, and ACR roles required by their code paths; no role assignment changes are planned |
+| Ingestion | 185 tests passed |
+| Contracts and backend | 208 tests and 31 subtests passed |
+| Frontend | 43 tests, TypeScript compilation, and Vite production build passed |
+| Shared hosting and Directive Hosted Agent | 24 hosting tests and 7 Directive Hosted Agent tests passed |
+| Infrastructure | Guard fixtures, Bash 3 compatibility self-tests, Bash syntax, Terraform format/validate, saved-plan assertions, and `git diff --check` passed |
+| Container build | Local Docker is unavailable; immutable server-side ACR builds are required during deployment |
+| Source and job safety | Guarded dry run found exactly 2 protected PDFs, source digest `d6d8b2305c6a6c0de8079c25b5f34933aa20038190fb554e8f94275c07d6d2d4`, and no active ingestion execution |
+| Retention | Cosmos item TTL and Blob lifecycle automation remain disabled; future operational/data-owner review is documented |
+
+**Superseded combined plan — do not apply:**
+`/Users/mimarusa/.copilot/session-state/bf889d53-eaf5-4931-8116-184e1a7612e3/files/directive-v3-cutover-approved.tfplan`
+
+**Validated by:** `azure-validate`
+
+#### Split staging validation proof
+
+Validated at `2026-08-16T21:32:37Z`.
+
+| Check | Result |
+| --- | --- |
+| Staging plan | 0 additions, 1 in-place update, 0 deletions, and 0 replacements; only `azurerm_container_app_job.directive_ingestion` changes |
+| Safety boundary | Job command remains `directive-ingest maintenance`; backend remains on `directive-chunks-v2` with strict gate reads disabled |
+| Environment | Processing changes from `directive-v2-czech-layout` to `directive-v3-bounded-ingestion`, Search from `directive-chunks-v2` to `directive-chunks-v3`, and only the reviewed bounded provider/concurrency/table settings are added |
+| Terraform | Init, recursive format check, syntax validation, state access, exact action assertions, and unresolved-template checks passed |
+| Azure Policy | Effective management-group and subscription assignments reviewed; the plan changes no resource type, SKU, location, network, identity, role, or tag |
+| Static RBAC | Existing job identity retains resource-scoped ACR pull, source Blob read, artifact Blob write, Cosmos data contributor, Search service/index contributor, Document Intelligence user, and OpenAI user roles |
+| Plan integrity | SHA-256 `5eaa03154f87e10c900084d73e0aee6798703a0cc1889302df9c8e31718cf645` |
+
+**Validated staging plan:**
+`/Users/mimarusa/.copilot/session-state/bf889d53-eaf5-4931-8116-184e1a7612e3/files/directive-v3-job-stage.tfplan`
+
+#### Backend strict-gate validation proof
+
+Validated at `2026-08-16T22:24:31Z`.
+
+| Check | Result |
+| --- | --- |
+| Backend plan | 0 additions, 1 in-place update, 0 deletions, and 0 replacements; only `azurerm_container_app.backend` changes |
+| Runtime safety | Live image `backend:v3-bounded-20260816-2` is identical before and after the plan; all non-environment fields are unchanged |
+| Environment | Adds `DIRECTIVE_PUBLICATION_GATE_ENABLED=true` and changes only `DIRECTIVE_SEARCH_INDEX` from `directive-chunks-v2` to `directive-chunks-v3`; every other environment value is unchanged |
+| Drift exclusion | Refreshed planning used temporary plan-only lifecycle overrides for the already-reviewed resource-group tag and storage-network drift; the overrides were removed and Terraform formatting and validation passed again |
+| Superseded plans | `directive-v3-backend-strict.tfplan` includes unrelated drift and `directive-v3-backend-strict-isolated.tfplan` preserves a stale backend image; neither may be applied |
+| Terraform | Terraform 1.13.3, Azure CLI 2.80.0, initialization, recursive format check, syntax validation, 98-resource state access, exact JSON action assertions, and unresolved-template checks passed |
+| Build and regression | Backend suite passed with 180 tests and 31 subtests; ingestion suite passed with 195 tests |
+| Azure validation | Managed-identity preflight and metadata-only validation succeeded for both protected PDFs on `directive-ingestion:v3-bounded-20260816-7`; fresh approval evidence was written without publishing data |
+| Azure Policy | Effective management-group and subscription assignments were reviewed; the plan updates only two environment values on an existing Container App and creates, deletes, scales, exposes, or re-roles no resource |
+| Static RBAC | Backend identity retains resource-scoped Search Index Data Reader, directive Cosmos data reader, directive artifact Blob reader, source Blob contributor, OpenAI user, ACR pull, and telemetry roles; no role assignment changes are planned |
+| Plan integrity | SHA-256 `16ac9f963fbd45ff6fc400ab8a1384d77c63756ec8b33d54d9e418198f765fcb` |
+
+**Validated backend plan:**
+`/Users/mimarusa/.copilot/session-state/bf889d53-eaf5-4931-8116-184e1a7612e3/files/directive-v3-backend-strict-final.tfplan`
+
+**Validated by:** `azure-validate`
+
+#### Backend strict-gate deployment proof
+
+Verified at `2026-08-16T22:31:31Z`.
+
+| Item | Result |
+| --- | --- |
+| Apply | Exact SHA-256-verified saved plan applied: 0 additions, 1 in-place update, 0 deletions |
+| Revision | `ca-agmem-backend--0000068` is healthy, running at max scale, and receives 100% traffic |
+| Image | Immutable `backend:v3-bounded-20260816-2` remained unchanged |
+| Strict reads | Live environment has `DIRECTIVE_PUBLICATION_GATE_ENABLED=true` and `DIRECTIVE_SEARCH_INDEX=directive-chunks-v3` |
+| Readiness | Public `https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io/api/health/ready` returns ready with no degraded dependencies |
+| Live RBAC | Backend identity has ACR pull, Search index read, directive artifact read, source Blob contribution, OpenAI use, telemetry publishing, Foundry agent consumption, directive Cosmos read, and support/account Cosmos contribution at the reviewed scopes |
+| Ingestion safety | The ingestion job remains idle and pinned to nonpublishing maintenance mode |
+| Targeted output warning | Terraform warned that outputs may remain stale after a targeted apply; the stale `directive_search_index_name` output was ignored and the live Container App environment was independently verified as v3 |
+
+#### Hosted Agent and authenticated directive-path deployment proof
+
+Verified at `2026-08-16T22:38:45Z`.
+
+| Item | Result |
+| --- | --- |
+| Support Hosted Agent | Version 10 is active on `customer-support-maf-hosted:v3-bounded-20260816-1`, digest `sha256:6b6252b48e6908d0818edc53abe04653c39bbfc9e10907d9fdd42812391a2496`; direct remote invocation returned `OK` |
+| Directive Hosted Agent | Version 6 is active on `directive-rag-maf-hosted:v3-bounded-20260816-1`, digest `sha256:fb680b9f1e2a2d089a9ce50a4c272b81bb30a3df1a44cad3e6d13838f7815077`; its principal remains in the exact directive-agent allowlist |
+| Frontend | Revision `ca-agmem-frontend--0000032` is ready on `frontend:v3-bounded-20260816-1` |
+| Authenticated directive path | A delegated-user POST to `/api/chat` with `agent_type: "directive-rag"` created conversation `f42671c0-e33b-4f96-9c06-f48c6199c0df`, bound the stateful runtime, returned exactly `OK`, and emitted `RUN_FINISHED` |
+| Direct directive invocation | A direct CLI invocation was rejected by `/api/internal/agent-state/resolve` with `403`, the expected fail-closed result because that path bypasses the backend-created application session binding |
+| Data safety | No directive data was published or deleted |
+
+#### Terraform v3 output-state validation proof
+
+Validated at `2026-08-16T22:45:00Z`.
+
+| Check | Result |
+| --- | --- |
+| Saved plan | Changes only the stored `directive_search_index_name` output from `directive-chunks-v1` to `directive-chunks-v3` |
+| Resource safety | Exact JSON inspection found zero resource actions, additions, updates, deletions, or replacements |
+| Drift exclusion | Temporary plan-only lifecycle overrides excluded the already-reviewed resource-group tag and storage-network drift; the override file was removed before apply |
+| Terraform | Recursive format check, syntax validation, 98-resource state access, exact output assertions, and unresolved-template checks passed after override removal |
+| Policy and RBAC | No Azure resource or role-assignment action exists in the plan, so Azure Policy and live RBAC are unchanged |
+| Plan integrity | SHA-256 `f7ab2a8ac003f7ffde1eb59d756a593d4b3854702ba0e4f62def05cf71f6726a` |
+
+**Validated output-state plan:**
+`/Users/mimarusa/.copilot/session-state/bf889d53-eaf5-4931-8116-184e1a7612e3/files/directive-v3-output-refresh.tfplan`
+
+**Validated by:** `azure-validate`
+
+#### Terraform v3 output-state deployment proof
+
+Verified at `2026-08-16T22:47:00Z`.
+
+| Item | Result |
+| --- | --- |
+| Apply | Exact SHA-256-verified saved plan applied: 0 additions, 0 changes, 0 deletions |
+| Output | Both `terraform output` and the remote state now report `directive_search_index_name=directive-chunks-v3` |
+| Runtime | Backend remains on revision `ca-agmem-backend--0000068`, strict gate reads remain enabled, and its live Search index remains `directive-chunks-v3` |
+| Ingestion | Job remains on the approved `-7` digest, configured for v3, manual, idle, and in nonpublishing maintenance mode |
+| Readiness | Public readiness remains `ready` with every dependency `ok` |
+| Data safety | The state-only apply performed no Azure resource action and published or deleted no directive data |
+
+### Deployment sequence
+
+1. [x] Deploy backend publication-gate awareness with strict reads disabled while
+   v2 remains committed.
+2. [x] Apply the validated job-only staging plan above.
+3. [x] Build and pin the bounded v3 ingestion job in nonpublishing maintenance
+   mode.
+4. [x] Bootstrap the v3 Search schema and a committed gate matching live v2.
+5. [x] Run managed-identity preflight and metadata-only validation.
+6. [x] Validate and apply a separate backend-only strict-gate/v3-index plan.
+7. [x] Deploy the four-tool Directive Hosted Agent and frontend/runtime updates.
+8. [x] Confirm the guarded destructive reset of v2/v3 derived data.
+9. [x] Regenerate the complete v3 corpus once from preserved source PDFs.
+10. [x] Run deep source audit, exact cross-store verification, retrieval/citation
+   acceptance, and unchanged-rerun checks.
+11. Inject an activation failure, verify compensation or
+   `recovery_required`, recover, and rerun acceptance.
+12. [x] Confirm no legacy directive data or retired model-visible tools remain.
+
+#### Destructive reset and bounded v3 publication proof
+
+Verified on `2026-08-17` UTC.
+
+| Item | Result |
+| --- | --- |
+| Reset boundary | Deleted and recreated only the three derived Cosmos containers, purged only derived Blob prefixes, and deleted the v2/v3 directive Search indexes before regeneration |
+| Source protection | Both source PDFs remained byte-identical at 183,445 and 181,975 bytes; inventory digest remained `d6d8b2305c6a6c0de8079c25b5f34933aa20038190fb554e8f94275c07d6d2d4` |
+| Retention | Recreated Cosmos containers have `defaultTtl=null`; the storage account has no Blob management policy; existing soft-delete/versioning settings were not changed |
+| Publication | `job-agmem-directive-ingest-jus8sd6` published the two-document corpus with immutable image digest `sha256:abe9e5741ab340da32fa903ca5565a770bdedda8354cfc0f039e0dcafc508a9f` |
+| Evidence recovery | Read-only execution `job-agmem-directive-ingest-bdrdxf7` recovered exact publication evidence after the local wrapper failure without republishing |
+| Exact corpus | 2 directives, 2 versions/current pointers, 48 current Search chunks, 82 content sections/parts, 4 required artifacts, 2 source-state records, and the approved empty mandate snapshot |
+| Publication evidence | `directive-v3-publication-verification.json`, SHA-256 `0c986a926d3d75cde825efd4893bff85935f6d5182e244e68865ccb6a26817b0` |
+
+#### Unchanged-corpus and performance proof
+
+| Item | Changed publication | Unchanged acceptance |
+| --- | --- | --- |
+| Image | `sha256:abe9e5741ab340da32fa903ca5565a770bdedda8354cfc0f039e0dcafc508a9f` | `sha256:f371bc1a5c1a778e32983a42f77fe41ce682d585edd5da09db47916bdac214da` |
+| Run | `20260817T033512Z-5a9e76ca` | `20260817T040041Z-c531f5bf` / execution `job-agmem-directive-ingest-6w8tm47` |
+| Result | `succeeded`, 2 changed | `skipped`, 2 skipped |
+| Source body transfer | 2 downloads / 365,420 bytes | 0 downloads / 0 bytes |
+| Publication work | 2 Blob writes, 48 embedded items, 144 Search actions | No Blob, model, embedding, catalog, Cosmos, or Search publication-write counters |
+| Duration | 123,338 ms | 32,065 ms |
+| Peak RSS | 231,620,608 bytes | 183,250,944 bytes |
+
+The unchanged workflow reduced measured wall time by **74.0%**, exceeding the
+60% acceptance target while preserving all cross-store identity digests.
+Persisted metrics are in `directive-v3-run-metrics.json`, SHA-256
+`4a04a4b0b398a3e0deb63fcd3b00836cb77d2ea9136de93745c0946c59e4de2f`.
+
+#### Deep source-audit and online acceptance proof
+
+Verified on `2026-08-17` UTC.
+
+| Item | Result |
+| --- | --- |
+| Deep audit | Execution `job-agmem-directive-ingest-jgqfm7h`, run `20260817T043225Z-5ae9016e`, used `verification_mode=deep-source-audit`, redownloaded and rehashed both PDFs (365,420 bytes), and completed with zero warnings |
+| Cross-store identities | Catalog `2f525347...fdefa`, Search `cf734d37...ce846`, content `1be4798f...48370`, artifacts `372c03b6...25c4`, source state `68b8a3cb...0309`, mandates `4f53cda1...2b945` |
+| Deep-audit evidence | `directive-v3-deep-audit-verification.json`, SHA-256 `acdda2a4f68042eacc63d31a636ef8b8c0acf1824c967164c45d8e7bdb612e25` |
+| Discovery retrieval | Authenticated conversation `16fb2d0b-1904-47d2-ae5b-817f99169f9e` discovered both directives, exercised all four approved tools, emitted 11 section/page citations, returned the complete empty mandate snapshot, and finished successfully |
+| Focused retrieval | Same bound conversation filtered Search to `MP/25/0277`, read exact section content, correctly distinguished public ChatGPT from M365 Copilot classification rules, emitted 6 narrow citations, and returned `non_mandatory` |
+| Exact routes | Both exact Markdown and PDF routes returned `200`; PDF SHA-256 values matched weak identity ETags and protected source hashes; both conditional PDF requests returned `304` |
+| Hosted Agent | Active version 6 uses image digest `sha256:fb680b9f1e2a2d089a9ce50a4c272b81bb30a3df1a44cad3e6d13838f7815077` and exports exactly `get_directive`, `search_directives`, `get_directive_content`, and `get_user_directive_mandates` |
+| Legacy cleanup | The only directive Search index is `directive-chunks-v3`; exact container counts contain no extra directive/version/content identities; retired tool names are absent from the deployed image |
+| Online evidence | `directive-v3-online-acceptance.json`, SHA-256 `d355120398164f05b39bd2532b086e6bd7d426f67822b98233f3c3edcbe31e1e`; exact-route evidence SHA-256 `1b69a3f05ab114e318b49c1e5497788dacee75630b74c7f89756c66c11afebe2` |
+
+The ingestion job is manual, idle, pinned to the accepted `-8` digest, and
+restored to `directive-ingest maintenance`.
+
+#### Remaining acceptance
+
+The only live rollout item not yet exercised is controlled activation failure,
+successful rollback, forced `recovery_required`, and operator recovery. No safe
+production fault-injection hook is currently deployed. Do not mutate live
+catalog/Search/gate state to satisfy this item without a separately reviewed
+method and explicit destructive confirmation.
 
 ## Current release: directive document processing v2
 

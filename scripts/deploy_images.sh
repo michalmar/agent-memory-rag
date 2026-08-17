@@ -22,6 +22,14 @@ TAG=""
 WITH_DIRECTIVE=false
 SUPPORT_AGENT_TAG=""
 DIRECTIVE_AGENT_TAG=""
+BUILD_CONTEXT=""
+
+cleanup() {
+  if [[ -n "$BUILD_CONTEXT" && -d "$BUILD_CONTEXT" ]]; then
+    rm -rf "$BUILD_CONTEXT"
+  fi
+}
+trap cleanup EXIT
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -110,21 +118,51 @@ if [[ "$WITH_DIRECTIVE" == true ]]; then
     --validate-tag-only
 fi
 
+BUILD_CONTEXT="$(mktemp -d "${TMPDIR:-/tmp}/agent-memory-images.XXXXXX")"
+tar \
+  --exclude='*/.env' \
+  --exclude='*/.env.*' \
+  --exclude='*/.venv' \
+  --exclude='*/.venv/*' \
+  --exclude='*/.pytest_cache' \
+  --exclude='*/.pytest_cache/*' \
+  --exclude='*/__pycache__' \
+  --exclude='*/__pycache__/*' \
+  --exclude='*/node_modules' \
+  --exclude='*/node_modules/*' \
+  --exclude='*/dist' \
+  --exclude='*/dist/*' \
+  --exclude='*/.azure' \
+  --exclude='*/.azure/*' \
+  -C "$REPO_ROOT" \
+  -cf - \
+  agent_contracts \
+  directive_contracts \
+  maf_hosting \
+  backend \
+  agents/customer-support-maf/src/customer-support-maf \
+  agents/directive-rag-maf/src/directive-rag-maf |
+  tar -C "$BUILD_CONTEXT" -xf -
+
 echo "==> Building backend image (server-side ACR task)"
-az acr build -r "$ACR_NAME" -t "backend:$TAG" -f "$REPO_ROOT/backend/Dockerfile" "$REPO_ROOT"
+az acr build \
+  -r "$ACR_NAME" \
+  -t "backend:$TAG" \
+  -f "$BUILD_CONTEXT/backend/Dockerfile" \
+  "$BUILD_CONTEXT"
 
 echo "==> Building frontend image (server-side ACR task)"
 az acr build -r "$ACR_NAME" -t "frontend:$TAG" -f "$REPO_ROOT/frontend/Dockerfile" "$REPO_ROOT/frontend"
 
 echo "==> Building Hosted MAF image (server-side ACR task)"
-"$SCRIPT_DIR/build_hosted_agent_image.sh" \
+REPO_BUILD_CONTEXT="$BUILD_CONTEXT" "$SCRIPT_DIR/build_hosted_agent_image.sh" \
   --agent support \
   --tag "$SUPPORT_AGENT_TAG" \
   --configure-azd
 
 if [[ "$WITH_DIRECTIVE" == true ]]; then
   echo "==> Building directive Hosted MAF image (server-side ACR task)"
-  "$SCRIPT_DIR/build_hosted_agent_image.sh" \
+  REPO_BUILD_CONTEXT="$BUILD_CONTEXT" "$SCRIPT_DIR/build_hosted_agent_image.sh" \
     --agent directive \
     --tag "$DIRECTIVE_AGENT_TAG" \
     --configure-azd

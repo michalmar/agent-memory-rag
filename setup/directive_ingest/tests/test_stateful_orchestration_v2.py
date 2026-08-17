@@ -24,14 +24,27 @@ from directive_ingestion.publication_commit_repository import (
     PublicationCommitRepository,
     PublicationResetRequiredError,
 )
+from directive_ingestion.publication_gate import PublicationGateSnapshot
 from directive_ingestion.catalog_repository import CatalogSlotSnapshot
 from directive_ingestion.integrity import IntegrityValidationError
+from directive_ingestion.extraction_cache import (
+    CachedExtraction,
+    ExtractionCacheEvidence,
+    ExtractorIdentity,
+)
 from directive_ingestion.reconcile import (
     DirectiveIngestionRunner,
     _public_record_digest,
 )
-from directive_ingestion.source import SourceDocument, SourceProvenance
+from directive_ingestion.source import (
+    SourceDescriptor,
+    SourceDocument,
+    SourceIdentity,
+)
+from directive_ingestion.source_inventory import SourceInventoryRepository
+from directive_ingestion.source_planner import DirectiveSourcePlanner
 from directive_ingestion.source_state_repository import SourceStateRepository
+from directive_ingestion.validation_evidence import ValidationEvidenceRepository
 
 
 PROCESSING_HASH = "a" * 64
@@ -42,6 +55,7 @@ class MemoryBlobs:
         self.bytes: dict[str, bytes] = {}
         self.json: dict[str, dict[str, object]] = {}
         self.etags: dict[str, str] = {}
+        self.metadata: dict[str, dict[str, str]] = {}
         self.write_count = 0
         self._etag_version = 0
 
@@ -55,13 +69,34 @@ class MemoryBlobs:
 
     async def put_immutable(
         self, name: str, content: bytes, _content_type: str
-    ) -> None:
+    ) -> str:
         existing = self.bytes.get(name)
         if existing is not None and existing != content:
             raise RuntimeError(f"immutable collision: {name}")
         if existing is None:
             self.bytes[name] = content
             self.write_count += 1
+            self._etag_version += 1
+            self.etags[name] = f"etag-{self._etag_version}"
+            self.metadata[name] = {
+                "content_sha256": hashlib.sha256(content).hexdigest()
+            }
+        return self.etags[name]
+
+    async def put_json(
+        self,
+        name: str,
+        value: dict[str, object],
+    ) -> None:
+        existing = self.json.get(name)
+        if existing is not None and existing != value:
+            raise RuntimeError(f"immutable collision: {name}")
+        if existing is None:
+            await self.replace_json(
+                name,
+                value,
+                require_absent=True,
+            )
 
     async def validate_hash(self, name: str, expected: str) -> None:
         if await self.content_hash(name) != expected:
@@ -94,6 +129,31 @@ class MemoryBlobs:
             self.etags.get(name, "etag-0"),
         )
 
+    async def read_bytes_with_metadata_and_etag(
+        self,
+        name: str,
+    ) -> tuple[bytes, dict[str, str], str]:
+        if name in self.bytes:
+            return (
+                self.bytes[name],
+                dict(self.metadata[name]),
+                self.etags[name],
+            )
+        if name in self.json:
+            content = json.dumps(
+                self.json[name],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            return (
+                content,
+                {"content_sha256": hashlib.sha256(content).hexdigest()},
+                self.etags[name],
+            )
+        from azure.core.exceptions import ResourceNotFoundError
+
+        raise ResourceNotFoundError("missing")
+
     async def restore_bytes(
         self, name: str, content: bytes, candidate_etag: str
     ) -> None:
@@ -113,7 +173,16 @@ class MemoryBlobs:
             raise RuntimeError("Source state changed concurrently")
         if expected_etag is not None and self.etags.get(name) != expected_etag:
             raise RuntimeError("Source state changed concurrently")
-        return self._write_state(name, value)
+        etag = self._write_state(name, value)
+        content = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        self.metadata[name] = {
+            "content_sha256": hashlib.sha256(content).hexdigest()
+        }
+        return etag
 
     async def list_names(self, prefix: str) -> set[str]:
         return {
@@ -129,6 +198,7 @@ class MemoryBlobs:
             self.bytes.pop(name, None)
             self.json.pop(name, None)
             self.etags.pop(name, None)
+            self.metadata.pop(name, None)
 
     async def delete_if_etag(self, name: str, candidate_etag: str) -> None:
         if self.etags.get(name) != candidate_etag:
@@ -137,6 +207,67 @@ class MemoryBlobs:
 
     async def quarantine(self, *_args: object) -> None:
         raise AssertionError("the valid fake corpus must not be quarantined")
+
+
+class MemoryPublicationGate:
+    def __init__(self) -> None:
+        self.snapshot: PublicationGateSnapshot | None = None
+        self.transitions: list[PublicationGateSnapshot] = []
+        self._etag_version = 0
+
+    async def read(self) -> PublicationGateSnapshot | None:
+        return self.snapshot
+
+    async def initialize_committed(
+        self,
+        *,
+        revision: str,
+        run_id: str,
+    ) -> PublicationGateSnapshot:
+        if self.snapshot is None:
+            self.snapshot = self._snapshot(
+                "committed",
+                revision,
+                None,
+                run_id,
+            )
+        return self.snapshot
+
+    async def transition(
+        self,
+        snapshot: PublicationGateSnapshot,
+        *,
+        state: str,
+        revision: str,
+        candidate_revision: str | None,
+        run_id: str,
+    ) -> PublicationGateSnapshot:
+        if self.snapshot != snapshot:
+            raise RuntimeError("Publication gate changed concurrently")
+        self.snapshot = self._snapshot(
+            state,
+            revision,
+            candidate_revision,
+            run_id,
+        )
+        self.transitions.append(self.snapshot)
+        return self.snapshot
+
+    def _snapshot(
+        self,
+        state: str,
+        revision: str,
+        candidate_revision: str | None,
+        run_id: str,
+    ) -> PublicationGateSnapshot:
+        self._etag_version += 1
+        return PublicationGateSnapshot(
+            state=state,
+            revision=revision,
+            candidate_revision=candidate_revision,
+            run_id=run_id,
+            etag=f"gate-{self._etag_version}",
+        )
 
 
 class MemoryCatalog:
@@ -510,6 +641,9 @@ class MemoryMandates:
     async def is_current(self, parsed) -> bool:
         return self.active is not None and self.active.checksum == parsed.checksum
 
+    async def get_active_snapshot(self) -> MandateSnapshot | None:
+        return self.active
+
     async def stage(self, parsed, _run_id: str):
         snapshot = MandateSnapshot(
             snapshot_id=f"mandates-{parsed.checksum}",
@@ -561,7 +695,12 @@ class StatefulSourceStates(SourceStateRepository):
         candidate_etag = await super().record(*args, **kwargs)
         if self.concurrent_candidate_once:
             self.concurrent_candidate_once = False
-            await super().record(*args, **kwargs)
+            source = args[0]
+            metadata = args[1]
+            blob_name = self.blob_name(source, metadata.processing_hash)
+            payload = await self._blobs.get_json(blob_name)
+            assert payload is not None
+            self._blobs._write_state(blob_name, payload)
         if self.break_candidate_once:
             self.break_candidate_once = False
             self._hide_next_load = True
@@ -574,6 +713,77 @@ class StatefulSourceStates(SourceStateRepository):
         return await super().load(*args, **kwargs)
 
 
+class MemoryExtractionCache:
+    def __init__(self) -> None:
+        self.values: dict[
+            tuple[str, str, str],
+            CachedExtraction,
+        ] = {}
+
+    async def load(
+        self,
+        identity: SourceIdentity,
+        extractor: ExtractorIdentity,
+        *,
+        expected_result_hash: str | None = None,
+    ) -> CachedExtraction | None:
+        value = self.values.get(
+            (
+                identity.source_name,
+                identity.source_hash,
+                extractor.identity_hash,
+            )
+        )
+        if (
+            value is not None
+            and expected_result_hash is not None
+            and value.evidence.result_hash != expected_result_hash
+        ):
+            return None
+        return value
+
+    async def store(
+        self,
+        identity: SourceIdentity,
+        extractor: ExtractorIdentity,
+        document: object,
+    ) -> CachedExtraction:
+        evidence = ExtractionCacheEvidence(
+            blob_name=(
+                f"extractions/{identity.source_hash}/"
+                f"{extractor.identity_hash}/result.json.gz"
+            ),
+            extractor_identity_hash=extractor.identity_hash,
+            result_hash=hashlib.sha256(
+                f"{identity.source_hash}:{extractor.identity_hash}".encode()
+            ).hexdigest(),
+        )
+        value = CachedExtraction(document=document, evidence=evidence)
+        self.values[
+            (
+                identity.source_name,
+                identity.source_hash,
+                extractor.identity_hash,
+            )
+        ] = value
+        return value
+
+
+class MemoryDirectiveSource:
+    def __init__(self, sources: list[SourceDocument]) -> None:
+        self.sources = sources
+        self.download_count = 0
+
+    async def list_descriptors(self) -> list[SourceDescriptor]:
+        return [source.descriptor for source in self.sources]
+
+    async def download(self, descriptor: SourceDescriptor) -> SourceDocument:
+        self.download_count += 1
+        return next(
+            source for source in self.sources if source.descriptor == descriptor
+        )
+
+
 def _section_content_id(generation_id: str, section_id: str, ordinal: int) -> str:
     from directive_contracts import section_content_item_id
 
@@ -581,11 +791,22 @@ def _section_content_id(generation_id: str, section_id: str, ordinal: int) -> st
 
 
 def _source(content: bytes = b"%PDF-directive-v1") -> SourceDocument:
+    source_hash = hashlib.sha256(content).hexdigest()
     return SourceDocument(
-        source_name="directive.pdf",
-        source_hash=hashlib.sha256(content).hexdigest(),
+        descriptor=SourceDescriptor(
+            source_name="directive.pdf",
+            kind="memory",
+            locator="directive.pdf",
+            etag=f'"memory-{source_hash[:16]}"',
+            version_id=None,
+            size=len(content),
+            last_modified=None,
+        ),
+        identity=SourceIdentity(
+            "directive.pdf",
+            source_hash,
+        ),
         content=content,
-        _provenance=SourceProvenance(kind="memory", locator="directive.pdf"),
     )
 
 
@@ -651,10 +872,13 @@ class Harness:
         self.content = MemoryContent()
         self.search = MemorySearch()
         self.states = StatefulSourceStates(self.blobs)
+        self.cache = MemoryExtractionCache()
+        self.extractor_identity = ExtractorIdentity("2024-11-30")
+        self.source = MemoryDirectiveSource(self.sources)
         self.runner = object.__new__(DirectiveIngestionRunner)
         self.runner.config = SimpleNamespace(
             processing_hash=PROCESSING_HASH,
-            processing_version="directive-v2-stateful-regression",
+            processing_version="directive-v3-bounded-ingestion",
             chunk_token_limit=800,
             chunk_overlap_tokens=120,
             mandate_csv=Path("unused.csv"),
@@ -671,25 +895,63 @@ class Harness:
             content_container="content",
             mandate_container="mandates",
             search_service="search",
-            search_index="directive-chunks-v2",
+            search_index="directive-chunks-v3",
         )
         self.runner.blobs = self.blobs
         self.runner.catalog = self.catalog
         self.runner.content = self.content
         self.runner.search = self.search
         self.runner.source_states = self.states
+        self.runner.source_inventory = SourceInventoryRepository(self.blobs)
+        self.runner.extraction_cache = self.cache
+        self.runner.validation_evidence = ValidationEvidenceRepository(
+            self.blobs
+        )
         self.runner.commits = PublicationCommitRepository(self.blobs)
         self.runner.mandates = MemoryMandates()
         self.runner.extractor = SimpleNamespace(extract=self._extract)
+        self.runner.extractor_identity = self.extractor_identity
         self.runner.summaries = SimpleNamespace(summarize=self._summarize)
+        self.runner.source = self.source
+        self.runner.source_planner = DirectiveSourcePlanner(
+            source=self.source,
+            inventory=self.runner.source_inventory,
+            states=self.states,
+            cache=self.cache,
+            extractor=self.runner.extractor,
+            extractor_identity=self.extractor_identity,
+            processing_hash=PROCESSING_HASH,
+            extraction_concurrency=1,
+            is_live=self.runner._identity_has_live_publication,
+        )
         self.runner.discover_sources = self._discover
+        self._run_daily = DirectiveIngestionRunner.run_daily.__get__(
+            self.runner,
+            DirectiveIngestionRunner,
+        )
+        self.runner.run_daily = self._approved_run_daily
+        self.runner._begin_publication_gate = self._begin_gate
+        self.runner._commit_publication_gate = self._commit_gate
+        self.runner._fail_publication_gate = self._fail_gate
         monkeypatch.setattr(
             "directive_ingestion.metadata.extract_metadata",
             lambda source, _extraction, _hash: _canonical(source).metadata_candidate,
         )
         monkeypatch.setattr(
+            "directive_ingestion.source_planner.extract_metadata",
+            lambda source, _extraction, _hash: _canonical(source).metadata_candidate,
+        )
+        monkeypatch.setattr(
+            "directive_ingestion.reconcile.extract_metadata",
+            lambda source, _extraction, _hash: _canonical(source).metadata_candidate,
+        )
+        monkeypatch.setattr(
             "directive_ingestion.reconcile.parse_canonical",
-            lambda source, _extraction, _hash: _canonical(source),
+            lambda source, _extraction, _hash, **_kwargs: _canonical(source),
+        )
+        monkeypatch.setattr(
+            "directive_ingestion.source_planner.parse_canonical",
+            lambda source, _extraction, _hash, **_kwargs: _canonical(source),
         )
         monkeypatch.setattr(
             "directive_ingestion.reconcile.parse_mandates",
@@ -703,6 +965,52 @@ class Harness:
 
     async def _extract(self, _content: bytes):
         return SimpleNamespace()
+
+    async def _approved_run_daily(self, *args, **kwargs):
+        if kwargs.get("approved_validation_digest") is None:
+            source_directory = args[0] if args else None
+            mandate_csv = args[1] if len(args) > 1 else None
+            validation = await self.runner.validate_inputs(
+                source_directory,
+                mandate_csv,
+            )
+            marker = {
+                key: validation[key]
+                for key in (
+                    "validation_digest",
+                    "environment_digest",
+                    "source_inventory_digest",
+                    "processing_hash",
+                    "mandate_checksum",
+                    "validation_evidence_digest",
+                )
+            }
+            marker["record_schema"] = "directive.approval.v3"
+            self.blobs._write_state(
+                "publication-approval/"
+                f"{validation['validation_digest']}.json",
+                marker,
+            )
+            kwargs.update(
+                approved_validation_digest=validation["validation_digest"],
+                approved_environment_digest=validation["environment_digest"],
+                approved_source_inventory_digest=validation[
+                    "source_inventory_digest"
+                ],
+                approved_validation_evidence_digest=validation[
+                    "validation_evidence_digest"
+                ],
+            )
+        return await self._run_daily(*args, **kwargs)
+
+    async def _begin_gate(self, **_kwargs):
+        return SimpleNamespace()
+
+    async def _commit_gate(self, *_args, **_kwargs) -> None:
+        return None
+
+    async def _fail_gate(self, *_args, **_kwargs) -> None:
+        return None
 
     async def _summarize(self, directive: CanonicalDirective) -> DirectiveSummary:
         return DirectiveSummary(
@@ -718,8 +1026,150 @@ class Harness:
         )
 
 
+def _enable_real_publication_gate(harness: Harness) -> MemoryPublicationGate:
+    gate = MemoryPublicationGate()
+    harness.runner.publication_gate = gate
+    harness.runner._begin_publication_gate = (
+        DirectiveIngestionRunner._begin_publication_gate.__get__(
+            harness.runner,
+            DirectiveIngestionRunner,
+        )
+    )
+    harness.runner._commit_publication_gate = (
+        DirectiveIngestionRunner._commit_publication_gate.__get__(
+            harness.runner,
+            DirectiveIngestionRunner,
+        )
+    )
+    harness.runner._fail_publication_gate = (
+        DirectiveIngestionRunner._fail_publication_gate.__get__(
+            harness.runner,
+            DirectiveIngestionRunner,
+        )
+    )
+    return gate
+
+
 @pytest.mark.asyncio
-async def test_cached_validation_preserves_fresh_canonical_warning_digest(
+async def test_publication_gate_bootstrap_is_idempotent_and_matches_live_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    gate = _enable_real_publication_gate(harness)
+
+    first = await harness.runner.bootstrap_publication_gate(run_id="bootstrap-1")
+    second = await harness.runner.bootstrap_publication_gate(run_id="bootstrap-2")
+
+    assert first == second == {
+        "status": "ready",
+        "state": "committed",
+        "committed_revision": gate.snapshot.revision,
+    }
+    assert gate.snapshot is not None
+    assert gate.snapshot.run_id == "bootstrap-1"
+    assert gate.transitions == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ("activating", "recovery_required"))
+async def test_publication_gate_bootstrap_rejects_noncommitted_state(
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    harness = Harness(monkeypatch)
+    gate = _enable_real_publication_gate(harness)
+    live_revision = await harness.runner._live_publication_revision()
+    gate.snapshot = gate._snapshot(
+        state,
+        live_revision,
+        "candidate-revision",
+        "existing-run",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="publication is unavailable pending recovery",
+    ):
+        await harness.runner.bootstrap_publication_gate(run_id="bootstrap")
+
+
+@pytest.mark.asyncio
+async def test_publication_gate_bootstrap_rejects_live_revision_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    gate = _enable_real_publication_gate(harness)
+    gate.snapshot = gate._snapshot(
+        "committed",
+        "stale-revision",
+        None,
+        "existing-run",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="revision does not match live stores",
+    ):
+        await harness.runner.bootstrap_publication_gate(run_id="bootstrap")
+
+
+@pytest.mark.asyncio
+async def test_publication_gate_begins_only_at_activation_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    events: list[str] = []
+    stage_version = harness.catalog.stage_version
+    publish_version = harness.catalog.publish_version
+    activate_current = harness.catalog.activate_current
+
+    async def tracked_stage(*args, **kwargs) -> None:
+        events.append("catalog:stage")
+        await stage_version(*args, **kwargs)
+
+    async def tracked_publish(*args, **kwargs):
+        events.append("catalog:publish")
+        return await publish_version(*args, **kwargs)
+
+    async def tracked_activate(*args, **kwargs) -> None:
+        events.append("catalog:activate")
+        await activate_current(*args, **kwargs)
+
+    async def begin_gate(**_kwargs):
+        events.append("gate:activating")
+        return SimpleNamespace()
+
+    harness.catalog.stage_version = tracked_stage
+    harness.catalog.publish_version = tracked_publish
+    harness.catalog.activate_current = tracked_activate
+    harness.runner._begin_publication_gate = begin_gate
+
+    await harness.runner.run_daily()
+
+    assert events == [
+        "catalog:stage",
+        "catalog:publish",
+        "gate:activating",
+        "catalog:activate",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_publication_activation_requires_bootstrapped_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    _enable_real_publication_gate(harness)
+
+    with pytest.raises(
+        RuntimeError,
+        match="must be bootstrapped before activation",
+    ):
+        await harness.runner.run_daily()
+
+
+@pytest.mark.asyncio
+async def test_cached_validation_preserves_fresh_canonical_warnings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     harness = Harness(monkeypatch)
@@ -738,7 +1188,15 @@ async def test_cached_validation_preserves_fresh_canonical_warning_digest(
 
     monkeypatch.setattr(
         "directive_ingestion.reconcile.parse_canonical",
-        lambda source, _extraction, _hash: canonical_with_warning(source),
+        lambda source, _extraction, _hash, **_kwargs: canonical_with_warning(
+            source
+        ),
+    )
+    monkeypatch.setattr(
+        "directive_ingestion.source_planner.parse_canonical",
+        lambda source, _extraction, _hash, **_kwargs: canonical_with_warning(
+            source
+        ),
     )
     fresh = await harness.runner.validate_inputs()
 
@@ -749,7 +1207,7 @@ async def test_cached_validation_preserves_fresh_canonical_warning_digest(
     assert fresh["warnings"] == cached["warnings"] == [
         {"code": "canonical_section_warning", "severity": "warning"}
     ]
-    assert fresh["validation_digest"] == cached["validation_digest"]
+    assert fresh["validation_digest"] != cached["validation_digest"]
     state = await harness.states.load(harness.sources[0], PROCESSING_HASH)
     assert state is not None
     assert state.validation_warnings == (("canonical_section_warning", "warning"),)
@@ -762,9 +1220,9 @@ async def test_initial_publication_then_noop_daily_run_only_cycles_global_lock(
     harness = Harness(monkeypatch)
 
     validation = await harness.runner.validate_inputs()
-    assert validation["record_schema"] == "directive.validate.v2"
+    assert validation["record_schema"] == "directive.validate.v3"
     assert validation["directive_count"] == 1
-    assert harness.blobs.write_count == 0
+    assert harness.blobs.write_count == 1
 
     initial = await harness.runner.run_daily()
     assert initial.changed_count == 1
@@ -783,7 +1241,7 @@ async def test_initial_publication_then_noop_daily_run_only_cycles_global_lock(
     assert noop.changed_count == 0
     assert noop.skipped_count == 1
     assert harness.search.ensure_count == 1
-    assert harness.blobs.write_count == writes_before_noop[0] + 2
+    assert harness.blobs.write_count == writes_before_noop[0] + 5
     assert (
         harness.catalog.write_count,
         harness.content.write_count,
@@ -913,6 +1371,21 @@ async def test_crash_stale_lock_requires_explicit_reset_that_purges_claims(
     assert await harness.blobs.list_names("publication-lock/") == set()
     assert await harness.blobs.list_names("publication-claims/") == set()
     await harness.runner.run_daily()
+
+
+@pytest.mark.asyncio
+async def test_deep_source_audit_redownloads_and_rehashes_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    await harness.runner.run_daily()
+    downloads_after_publication = harness.source.download_count
+
+    await harness.runner.verify()
+    assert harness.source.download_count == downloads_after_publication
+
+    await harness.runner.verify(deep_source_audit=True)
+    assert harness.source.download_count == downloads_after_publication + 1
 
 
 @pytest.mark.asyncio
@@ -1046,10 +1519,10 @@ async def test_publication_rejects_nonempty_canonical_relations(
     )
     monkeypatch.setattr(
         "directive_ingestion.reconcile.parse_canonical",
-        lambda *_args: replace(canonical, relations=(relation,)),
+        lambda *_args, **_kwargs: replace(canonical, relations=(relation,)),
     )
 
-    with pytest.raises(ValueError, match="not supported by v2"):
+    with pytest.raises(ValueError, match="not supported by current-only"):
         await harness.runner.run_daily()
 
     assert harness.catalog.bundles == {}
@@ -1110,6 +1583,52 @@ async def test_marker_write_failure_rolls_back_changed_mandates_without_document
 
 
 @pytest.mark.asyncio
+async def test_publication_gate_returns_to_committed_after_successful_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    gate = _enable_real_publication_gate(harness)
+    await harness.runner.bootstrap_publication_gate(run_id="bootstrap")
+    harness.states.break_candidate_once = True
+
+    with pytest.raises(
+        RuntimeError,
+        match="Candidate publication does not match its source state",
+    ):
+        await harness.runner.run_daily()
+
+    assert [snapshot.state for snapshot in gate.transitions] == [
+        "activating",
+        "committed",
+    ]
+    assert gate.snapshot is not None
+    assert gate.snapshot.candidate_revision is None
+    assert harness.catalog.current == {}
+    assert harness.search.chunks == {}
+
+
+@pytest.mark.asyncio
+async def test_publication_gate_requires_recovery_when_rollback_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness(monkeypatch)
+    gate = _enable_real_publication_gate(harness)
+    await harness.runner.bootstrap_publication_gate(run_id="bootstrap")
+    harness.states.break_candidate_once = True
+    harness.states.concurrent_candidate_once = True
+
+    with pytest.raises(BaseExceptionGroup, match="rollback did not complete"):
+        await harness.runner.run_daily()
+
+    assert [snapshot.state for snapshot in gate.transitions] == [
+        "activating",
+        "recovery_required",
+    ]
+    assert gate.snapshot is not None
+    assert gate.snapshot.candidate_revision is not None
+
+
+@pytest.mark.asyncio
 async def test_pre_marker_rollback_then_post_marker_retry_preserves_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1140,7 +1659,7 @@ async def test_pre_marker_rollback_then_post_marker_retry_preserves_candidate(
     old_bundle = next(iter(harness.catalog.bundles.values()))
     old_generation = old_bundle.artifact_generation_id
 
-    harness.sources = [_source(b"%PDF-directive-v2")]
+    harness.sources[:] = [_source(b"%PDF-directive-v2")]
     original_delete_generation = harness.search.delete_generation
     failed_cleanup = False
 
@@ -1189,10 +1708,23 @@ async def test_source_state_restore_uses_the_candidate_write_etag(
     source = harness.sources[0]
     metadata = _metadata(source)
 
-    await harness.states.record(source, metadata, "old-generation")
+    extraction_evidence = ExtractionCacheEvidence(
+        blob_name=f"extractions/{source.source_hash}/result.json.gz",
+        extractor_identity_hash="c" * 64,
+        result_hash="d" * 64,
+    )
+    await harness.states.record(
+        source.reference(),
+        metadata,
+        "old-generation",
+        extraction_evidence=extraction_evidence,
+    )
     snapshot = await harness.states.snapshot(source, PROCESSING_HASH)
     candidate_etag = await harness.states.record(
-        source, metadata, "candidate-generation"
+        source.reference(),
+        metadata,
+        "candidate-generation",
+        extraction_evidence=extraction_evidence,
     )
 
     await harness.states.restore(
@@ -1219,7 +1751,7 @@ async def test_pre_marker_rollback_propagates_concurrent_source_state_update(
     harness.states.break_candidate_once = True
     harness.states.concurrent_candidate_once = True
 
-    with pytest.raises(RuntimeError, match="Source state changed concurrently"):
+    with pytest.raises(BaseExceptionGroup, match="rollback did not complete"):
         await harness.runner.reconcile_documents()
 
     state_name = harness.states.blob_name(harness.sources[0], PROCESSING_HASH)

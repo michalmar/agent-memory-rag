@@ -28,6 +28,27 @@ import { LightDomElement } from './light-dom-element.js';
 
 const NUMBER_FORMATTER = new Intl.NumberFormat();
 
+export function toolActivityLabel(toolName: string): string {
+  const labels: Record<string, string> = {
+    knowledge_base_retrieve: 'Foundry IQ',
+    get_user_context: 'User context',
+    get_order_status: 'Order status',
+    check_memory: 'Memory search',
+    update_user_profile: 'Profile update',
+    get_directive: 'Directive details',
+    search_directives: 'Directive search',
+    get_directive_content: 'Directive content',
+    get_user_directive_mandates: 'Mandatory status',
+  };
+  return labels[toolName] ?? toolName.replaceAll('_', ' ');
+}
+
+export function emptyStatePrompt(agentType: AgentType): string {
+  return agentType === 'directive-rag'
+    ? 'Search current directives, review exact content, or check mandatory status.'
+    : 'Ask about an order, a policy, or saved context.';
+}
+
 export interface ChatTranscriptActions {
   copy: (turn: ChatTurn) => void;
   setFeedback: (turn: ChatTurn, feedback: 'up' | 'down') => void;
@@ -101,11 +122,7 @@ export class ChatTranscript extends LightDomElement {
             forum
           </span>
           <h2 id="welcome-title">Start a thread</h2>
-          <p>
-            ${this.agentType === 'directive-rag'
-              ? 'Search, summarize, compare, or ask about company directives.'
-              : 'Ask about an order, a policy, or saved context.'}
-          </p>
+          <p>${emptyStatePrompt(this.agentType)}</p>
         </section>
       `;
     }
@@ -605,22 +622,7 @@ export class ChatTranscript extends LightDomElement {
   }
 
   private toolLabel(toolName: string): string {
-    const labels: Record<string, string> = {
-      knowledge_base_retrieve: 'Foundry IQ',
-      get_user_context: 'User context',
-      get_order_status: 'Order status',
-      check_memory: 'Memory search',
-      update_user_profile: 'Profile update',
-      resolve_directive: 'Directive resolution',
-      search_directives: 'Directive search',
-      get_directive_manifest: 'Directive outline',
-      get_directive_content: 'Directive content',
-      search_within_directive: 'Focused directive search',
-      get_related_directives: 'Linked directives',
-      get_precomputed_summary: 'Directive summary',
-      get_user_directive_mandates: 'Mandatory status',
-    };
-    return labels[toolName] ?? toolName.replaceAll('_', ' ');
+    return toolActivityLabel(toolName);
   }
 
   private progressLabel(turn: ChatTurn): string | undefined {

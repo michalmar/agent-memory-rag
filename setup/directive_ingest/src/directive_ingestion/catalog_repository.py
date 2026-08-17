@@ -504,12 +504,38 @@ class DirectiveCatalogRepository:
             }
         )
 
+    async def record_run_metrics(self, payload: dict[str, object]) -> None:
+        if (
+            payload.get("type") != "ingestion_run"
+            or payload.get("status") not in {"succeeded", "failed", "skipped"}
+        ):
+            raise ValueError("Ingestion metrics payload is incomplete")
+        run_id = payload.get("run_id")
+        operation = payload.get("operation")
+        if (
+            not isinstance(run_id, str)
+            or not run_id
+            or not isinstance(operation, str)
+            or not operation
+        ):
+            raise ValueError("Ingestion metrics identity is invalid")
+        item = {
+            "id": f"metrics:{run_id}:{operation}",
+            "directive_id": "_runs",
+            **payload,
+        }
+        if serialized_json_size(item) > 65_536:
+            raise ValueError("Ingestion metrics payload exceeds 64 KiB")
+        await self._container.upsert_item(item)
+
 
 def _validate_empty_relations(
     relations: tuple[DirectiveRelation, ...],
 ) -> None:
     if relations:
-        raise ValueError("Directive relations are not supported by v2")
+        raise ValueError(
+            "Directive relations are not supported by current-only publication"
+        )
 
 
 def _validate_published_bundle(

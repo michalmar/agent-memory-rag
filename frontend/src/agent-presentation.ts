@@ -20,7 +20,7 @@ const AGENT_PRESENTATION: Record<
   },
   'directive-rag': {
     label: 'Directive Assistant',
-    description: 'Long-form search, summaries, comparisons, and directive guidance.',
+    description: 'Current directive search, details, content, and mandate guidance.',
     icon: 'policy',
   },
 };

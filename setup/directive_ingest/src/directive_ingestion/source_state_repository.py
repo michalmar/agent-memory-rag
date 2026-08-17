@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from directive_contracts import (
@@ -12,11 +13,18 @@ from directive_contracts import (
 )
 
 from .blob_repository import BlobArtifactRepository
+from .extraction_cache import ExtractionCacheEvidence
 from .integrity import IntegrityValidationError
-from .source import SourceDocument
+from .source import (
+    SourceDescriptor,
+    SourceDocument,
+    SourceIdentity,
+    SourceReference,
+)
 
 MAX_VALIDATION_WARNINGS = 100
 MAX_VALIDATION_WARNING_CODE_LENGTH = 128
+SOURCE_STATE_SCHEMA = "3.0"
 
 
 @dataclass(frozen=True)
@@ -36,6 +44,46 @@ class PublishedSourceState:
     validation_warnings: tuple[tuple[str, str], ...] = ()
     validation_digest: str | None = None
     mandate_checksum: str | None = None
+    source_etag: str | None = None
+    source_version_id: str | None = None
+    source_size: int = 0
+    source_last_modified: str | None = None
+    extraction_cache_blob: str = ""
+    extractor_identity_hash: str = ""
+    extraction_result_hash: str = ""
+
+    @property
+    def identity(self) -> SourceIdentity:
+        return SourceIdentity(self.source_filename, self.source_hash)
+
+    @property
+    def extraction_evidence(self) -> ExtractionCacheEvidence:
+        return ExtractionCacheEvidence(
+            blob_name=self.extraction_cache_blob,
+            extractor_identity_hash=self.extractor_identity_hash,
+            result_hash=self.extraction_result_hash,
+        )
+
+    def matches_descriptor(self, descriptor: SourceDescriptor) -> bool:
+        if (
+            descriptor.source_name != self.source_filename
+            or descriptor.size != self.source_size
+        ):
+            return False
+        if (
+            self.source_version_id is not None
+            or descriptor.version_id is not None
+        ):
+            return (
+                self.source_version_id is not None
+                and descriptor.version_id is not None
+                and self.source_version_id == descriptor.version_id
+            )
+        return (
+            self.source_etag is not None
+            and descriptor.etag is not None
+            and self.source_etag == descriptor.etag
+        )
 
 
 @dataclass(frozen=True)
@@ -50,24 +98,39 @@ class SourceStateRepository:
         self._blobs = blobs
 
     @staticmethod
-    def blob_name(source: SourceDocument, processing_hash: str) -> str:
+    def blob_name(
+        source: SourceDocument | SourceIdentity,
+        processing_hash: str,
+    ) -> str:
+        identity = _source_identity(source)
         return (
-            f"source-state/{source_fingerprint(source.source_name, source.source_hash)}"
+            f"source-state/{source_fingerprint(identity.source_name, identity.source_hash)}"
             f"/{processing_hash}.json"
         )
 
     async def load(
         self, source: SourceDocument, processing_hash: str
     ) -> PublishedSourceState | None:
+        return await self.load_identity(source.identity, processing_hash)
+
+    async def load_identity(
+        self,
+        identity: SourceIdentity,
+        processing_hash: str,
+        *,
+        blob_name: str | None = None,
+    ) -> PublishedSourceState | None:
         try:
             value = await self._blobs.get_json(
-                self.blob_name(source, processing_hash)
+                blob_name or self.blob_name(identity, processing_hash)
             )
         except IntegrityValidationError:
             return None
         if value is None:
             return None
         try:
+            if value["schema_version"] != SOURCE_STATE_SCHEMA:
+                return None
             state = PublishedSourceState(
                 source_filename=value["source_filename"],
                 source_hash=value["source_hash"],
@@ -95,16 +158,23 @@ class SourceStateRepository:
                 ),
                 validation_digest=value.get("validation_digest"),
                 mandate_checksum=value.get("mandate_checksum"),
+                source_etag=value["source_etag"],
+                source_version_id=value["source_version_id"],
+                source_size=value["source_size"],
+                source_last_modified=value["source_last_modified"],
+                extraction_cache_blob=value["extraction_cache_blob"],
+                extractor_identity_hash=value["extractor_identity_hash"],
+                extraction_result_hash=value["extraction_result_hash"],
             )
         except (KeyError, TypeError, ValueError):
             return None
         expected_fingerprint = source_fingerprint(
-            source.source_name, source.source_hash
+            identity.source_name, identity.source_hash
         )
         metadata = state.directive_metadata
         if (
-            state.source_filename != source.source_name
-            or state.source_hash != source.source_hash
+            state.source_filename != identity.source_name
+            or state.source_hash != identity.source_hash
             or state.source_fingerprint != expected_fingerprint
             or state.processing_hash != processing_hash
             or state.publication_state != "published"
@@ -116,8 +186,8 @@ class SourceStateRepository:
                 state.repair_generation_salt is not None
                 and not _is_checksum(state.repair_generation_salt)
             )
-            or metadata.source_filename != source.source_name
-            or metadata.source_hash != source.source_hash
+            or metadata.source_filename != identity.source_name
+            or metadata.source_hash != identity.source_hash
             or metadata.processing_hash != processing_hash
             or (
                 state.validation_digest is not None
@@ -131,17 +201,42 @@ class SourceStateRepository:
                 and not _is_checksum(state.mandate_checksum)
             )
             or (state.validation_digest is None) != (state.mandate_checksum is None)
+            or not isinstance(state.source_size, int)
+            or isinstance(state.source_size, bool)
+            or state.source_size < 1
+            or (
+                state.source_etag is not None
+                and (
+                    not isinstance(state.source_etag, str)
+                    or not state.source_etag
+                )
+            )
+            or (
+                state.source_version_id is not None
+                and (
+                    not isinstance(state.source_version_id, str)
+                    or not state.source_version_id
+                )
+            )
+            or (
+                state.source_last_modified is not None
+                and not _is_datetime(state.source_last_modified)
+            )
+            or not state.extraction_cache_blob
+            or not _is_checksum(state.extractor_identity_hash)
+            or not _is_checksum(state.extraction_result_hash)
         ):
             return None
         return state
 
     async def record(
         self,
-        source: SourceDocument,
+        source: SourceReference,
         metadata: DirectiveMetadata,
         artifact_generation_id: str,
         pending_cleanup: tuple[PublishedDirectiveVersion, ...] = (),
         *,
+        extraction_evidence: ExtractionCacheEvidence,
         published_bundle: PublishedDirectiveVersion | None = None,
         repair_generation_salt: str | None = None,
         validation_warnings: tuple[tuple[str, str], ...] = (),
@@ -174,7 +269,15 @@ class SourceStateRepository:
                 "Published bundle does not match the source-state identity"
             )
         canonical_warnings = _canonical_validation_warnings(validation_warnings)
+        descriptor = source.descriptor
+        if (
+            not extraction_evidence.blob_name
+            or not _is_checksum(extraction_evidence.extractor_identity_hash)
+            or not _is_checksum(extraction_evidence.result_hash)
+        ):
+            raise ValueError("Extraction cache evidence is invalid")
         payload: dict[str, Any] = {
+            "schema_version": SOURCE_STATE_SCHEMA,
             "type": "source_state",
             "source_filename": source.source_name,
             "source_hash": source.source_hash,
@@ -197,6 +300,19 @@ class SourceStateRepository:
                 {"code": code, "severity": severity}
                 for code, severity in canonical_warnings
             ],
+            "source_etag": descriptor.etag,
+            "source_version_id": descriptor.version_id,
+            "source_size": descriptor.size,
+            "source_last_modified": (
+                descriptor.last_modified.isoformat()
+                if descriptor.last_modified is not None
+                else None
+            ),
+            "extraction_cache_blob": extraction_evidence.blob_name,
+            "extractor_identity_hash": (
+                extraction_evidence.extractor_identity_hash
+            ),
+            "extraction_result_hash": extraction_evidence.result_hash,
         }
         if repair_generation_salt is not None:
             payload["repair_generation_salt"] = repair_generation_salt
@@ -212,19 +328,23 @@ class SourceStateRepository:
 
     async def clear_pending(
         self,
-        source: SourceDocument,
+        source: SourceReference,
         metadata: DirectiveMetadata,
         artifact_generation_id: str,
         published_bundle: PublishedDirectiveVersion | None = None,
+        extraction_evidence: ExtractionCacheEvidence | None = None,
         validation_digest: str | None = None,
         mandate_checksum: str | None = None,
         repair_generation_salt: str | None = None,
         validation_warnings: tuple[tuple[str, str], ...] = (),
     ) -> None:
+        if extraction_evidence is None:
+            raise ValueError("Extraction cache evidence is required")
         await self.record(
             source,
             metadata,
             artifact_generation_id,
+            extraction_evidence=extraction_evidence,
             published_bundle=published_bundle,
             repair_generation_salt=repair_generation_salt,
             validation_warnings=validation_warnings,
@@ -243,14 +363,18 @@ class SourceStateRepository:
         return await self._blobs.list_names("source-state/")
 
     async def delete(
-        self, source: SourceDocument, processing_hash: str
+        self,
+        source: SourceReference | SourceIdentity,
+        processing_hash: str,
     ) -> None:
         await self._blobs.delete_names(
             {self.blob_name(source, processing_hash)}
         )
 
     async def snapshot(
-        self, source: SourceDocument, processing_hash: str
+        self,
+        source: SourceReference | SourceIdentity,
+        processing_hash: str,
     ) -> SourceStateSnapshot | None:
         name = self.blob_name(source, processing_hash)
         value = await self._blobs.read_bytes_with_etag(name)
@@ -261,7 +385,7 @@ class SourceStateRepository:
 
     async def restore(
         self, snapshot: SourceStateSnapshot | None,
-        source: SourceDocument,
+        source: SourceReference | SourceIdentity,
         processing_hash: str,
         candidate_etag: str,
     ) -> None:
@@ -281,6 +405,20 @@ def _is_checksum(value: object) -> bool:
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def _is_datetime(value: str) -> bool:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def _source_identity(
+    source: SourceReference | SourceIdentity,
+) -> SourceIdentity:
+    return source.identity if isinstance(source, SourceReference) else source
 
 
 def _bundle_matches_state(

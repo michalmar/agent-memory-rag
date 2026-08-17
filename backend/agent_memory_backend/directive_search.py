@@ -12,7 +12,7 @@ from urllib.parse import quote
 import httpx
 from azure.core.exceptions import ClientAuthenticationError
 from azure.identity import CredentialUnavailableError
-from directive_contracts import normalize_directive_id, validate_directive_version_id
+from directive_contracts import normalize_directive_id
 
 from .config import get_settings
 from .directive_errors import DirectiveDataUnavailable
@@ -108,7 +108,6 @@ class DirectiveSearchRepository:
     async def health_check(self) -> None:
         await self.retrieve(
             intents=["healthcheck"],
-            current_only=True,
             max_results=1,
             include_references=False,
         )
@@ -117,10 +116,8 @@ class DirectiveSearchRepository:
         self,
         *,
         intents: list[str],
-        current_only: bool,
         max_results: int,
         directive_ids: list[str] | None = None,
-        directive_version_id: str | None = None,
         section_ids: list[str] | None = None,
         include_references: bool = True,
     ) -> dict[str, Any]:
@@ -129,25 +126,17 @@ class DirectiveSearchRepository:
             normalized_ids = [
                 normalize_directive_id(value) for value in directive_ids or []
             ]
-            if directive_version_id is not None and len(normalized_ids) != 1:
+            normalized_section_ids = [str(value) for value in section_ids or []]
+            if normalized_section_ids and len(normalized_ids) != 1:
                 raise ValueError(
-                    "Exact directive version search requires one directive ID"
+                    "Section-scoped search requires one directive ID"
                 )
-            normalized_version_id = (
-                validate_directive_version_id(
-                    directive_version_id, normalized_ids[0]
-                )
-                if directive_version_id is not None
-                else None
-            )
         except (TypeError, ValueError) as exc:
             raise DirectiveDataUnavailable("Directive search identity is invalid") from exc
         bounded_results = min(max_results, self._max_results)
         filter_expression = _build_filter(
-            current_only=current_only,
             directive_ids=normalized_ids,
-            directive_version_id=normalized_version_id,
-            section_ids=section_ids or [],
+            section_ids=normalized_section_ids,
         )
         started = perf_counter()
         with span(
@@ -156,7 +145,7 @@ class DirectiveSearchRepository:
                 "search.retrieval_mode": "direct_hybrid",
                 "search.intent_count": len(normalized_intents),
             },
-        ):
+        ) as current_span:
             intent_results = await asyncio.gather(
                 *(
                     self._search_intent(
@@ -167,20 +156,28 @@ class DirectiveSearchRepository:
                     for intent_index, intent in enumerate(normalized_intents)
                 )
             )
-
-        ranked_references = [
-            result.references for result in intent_results
-        ]
-        fusion = _fuse_references(ranked_references, bounded_results)
-        references = fusion.references if include_references else []
-        aggregate_count = sum(len(values) for values in ranked_references)
-        deduplicated_count = aggregate_count - fusion.unique_count
+            ranked_references = [
+                result.references for result in intent_results
+            ]
+            fusion = _fuse_references(ranked_references, bounded_results)
+            references = fusion.references if include_references else []
+            aggregate_count = sum(len(values) for values in ranked_references)
+            deduplicated_count = aggregate_count - fusion.unique_count
+            current_span.set_attribute(
+                "search.candidate_count",
+                _PER_INTENT_CANDIDATES,
+            )
+            current_span.set_attribute(
+                "search.returned_count",
+                len(fusion.references),
+            )
         logger.info(
             "Directive Search retrieval completed mode=direct_hybrid "
-            "intent_count=%d per_intent_counts=%s aggregate_count=%d "
+            "intent_count=%d candidate_count=%d per_intent_counts=%s aggregate_count=%d "
             "deduplicated_count=%d returned_count=%d retry_count=%d "
             "latency_ms=%d empty_result=%s",
             len(normalized_intents),
+            _PER_INTENT_CANDIDATES,
             [len(values) for values in ranked_references],
             aggregate_count,
             deduplicated_count,
@@ -192,10 +189,9 @@ class DirectiveSearchRepository:
         return {
             "intents": normalized_intents,
             "filter": {
-                "current_only": current_only,
+                "current_only": True,
                 "directive_ids": normalized_ids,
-                "directive_version_id": normalized_version_id,
-                "section_ids": section_ids or [],
+                "section_ids": normalized_section_ids,
             },
             "retrieval_output": [
                 {
@@ -340,24 +336,19 @@ class DirectiveSearchRepository:
 
 def _build_filter(
     *,
-    current_only: bool,
     directive_ids: list[str],
-    directive_version_id: str | None,
     section_ids: list[str],
 ) -> str:
-    filters = ["publication_state eq 'published'", "is_valid eq true"]
-    if current_only:
-        filters.append("is_current eq true")
+    filters = [
+        "publication_state eq 'published'",
+        "is_valid eq true",
+        "is_current eq true",
+    ]
     if directive_ids:
         values = " or ".join(
             f"directive_id eq '{_odata(value)}'" for value in directive_ids
         )
         filters.append(f"({values})")
-    if directive_version_id:
-        filters.append(
-            "directive_version_id eq "
-            f"'{_odata(directive_version_id)}'"
-        )
     if section_ids:
         values = " or ".join(
             f"section_id eq '{_odata(value)}'" for value in section_ids

@@ -13,6 +13,7 @@ from directive_ingestion.source import (
     DirectiveSourceError,
     LocalDirectiveSource,
     discover_pdfs,
+    validate_document_set,
 )
 
 
@@ -60,6 +61,8 @@ class _Blob:
 class _Container:
     def __init__(self, properties, content_by_name):
         self.properties = properties
+        for item in properties:
+            item.size = len(content_by_name[item.name])
         self.blobs = {
             item.name: _Blob(content_by_name[item.name], item.etag)
             for item in properties
@@ -74,7 +77,8 @@ class _Container:
         self.prefixes.append(name_starts_with)
         return _AsyncItems(self.properties)
 
-    def get_blob_client(self, name):
+    def get_blob_client(self, name, *, version_id=None):
+        assert version_id == "version-1"
         return self.blobs[name]
 
 
@@ -120,7 +124,9 @@ def _blob_source(
 async def test_local_source_retains_exact_safe_basename(tmp_path: Path) -> None:
     (tmp_path / "Pokyn interní 2026.PDF").write_bytes(b"%PDF-local")
 
-    documents = await LocalDirectiveSource(tmp_path).discover()
+    source = LocalDirectiveSource(tmp_path)
+    descriptors = await source.list_descriptors()
+    documents = [await source.download(descriptor) for descriptor in descriptors]
 
     assert [item.source_name for item in documents] == ["Pokyn interní 2026.PDF"]
     assert len(documents[0].source_hash) == 64
@@ -144,7 +150,8 @@ async def test_blob_source_lists_prefix_and_downloads_with_etag(
     )
     source = _blob_source(monkeypatch, container, "incoming")
 
-    documents = await source.discover()
+    descriptors = await source.list_descriptors()
+    documents = [await source.download(descriptor) for descriptor in descriptors]
 
     assert [item.source_name for item in documents] == [
         "záznam alpha.pdf",
@@ -161,7 +168,7 @@ async def test_blob_source_rejects_empty_container(monkeypatch) -> None:
     source = _blob_source(monkeypatch, _Container([], {}))
 
     with pytest.raises(DirectiveSourceError, match="No directive PDFs"):
-        await source.discover()
+        await source.list_descriptors()
 
 
 @pytest.mark.asyncio
@@ -169,11 +176,11 @@ async def test_blob_source_rejects_oversized_corpus_before_download(
     monkeypatch,
 ) -> None:
     properties = [_properties("policy.pdf", '"etag-1"')]
-    properties[0].size = 101
     container = _Container(
         properties,
         {properties[0].name: b"%PDF-policy"},
     )
+    properties[0].size = 101
     source = _blob_source(
         monkeypatch,
         container,
@@ -181,7 +188,7 @@ async def test_blob_source_rejects_oversized_corpus_before_download(
     )
 
     with pytest.raises(DirectiveSourceError, match="corpus exceeds"):
-        await source.discover()
+        await source.list_descriptors()
 
     assert container.blobs[properties[0].name].calls == []
 
@@ -197,9 +204,10 @@ async def test_blob_source_surfaces_etag_change(monkeypatch) -> None:
         "changed"
     )
     source = _blob_source(monkeypatch, container)
+    descriptor = (await source.list_descriptors())[0]
 
     with pytest.raises(DirectiveSourceError, match="changed or became"):
-        await source.discover()
+        await source.download(descriptor)
 
 
 @pytest.mark.asyncio
@@ -216,9 +224,13 @@ async def test_blob_source_rejects_duplicate_content_hash(monkeypatch) -> None:
         },
     )
     source = _blob_source(monkeypatch, container)
+    descriptors = await source.list_descriptors()
+    documents = [
+        await source.download(descriptor) for descriptor in descriptors
+    ]
 
     with pytest.raises(ValueError, match="Duplicate directive source content"):
-        await source.discover()
+        validate_document_set(documents, "test")
 
 
 def test_discovery_rejects_duplicate_content_hashes(tmp_path: Path) -> None:

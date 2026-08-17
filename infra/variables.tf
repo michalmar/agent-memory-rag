@@ -255,12 +255,12 @@ variable "directive_agent_release_id" {
 
 variable "directive_search_index_name" {
   type    = string
-  default = "directive-chunks-v2"
+  default = "directive-chunks-v3"
 }
 
 variable "directive_processing_version" {
   type        = string
-  default     = "directive-v2-czech-layout"
+  default     = "directive-v3-bounded-ingestion"
   description = "Processing contract version used by the manual directive ingestion job."
 }
 

@@ -23,8 +23,8 @@ def test_directive_content_container_is_configurable(monkeypatch) -> None:
     assert config.search_api_version == "2026-04-01"
     assert config.source_kind == "local"
     assert config.source_container == "directive-source"
-    assert config.search_index == "directive-chunks-v2"
-    assert config.processing_version == "directive-v2-czech-layout"
+    assert config.search_index == "directive-chunks-v3"
+    assert config.processing_version == "directive-v3-bounded-ingestion"
 
 
 def test_blob_source_configuration_is_loaded(monkeypatch) -> None:
