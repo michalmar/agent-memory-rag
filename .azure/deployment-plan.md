@@ -2,7 +2,7 @@
 
 > **Status:** Validated
 >
-> **Current release status:** Deployed; live rollback/recovery exercise pending
+> **Current release status:** Deployed; cold-load benchmark complete; live rollback/recovery exercise pending
 
 Generated: 2026-07-25T20:33:12Z
 
@@ -67,6 +67,118 @@ Validated at `2026-08-16T20:02:29Z`.
 `/Users/mimarusa/.copilot/session-state/bf889d53-eaf5-4931-8116-184e1a7612e3/files/directive-v3-cutover-approved.tfplan`
 
 **Validated by:** `azure-validate`
+
+#### Cold-load infrastructure recreation validation proof
+
+Validated at `2026-08-17T05:54:49Z`.
+
+| Check | Result |
+| --- | --- |
+| Target | User confirmed subscription `ME-MngEnvMCAP372348-mimarusa-1` (`7bc68c68-f434-49ad-ab3e-b883ec39da86`) and the existing East US 2 resource group |
+| Empty-state prerequisite | Evidence SHA-256 `f841ed31115e64b3d0c130e9ff36cc8cd293b32ce8df2aa24cea5ad978ca01c0`; no directive Cosmos containers, no current source/artifact blobs, no `directive-chunks-v3`, no active execution, and the job remains in maintenance |
+| Terraform | Initialization, recursive format check, syntax validation, default workspace, and 98-resource state access passed |
+| Saved plan | Exactly 3 additions, 0 changes, and 0 deletions: `catalog`, `directive_content`, and `user_mandates` |
+| Schema | Planned partition keys are exactly `/directive_id`, `/directive_version_id`, and `/user_id`; the content container retains its content-field indexing exclusion |
+| Drift exclusion | A temporary deployment-only override ignores only the policy-owned resource-group `SecurityControl` tag; the tag and every unrelated resource are absent from the saved plan |
+| Azure Policy | The isolated Azure CLI profile found no effective assignments at the resource-group scope; Azure MCP policy lookup used a different identity and was not accepted as evidence |
+| Plan integrity | SHA-256 `69e5770930eb149697144198a354a1b955f3ddce3c55fb61b46661b4e0133398` |
+
+**Validated by:** `azure-validate`
+
+Applied at `2026-08-17T05:57:14Z`.
+
+| Deployment check | Result |
+| --- | --- |
+| Terraform apply | 3 resources added, 0 changed, and 0 destroyed from the saved plan |
+| Restored resources | Empty `catalog`, `directive_content`, and `user_mandates` containers are present in Azure and Terraform state with exact partition keys and no default TTL |
+| Cold-load boundary | Source and artifact containers still contain 0 current blobs; `directive-chunks-v3` remains absent; no ingestion execution started |
+| Runtime safety | Ingestion job remains idle in `maintenance`; its database-scoped Cosmos contributor assignment is present |
+| Drift review | Full post-apply plan contains only the previously documented Storage firewall drift and no Cosmos change; that unrelated drift was not applied |
+| Policy tag | Resource-group `SecurityControl=Ignore` remains intact; the temporary deployment override was removed |
+| Endpoint | `https://ca-agmem-frontend.salmonmeadow-d85c9acb.eastus2.azurecontainerapps.io/` returned HTTP 200 |
+
+#### Cold-load initial-ingestion benchmark
+
+Measured from an empty derived-data baseline on `2026-08-17` UTC.
+
+| Boundary | Result |
+| --- | --- |
+| Cold baseline | 2 newly uploaded PDFs / 365,420 bytes; 0 artifact blobs; empty `catalog`, `directive_content`, and `user_mandates`; no `directive-chunks-v3`; idle maintenance job |
+| Immutable runtime | ACR build `ch56` succeeded in 45 seconds; image digest `sha256:48b246120bf5b581dc932af80b7d6b7fc193a4dd53b0479cac57439391b6826d` |
+| Validation orchestration | 419 seconds; bootstrap 41 seconds, gate bootstrap 37 seconds, preflight 41 seconds, and validation 35 seconds at the Container Apps execution boundary |
+| Interrupted publication | The first 136-second local wrapper attempt ended with SIGPIPE after a successful 30-second idempotent Search bootstrap. No approval was reserved and no `run-daily` publication was dispatched; this was an operator-shell failure, not an ingestion or Azure execution failure |
+| Successful publication | Retry completed in 418 seconds; bootstrap 37 seconds, gate bootstrap 34 seconds, and `run-daily` 143 seconds at the Container Apps execution boundary |
+| End-to-end timing | 1,126 seconds (18m 46s) from frozen baseline to verified completion: 973 active orchestration seconds plus 153 seconds of operator handoff/inspection. The successful validation-plus-publication path used 837 active seconds (13m 57s) |
+| Outcome | 8/8 Azure job executions and 8/8 durable metric records succeeded; publication execution `job-agmem-directive-ingest-bywwn5r`, run `20260817T061742Z-ebcee5e8`, activation result `success` |
+
+Validation performed the cold extraction and populated the extraction cache.
+Publication then reused both cache entries.
+
+| Measured quantity | Result |
+| --- | --- |
+| In-job source transfer | 4 downloads / 730,840 bytes across validation and publication |
+| Operator integrity rehashing | 4 inventory refreshes, 8 downloads / 1,461,680 bytes outside ingestion-run metrics |
+| Extraction cache | 2 misses and 2 fallbacks during validation; 2 hits during publication; 0 invalidations |
+| Document Intelligence | 9 requests total, including preflight; 6 validation polls |
+| Summary model | 2 requests; 11,824 input tokens and 6,423 output tokens |
+| Embeddings | 2 requests; 48 items and 11,788 input tokens |
+| Search | 54 requests, 41 queries, 38 visibility polls, and 144 publication actions; final authoritative document count is 48 |
+| Retries and throttles | 0 total retries; 0 Document Intelligence, OpenAI, or Search throttles |
+| Failures | 0 Azure execution failures and 0 durable ingestion failures; 1 recovered local shell-output failure before publication dispatch |
+| Peak memory | 231,534,592 bytes (220.8 MiB) during `run-daily` |
+
+Individual operator integrity-refresh duration was not separately instrumented;
+it remains included in the orchestration wall-clock measurements.
+
+Stage durations are internal application timings. Concurrent per-document stages
+overlap, so these values must not be summed to derive wall time.
+
+| Stage | Validation | Cold `run-daily` |
+| --- | ---: | ---: |
+| Total internal duration | 5,612 ms | 117,270 ms |
+| Planning | 5,599 ms | - |
+| Source listing | 708 ms | 34 ms |
+| Download | 55 ms | 58 ms |
+| Cache lookup | 18 ms | 84 ms |
+| Cache write | 97 ms | - |
+| Extraction | 9,100 ms aggregated across concurrent documents | - |
+| Metadata | 7 ms | - |
+| Canonicalization | 50 ms | 50 ms |
+| Chunking | - | 16 ms |
+| Summary | - | 60,266 ms |
+| Embedding | - | 659 ms |
+| Staging | - | 5,725 ms |
+| Blob staging | - | 254 ms |
+| Cosmos staging | - | 3,376 ms |
+| Search publication | - | 9,444 ms |
+| Catalog publication | - | 169 ms |
+| Activation | - | 9,898 ms |
+| Verification | - | 14,710 ms |
+| Cleanup | - | 5,068 ms |
+| Activation gate end-to-end | - | 39,817 ms |
+
+Final exact verification found 2 directives and versions, 2 current pointers, 48
+current Search documents, 82 content items, 4 required publication artifacts,
+2 source-state records, and the active empty mandate snapshot with 0 assignments.
+The artifact container has 13 current blobs when extraction cache, approval,
+source-inventory, source-state, and validation evidence records are included.
+The publication gate is `committed`, no execution is active, the job is restored
+to `directive-ingest maintenance`, and the frontend returns HTTP 200. Cosmos
+default TTL and Blob lifecycle automation remain disabled.
+
+The current metrics schema declares `catalog_reads`, `catalog_writes`,
+`blob_reads`, `cosmos_reads`, and `cosmos_writes`, but the implementation does
+not increment those counters. Exact request counts for those stores cannot be
+reconstructed from this run; the exact final object counts above remain verified.
+
+| Evidence | SHA-256 |
+| --- | --- |
+| `cold-load-ingestion-baseline.json` | `fcf7c7a49901204f9556d5b7042a1bdf6181af93cf32ebb714dad99433de1052` |
+| `cold-load-validation-evidence.json` | `dc545b15b82d21c7743bc48e3ccc9cc68cfda7205769bb966cd4b45e5f7d924a` |
+| `cold-load-run-metrics.json` | `e08367b46a71e81833232cd2d3418bf1db843b9957c89a1f20ea819af29e407b` |
+| `cold-load-publication-verification.json` | `1832ae80483359b5408f15892f5b974c053e84618d11e63f3435228364dc5f8c` |
+| `cold-load-final-state.json` | `a7e6071f9010d122ee1ce2710d051dd24f6721047ba81467c51bc49babb74357` |
+| `cold-load-benchmark-report.json` | `b7d1aabee62fdce9f37e65758676cb9a9902fe81d0f19af8727a1fe7bc189469` |
 
 #### Split staging validation proof
 
