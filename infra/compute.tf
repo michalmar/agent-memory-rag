@@ -99,6 +99,7 @@ locals {
     DIRECTIVE_AGENT_RELEASE_ID                 = var.directive_agent_release_id
     DIRECTIVE_MODEL_DEPLOYMENT                 = azurerm_cognitive_deployment.directive.name
     DIRECTIVE_SEARCH_INDEX                     = var.directive_search_index_name
+    DIRECTIVE_PUBLICATION_GATE_ENABLED         = "true"
     DIRECTIVE_SEARCH_API_VERSION               = "2026-04-01"
     DIRECTIVE_COSMOS_DATABASE                  = azurerm_cosmosdb_sql_database.directives.name
     DIRECTIVE_CATALOG_CONTAINER                = azurerm_cosmosdb_sql_container.directive_catalog.name

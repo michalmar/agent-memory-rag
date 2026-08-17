@@ -12,7 +12,7 @@ describe('agent presentation', () => {
     expect(agentLabel([], 'foundry-prompt')).toBe('Foundry Prompt Agent');
     expect(agentLabel([], 'agent-framework')).toBe('Hosted Agent Framework');
     expect(agentLabel([], 'directive-rag')).toBe('Directive Assistant');
-    expect(agentDescription('directive-rag')).toContain('summaries');
+    expect(agentDescription('directive-rag')).toContain('Current directive search');
     expect(agentIcon('directive-rag')).toBe('policy');
   });
 

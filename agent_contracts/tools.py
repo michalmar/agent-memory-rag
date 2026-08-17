@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
 from typing import Any, Literal
 
 from directive_contracts import (
     normalize_directive_id,
-    normalize_directive_version,
-    validate_directive_version_id,
 )
 from pydantic import (
     BaseModel,
@@ -45,60 +42,20 @@ class ProfileUpdateArguments(StrictArguments):
     facts: list[str] | None = None
 
 
-class ResolveDirectiveArguments(StrictArguments):
-    query: str | None = Field(default=None, min_length=1, max_length=500)
-    directive_id: str | None = Field(default=None, min_length=1)
-    directive_version_id: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=200,
-    )
-    version_label: str | None = Field(default=None, min_length=1, max_length=100)
-    as_of: date | None = None
+class GetDirectiveArguments(StrictArguments):
+    directive_id: str = Field(min_length=1)
+    view: Literal["metadata", "manifest", "summary"] = "metadata"
 
     @field_validator("directive_id", mode="before")
     @classmethod
-    def normalize_directive_id(cls, value: str | None) -> str | None:
-        return None if value is None else normalize_directive_id(value)
-
-    @field_validator("version_label")
-    @classmethod
-    def validate_version_label(cls, value: str | None) -> str | None:
-        if value is not None:
-            normalize_directive_version(value)
-        return value
-
-    @model_validator(mode="after")
-    def validate_selector(self) -> ResolveDirectiveArguments:
-        if not self.query and not self.directive_id:
-            raise ValueError("query or directive_id is required")
-        selectors = (
-            self.directive_version_id,
-            self.version_label,
-            self.as_of,
-        )
-        if sum(value is not None for value in selectors) > 1:
-            raise ValueError(
-                "directive_version_id, version_label, and as_of are mutually exclusive"
-            )
-        if self.directive_version_id and not self.directive_id:
-            raise ValueError("directive_id is required with directive_version_id")
-        if self.directive_version_id and self.directive_id:
-            self.directive_version_id = validate_directive_version_id(
-                self.directive_version_id, self.directive_id
-            )
-        return self
+    def normalize_directive_id(cls, value: str) -> str:
+        return normalize_directive_id(value)
 
 
 class SearchDirectivesArguments(StrictArguments):
     intents: list[str] = Field(min_length=1, max_length=8)
     directive_ids: list[str] = Field(default_factory=list, max_length=100)
-    directive_version_id: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=200,
-    )
-    current_only: bool = True
+    section_ids: list[str] = Field(default_factory=list, max_length=100)
     max_results: int = Field(default=10, ge=1, le=100)
 
     @field_validator("directive_ids", mode="before")
@@ -108,6 +65,13 @@ class SearchDirectivesArguments(StrictArguments):
             raise ValueError("directive_ids must be a JSON array")
         return [normalize_directive_id(item) for item in value]
 
+    @field_validator("section_ids", mode="before")
+    @classmethod
+    def validate_section_ids(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            raise ValueError("section_ids must be a JSON array")
+        return [str(item) for item in value]
+
     @model_validator(mode="after")
     def validate_filters(self) -> SearchDirectivesArguments:
         if any(
@@ -115,65 +79,30 @@ class SearchDirectivesArguments(StrictArguments):
             for intent in self.intents
         ):
             raise ValueError("intents must contain 1..500 non-whitespace characters")
-        if self.directive_version_id and len(self.directive_ids) != 1:
+        if self.section_ids and len(self.directive_ids) != 1:
             raise ValueError(
-                "exact version filtering requires exactly one directive_id"
-            )
-        if self.directive_version_id:
-            self.directive_version_id = validate_directive_version_id(
-                self.directive_version_id, self.directive_ids[0]
-            )
-            self.current_only = False
-        elif not self.current_only:
-            raise ValueError(
-                "historical search requires an exact directive_version_id"
+                "section filtering requires exactly one directive_id"
             )
         return self
 
 
-class DirectiveVersionArguments(StrictArguments):
+class DirectiveContentArguments(StrictArguments):
     directive_id: str = Field(min_length=1)
-    directive_version_id: str = Field(min_length=1, max_length=200)
+    section_ids: list[str] = Field(default_factory=list, max_length=100)
+    cursor: int = Field(default=0, ge=0)
+    max_tokens: int | None = Field(default=None, ge=1, le=900_000)
 
     @field_validator("directive_id", mode="before")
     @classmethod
     def normalize_directive_id(cls, value: str) -> str:
         return normalize_directive_id(value)
 
-    @model_validator(mode="after")
-    def validate_version_identity(self) -> DirectiveVersionArguments:
-        self.directive_version_id = validate_directive_version_id(
-            self.directive_version_id, self.directive_id
-        )
-        return self
-
-
-class DirectiveContentArguments(DirectiveVersionArguments):
-    section_ids: list[str] = Field(default_factory=list, max_length=100)
-    cursor: int = Field(default=0, ge=0)
-    max_tokens: int | None = Field(default=None, ge=1, le=900_000)
-
-
-class SearchWithinDirectiveArguments(DirectiveVersionArguments):
-    intents: list[str] = Field(min_length=1, max_length=8)
-    section_ids: list[str] = Field(default_factory=list, max_length=100)
-    max_results: int = Field(default=10, ge=1, le=100)
-
-    @model_validator(mode="after")
-    def validate_intents(self) -> SearchWithinDirectiveArguments:
-        if any(
-            len(intent.strip()) == 0 or len(intent) > 500
-            for intent in self.intents
-        ):
-            raise ValueError("intents must contain 1..500 non-whitespace characters")
-        return self
-
-
-class RelatedDirectivesArguments(DirectiveVersionArguments):
-    relation_types: list[
-        Literal["parent", "sub_directive", "reference"]
-    ] = Field(default_factory=list, max_length=3)
-    depth: int = Field(default=1, ge=1, le=2)
+    @field_validator("section_ids", mode="before")
+    @classmethod
+    def validate_section_ids(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            raise ValueError("section_ids must be a JSON array")
+        return [str(item) for item in value]
 
 
 class UserDirectiveMandatesArguments(StrictArguments):
@@ -220,13 +149,9 @@ COMMON_TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
 )
 
 DIRECTIVE_TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
-    ToolDefinition("resolve_directive", ResolveDirectiveArguments),
+    ToolDefinition("get_directive", GetDirectiveArguments),
     ToolDefinition("search_directives", SearchDirectivesArguments),
-    ToolDefinition("get_directive_manifest", DirectiveVersionArguments),
     ToolDefinition("get_directive_content", DirectiveContentArguments),
-    ToolDefinition("search_within_directive", SearchWithinDirectiveArguments),
-    ToolDefinition("get_related_directives", RelatedDirectivesArguments),
-    ToolDefinition("get_precomputed_summary", DirectiveVersionArguments),
     ToolDefinition(
         "get_user_directive_mandates",
         UserDirectiveMandatesArguments,

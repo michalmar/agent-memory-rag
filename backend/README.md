@@ -92,12 +92,17 @@ immutable afterward.
 
 ## Directive v2 operations
 
-Production Terraform supplies `DIRECTIVE_SEARCH_INDEX=directive-chunks-v2` and
-`DIRECTIVE_PROCESSING_VERSION=directive-v2-czech-layout`. The manual ingestion
+Production Terraform supplies `DIRECTIVE_SEARCH_INDEX=directive-chunks-v3` and
+`DIRECTIVE_PROCESSING_VERSION=directive-v3-bounded-ingestion`. The manual ingestion
 job remains the only publication trigger. A maintenance-window cutover must
 run the guarded derived-data reset, image deployment, managed-identity
 preflight, metadata-only validation with operator confirmation, full ingestion,
 and cross-store verification in that order.
+`DIRECTIVE_PUBLICATION_GATE_ENABLED` defaults to `false` for the additive
+compatibility window, where an absent gate represents the legacy committed
+state. Run `directive-ingest bootstrap-gate` to create or verify the committed
+gate against the current catalog and mandate state before enabling it. Once
+enabled, missing, malformed, activating, or recovery-required gates fail closed.
 The deployment approval token is freshly derived from the exact validation
 execution and its sanitized summary; reusable confirmation constants are
 rejected. Reset maintenance mode is nonpublishing until that validated flow

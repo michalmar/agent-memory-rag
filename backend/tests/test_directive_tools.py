@@ -19,7 +19,6 @@ from agent_contracts import (
 from directive_contracts import (
     DirectiveArtifactLocators,
     DirectiveManifest,
-    DirectiveRelation,
     DirectiveSection,
     DirectiveSectionContentDescriptor,
     DirectiveSummary,
@@ -151,45 +150,22 @@ class _Catalog:
     enabled = True
 
     def __init__(self) -> None:
-        self.records = {
-            ("10000001", "10000001:v2"): _version(),
-            ("10000002", "10000002:v1"): _version(
-                "10000002",
-                "10000002:v1",
-                title="Vacation Policy",
-            ),
-        }
         self.bundle = _bundle()
-        self.bundle_requests: list[tuple[str, str]] = []
+        self.bundle_requests: list[str] = []
+        self.publication_checks = 0
+        self.available = True
 
-    async def resolve_version(
-        self,
-        directive_id: str,
-        *,
-        directive_version_id=None,
-        version_label=None,
-        as_of=None,
-    ):
-        del version_label, as_of
-        if directive_version_id:
-            return self.records.get((directive_id, directive_version_id))
-        return next(
-            (
-                value
-                for (candidate_id, _), value in self.records.items()
-                if candidate_id == directive_id
-            ),
-            None,
-        )
+    async def ensure_publication_readable(self) -> None:
+        self.publication_checks += 1
+        if not self.available:
+            raise DirectiveDataUnavailable(
+                "Directive publication is unavailable pending recovery"
+            )
 
-    async def get_version_record(self, directive_id: str, version_id: str):
-        return self.records.get((directive_id, version_id))
-
-    async def get_published_version(
-        self, directive_id: str, version_id: str
-    ):
-        self.bundle_requests.append((directive_id, version_id))
-        if (directive_id, version_id) not in self.records:
+    async def get_current_published_version(self, directive_id: str):
+        await self.ensure_publication_readable()
+        self.bundle_requests.append(directive_id)
+        if directive_id != self.bundle.directive_id:
             return None
         return self.bundle
 
@@ -253,7 +229,11 @@ class _Search:
         self.calls.append(kwargs)
         return {
             "intents": kwargs["intents"],
-            "filter": {"current_only": kwargs["current_only"]},
+            "filter": {
+                "current_only": True,
+                "directive_ids": kwargs.get("directive_ids") or [],
+                "section_ids": kwargs.get("section_ids") or [],
+            },
             "retrieval_output": "Grounded extract",
             "references": [
                 {
@@ -325,63 +305,37 @@ class DirectiveToolContractTests(unittest.TestCase):
                 }
             )
 
-    def test_filter_builder_owns_current_and_exact_version_constraints(self):
+    def test_filter_builder_owns_current_filters(self):
         value = _build_filter(
-            current_only=True,
             directive_ids=["10000001"],
-            directive_version_id="10000001:v2",
             section_ids=["section'one"],
         )
         self.assertIn("publication_state eq 'published'", value)
         self.assertIn("is_current eq true", value)
         self.assertIn("is_valid eq true", value)
         self.assertIn("directive_id eq '10000001'", value)
-        self.assertIn("directive_version_id eq '10000001:v2'", value)
         self.assertIn("section_id eq 'section''one'", value)
 
-    def test_filter_builder_handles_historical_and_multiple_directives(self):
-        historical = _build_filter(
-            current_only=False,
-            directive_ids=["10000001"],
-            directive_version_id="version'2",
-            section_ids=[],
-        )
+    def test_filter_builder_handles_multiple_directives(self):
         discovery = _build_filter(
-            current_only=True,
             directive_ids=["10000001", "10000002"],
-            directive_version_id=None,
             section_ids=[],
         )
 
-        self.assertNotIn("is_current", historical)
-        self.assertEqual(
-            historical,
-            "publication_state eq 'published' and is_valid eq true and "
-            "(directive_id eq '10000001') and "
-            "directive_version_id eq 'version''2'",
-        )
         self.assertIn(
             "(directive_id eq '10000001' or directive_id eq '10000002')",
             discovery,
         )
 
-    def test_historical_search_requires_and_normalizes_exact_version(self):
+    def test_current_only_contract_rejects_removed_historical_fields(self):
         definition = directive_tool_definition("search_directives")
         with self.assertRaises(ValidationError):
             definition.validate(
                 {
                     "intents": ["previous vehicle policy"],
-                    "current_only": False,
+                    "directive_version_id": "10000001:v1",
                 }
             )
-        validated = definition.validate(
-            {
-                "intents": ["previous vehicle policy"],
-                "directive_ids": ["10000001"],
-                "directive_version_id": "10000001:v1",
-            }
-        )
-        self.assertFalse(validated["current_only"])
 
     def test_artifact_repository_rejects_urls_and_parent_traversal(self):
         self.assertEqual(
@@ -437,7 +391,6 @@ class DirectiveSearchRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         repository.retrieve.assert_awaited_once_with(
             intents=["healthcheck"],
-            current_only=True,
             max_results=1,
             include_references=False,
         )
@@ -497,7 +450,6 @@ class DirectiveSearchRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         result = await repository.retrieve(
             intents=[" company car eligibility ", "mileage exceptions"],
-            current_only=True,
             max_results=3,
         )
 
@@ -559,7 +511,7 @@ class DirectiveSearchRepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("source_hash", str(result))
 
-    async def test_exact_search_normalizes_slash_ids_before_odata_filter(self):
+    async def test_directive_scoped_search_normalizes_slash_ids_before_filter(self):
         repository = DirectiveSearchRepository()
         repository._max_results = 25
         repository._request = AsyncMock(
@@ -572,15 +524,14 @@ class DirectiveSearchRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         await repository.retrieve(
             intents=["řízení"],
-            current_only=False,
             max_results=1,
             directive_ids=[" čd / 42-a "],
-            directive_version_id="ČD/42-A:v1",
+            section_ids=["§1"],
         )
 
         payload = repository._request.await_args.args[0]
         self.assertIn("directive_id eq 'ČD/42-A'", payload["filter"])
-        self.assertIn("directive_version_id eq 'ČD/42-A:v1'", payload["filter"])
+        self.assertIn("section_id eq '§1'", payload["filter"])
 
     async def test_request_uses_direct_search_url_scope_and_retry_after(
         self,
@@ -806,7 +757,8 @@ class DirectiveToolExecutorTests(unittest.IsolatedAsyncioTestCase):
                 {"intents": ["company vehicle"]},
                 user_id="tenant:user",
             )
-        self.assertTrue(self.search.calls[0]["current_only"])
+        self.assertEqual(self.catalog.publication_checks, 1)
+        self.assertEqual(self.search.calls[0]["directive_ids"], [])
         self.assertEqual(result.citations[0].directive_id, "10000001")
         self.assertEqual(
             result.citations[0].mandatory_status,
@@ -815,24 +767,24 @@ class DirectiveToolExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("source_hash", str(result.data))
         self.assertNotIn("processing_hash", str(result.data))
 
-    async def test_exact_historical_search_never_uses_current_filter(self):
+    async def test_filtered_search_uses_focused_citations(self):
         with patch(
             "agent_memory_backend.directive_tools.get_settings",
             return_value=_settings(),
         ):
-            await self.executor.execute_envelope(
-                "search_within_directive",
+            result = await self.executor.execute_envelope(
+                "search_directives",
                 {
-                    "directive_id": "10000001",
-                    "directive_version_id": "10000001:v2",
+                    "directive_ids": ["10000001"],
+                    "section_ids": ["s0"],
                     "intents": ["eligibility exceptions"],
                 },
                 user_id="tenant:user",
             )
         call = self.search.calls[0]
-        self.assertFalse(call["current_only"])
         self.assertEqual(call["directive_ids"], ["10000001"])
-        self.assertEqual(call["directive_version_id"], "10000001:v2")
+        self.assertEqual(call["section_ids"], ["s0"])
+        self.assertEqual(result.citations[0].retrieval_strategy, "focused")
 
     async def test_content_returns_explicit_continuation_without_truncation(self):
         with patch(
@@ -843,7 +795,6 @@ class DirectiveToolExecutorTests(unittest.IsolatedAsyncioTestCase):
                 "get_directive_content",
                 {
                     "directive_id": "10000001",
-                    "directive_version_id": "10000001:v2",
                 },
                 user_id="tenant:user",
             )
@@ -870,24 +821,24 @@ class DirectiveToolExecutorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assert_no_internal_fields(result.to_dict())
 
-    async def test_manifest_and_summary_each_use_one_bundle_read(self):
+    async def test_get_directive_projects_manifest_and_summary_views(self):
         with patch(
             "agent_memory_backend.directive_tools.get_settings",
             return_value=_settings(),
         ):
             manifest = await self.executor.execute_envelope(
-                "get_directive_manifest",
+                "get_directive",
                 {
                     "directive_id": "10000001",
-                    "directive_version_id": "10000001:v2",
+                    "view": "manifest",
                 },
                 user_id="tenant:user",
             )
             summary = await self.executor.execute_envelope(
-                "get_precomputed_summary",
+                "get_directive",
                 {
                     "directive_id": "10000001",
-                    "directive_version_id": "10000001:v2",
+                    "view": "summary",
                 },
                 user_id="tenant:user",
             )
@@ -932,7 +883,6 @@ class DirectiveToolExecutorTests(unittest.IsolatedAsyncioTestCase):
                 "get_directive_content",
                 {
                     "directive_id": "10000001",
-                    "directive_version_id": "10000001:v2",
                     "max_tokens": 21,
                 },
                 user_id="tenant:user",
@@ -940,6 +890,19 @@ class DirectiveToolExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "error")
         self.assertEqual(result.error_code, "CONTENT_TOO_LARGE")
         self.assertEqual(result.data["max_tokens"], 20)
+
+    async def test_get_directive_returns_not_found_for_missing_current_directive(self):
+        with patch(
+            "agent_memory_backend.directive_tools.get_settings",
+            return_value=_settings(),
+        ):
+            result = await self.executor.execute_envelope(
+                "get_directive",
+                {"directive_id": "10000099"},
+                user_id="tenant:user",
+            )
+        self.assertEqual(result.status, "not_found")
+        self.assertEqual(result.error_code, "DIRECTIVE_NOT_FOUND")
 
     async def test_mandate_lookup_uses_only_injected_user(self):
         with patch(
@@ -960,46 +923,26 @@ class DirectiveToolExecutorTests(unittest.IsolatedAsyncioTestCase):
             "mandatory",
         )
 
-    async def test_related_traversal_is_bounded_and_cycle_safe(self):
+    async def test_gate_recovery_blocks_search_and_mandate_reads(self):
+        self.catalog.available = False
         with patch(
             "agent_memory_backend.directive_tools.get_settings",
             return_value=_settings(),
         ):
-            result = await self.executor.execute_envelope(
-                "get_related_directives",
-                {
-                    "directive_id": "10000001",
-                    "directive_version_id": "10000001:v2",
-                    "depth": 2,
-                },
-                user_id="tenant:user",
-            )
-        self.assertEqual(len(result.data["related"]), 2)
-        self.assertEqual(
-            {item["depth"] for item in result.data["related"]},
-            {1, 2},
-        )
-
-    async def test_related_directives_returns_empty_successfully_without_records(
-        self,
-    ):
-        self.catalog.get_relations = AsyncMock(return_value=())
-
-        with patch(
-            "agent_memory_backend.directive_tools.get_settings",
-            return_value=_settings(),
-        ):
-            result = await self.executor.execute_envelope(
-                "get_related_directives",
-                {
-                    "directive_id": "10000001",
-                    "directive_version_id": "10000001:v2",
-                },
-                user_id="tenant:user",
-            )
-
-        self.assertEqual(result.status, "ok")
-        self.assertEqual(result.data["related"], [])
+            with self.assertRaises(ToolExecutionError) as search_error:
+                await self.executor.execute_envelope(
+                    "search_directives",
+                    {"intents": ["company vehicle"]},
+                    user_id="tenant:user",
+                )
+            with self.assertRaises(ToolExecutionError) as mandate_error:
+                await self.executor.execute_envelope(
+                    "get_user_directive_mandates",
+                    {"directive_ids": ["10000001"]},
+                    user_id="tenant:user",
+                )
+        self.assertEqual(search_error.exception.code, "DIRECTIVE_DATA_UNAVAILABLE")
+        self.assertEqual(mandate_error.exception.code, "DIRECTIVE_DATA_UNAVAILABLE")
 
     async def test_unknown_tool_and_missing_user_fail_explicitly(self):
         with patch(
@@ -1014,10 +957,9 @@ class DirectiveToolExecutorTests(unittest.IsolatedAsyncioTestCase):
                 )
             with self.assertRaises(ToolExecutionError):
                 await self.executor.execute_envelope(
-                    "get_directive_manifest",
+                    "get_directive",
                     {
                         "directive_id": "10000001",
-                        "directive_version_id": "10000001:v2",
                     },
                     user_id="",
                 )
@@ -1031,10 +973,9 @@ class DirectiveToolExecutorTests(unittest.IsolatedAsyncioTestCase):
                     self.search,
                     self.mandates,
                 ),
-                "get_directive_manifest",
+                "get_directive",
                 {
                     "directive_id": "10000001",
-                    "directive_version_id": "10000001:v2",
                 },
             ),
             (
@@ -1057,8 +998,17 @@ class DirectiveToolExecutorTests(unittest.IsolatedAsyncioTestCase):
                 "get_directive_content",
                 {
                     "directive_id": "10000001",
-                    "directive_version_id": "10000001:v2",
                 },
+            ),
+            (
+                DirectiveToolExecutor(
+                    DirectiveCatalogRepository(),
+                    self.contents,
+                    self.search,
+                    self.mandates,
+                ),
+                "search_directives",
+                {"intents": ["vehicle"]},
             ),
         )
 
@@ -1186,7 +1136,7 @@ class DirectiveGatewayIsolationTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaises(HTTPException) as principal_denied:
                 await dispatch_agent_tool(
-                    "get_directive_manifest",
+                    "get_directive",
                     request,
                     AgentCaller(
                         principal_id="support-principal",

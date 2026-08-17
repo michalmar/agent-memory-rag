@@ -24,8 +24,6 @@ const PROGRESS_MESSAGES: Record<WorkflowStage, string> = {
   resolving: 'Resolving directive scope',
   searching: 'Searching published directives',
   loading_content: 'Loading directive content',
-  following_references: 'Following directive references',
-  comparing_versions: 'Comparing directive versions',
   checking_mandatory_status: 'Checking mandatory status',
   verifying_coverage: 'Verifying source coverage',
   preparing_answer: 'Preparing answer',

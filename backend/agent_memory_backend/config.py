@@ -96,6 +96,7 @@ class Settings:
     directive_model_deployment: str
     directive_search_index: str
     directive_search_api_version: str
+    directive_publication_gate_enabled: bool
     directive_cosmos_database: str
     directive_catalog_container: str
     directive_content_container: str
@@ -201,10 +202,13 @@ class Settings:
                 "DIRECTIVE_MODEL_DEPLOYMENT", "gpt-5.6-sol"
             ),
             directive_search_index=_get(
-                "DIRECTIVE_SEARCH_INDEX", "directive-chunks-v2"
+                "DIRECTIVE_SEARCH_INDEX", "directive-chunks-v3"
             ),
             directive_search_api_version=_get(
                 "DIRECTIVE_SEARCH_API_VERSION", "2026-04-01"
+            ),
+            directive_publication_gate_enabled=_get_bool(
+                "DIRECTIVE_PUBLICATION_GATE_ENABLED"
             ),
             directive_cosmos_database=_get(
                 "DIRECTIVE_COSMOS_DATABASE", "directives"

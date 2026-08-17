@@ -129,8 +129,10 @@ class DirectiveContractTests(unittest.TestCase):
 
     def test_directive_prompt_is_versioned_separately(self) -> None:
         prompt = render_directive_rag_instructions()
-        self.assertIn("retrieval planning", prompt)
+        self.assertIn("You own retrieval", prompt)
+        self.assertIn("current published directives", prompt)
         self.assertIn("non-authoritative guidance", prompt)
+        self.assertIn("current published corpus is", prompt)
         self.assertNotEqual(DIRECTIVE_RAG_PROMPT_VERSION, PROMPT_VERSION)
 
     def test_hosted_tool_payload_preserves_directive_citation_fields(self) -> None:

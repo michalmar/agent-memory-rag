@@ -26,33 +26,59 @@ from directive_ingestion.integrity import (
     CatalogResetRequiredError,
     IntegrityValidationError,
 )
+from directive_ingestion.extraction_cache import ExtractionCacheEvidence
 from directive_ingestion.reconcile import (
     DirectiveIngestionRunner,
     MAX_PUBLIC_DIRECTIVES,
     PublicationSnapshot,
     SourceArtifactSnapshot,
     SourceMetadata,
+    _descriptor_inventory_digest,
     _generation_scoped_chunks,
     _generation_canonical_hash,
     _public_record_digest,
     _corrupt_catalog_repair_salt,
+    _safe_environment,
     _validation_digest_projection,
     _build_artifact_locators,
     _validate_public_corpus_limit,
     format_result,
 )
-from directive_ingestion.source import SourceDocument, SourceProvenance
+from directive_ingestion.source import (
+    SourceDescriptor,
+    SourceDocument,
+    SourceIdentity,
+)
 from directive_ingestion.source_state_repository import PublishedSourceState
 from directive_ingestion.source_state_repository import SourceStateRepository
+from directive_ingestion.source_inventory import (
+    SourceInventory,
+    SourceInventoryEntry,
+    SourceInventorySnapshot,
+)
+from directive_ingestion.validation_evidence import (
+    ValidationEvidence,
+    ValidationEvidenceDocument,
+)
 
 
 def _source(name: str = "neutral.pdf") -> SourceDocument:
     content = f"%PDF-v2-{name}".encode()
     return SourceDocument(
-        source_name=name,
-        source_hash=hashlib.sha256(content).hexdigest(),
+        descriptor=SourceDescriptor(
+            source_name=name,
+            kind="test",
+            locator=name,
+            etag='"source-etag"',
+            version_id=None,
+            size=len(content),
+            last_modified=None,
+        ),
+        identity=SourceIdentity(
+            name,
+            hashlib.sha256(content).hexdigest(),
+        ),
         content=content,
-        _provenance=SourceProvenance(kind="test", locator=name),
     )
 
 
@@ -99,12 +125,77 @@ def _published_state(
     return PublishedSourceState(
         source_filename=source.source_name,
         source_hash=source.source_hash,
-        source_fingerprint="b" * 64,
+        source_fingerprint=hashlib.sha256(
+            f"{source.source_name}\0{source.source_hash}".encode()
+        ).hexdigest(),
         processing_hash=metadata.processing_hash,
         directive_metadata=metadata,
         artifact_generation_id=generation_id,
         publication_state="published",
+        source_etag=source.descriptor.etag,
+        source_size=source.descriptor.size,
+        extraction_cache_blob=_extraction_evidence().blob_name,
+        extractor_identity_hash=(
+            _extraction_evidence().extractor_identity_hash
+        ),
+        extraction_result_hash=_extraction_evidence().result_hash,
     )
+
+
+def _extraction_evidence() -> ExtractionCacheEvidence:
+    return ExtractionCacheEvidence(
+        blob_name=(
+            "extractions/"
+            + "1" * 64
+            + "/"
+            + "2" * 64
+            + "/"
+            + "3" * 64
+            + ".json.gz"
+        ),
+        extractor_identity_hash="2" * 64,
+        result_hash="4" * 64,
+    )
+
+
+def _evidence_document(
+    source: SourceDocument,
+    metadata: DirectiveMetadata,
+    *,
+    disposition: str = "unchanged",
+) -> ValidationEvidenceDocument:
+    return ValidationEvidenceDocument(
+        descriptor=source.descriptor,
+        identity=source.identity,
+        metadata=metadata,
+        source_state_blob="source-state/state.json",
+        disposition=disposition,
+        extraction=_extraction_evidence(),
+    )
+
+
+def _daily_approval(
+    runner: DirectiveIngestionRunner,
+    source: SourceDocument,
+    metadata: DirectiveMetadata,
+    mandate_checksum: str,
+) -> tuple[ValidationEvidence, dict[str, str]]:
+    document = _evidence_document(source, metadata)
+    evidence = ValidationEvidence.create(
+        processing_hash=metadata.processing_hash,
+        mandate_checksum=mandate_checksum,
+        documents=(document,),
+    )
+    return evidence, {
+        "approved_validation_digest": "5" * 64,
+        "approved_environment_digest": _public_record_digest(
+            _safe_environment(runner.config)
+        ),
+        "approved_source_inventory_digest": _descriptor_inventory_digest(
+            evidence.documents
+        ),
+        "approved_validation_evidence_digest": evidence.evidence_hash,
+    }
 
 
 @pytest.mark.asyncio
@@ -246,7 +337,7 @@ async def test_catalog_slot_rollback_refuses_etag_conflict() -> None:
     "metadata",
     [{}, {"content_sha256": "not-a-sha256"}],
 )
-async def test_source_artifact_repair_rewrites_invalid_metadata_with_same_bytes(
+async def test_source_artifact_publication_never_rewrites_immutable_source(
     metadata: dict[str, str],
 ) -> None:
     source = _source()
@@ -278,18 +369,14 @@ async def test_source_artifact_repair_rewrites_invalid_metadata_with_same_bytes(
         ),
     )
 
-    assert candidate == "candidate"
-    runner.blobs.replace_bytes.assert_awaited_once_with(
-        item.bundle.artifacts.source_blob_name,
-        source.content,
-        "application/pdf",
-        expected_etag="before",
-    )
+    assert candidate is None
+    runner.blobs.replace_bytes.assert_not_awaited()
     runner.blobs.put_immutable.assert_awaited_once_with(
         item.bundle.artifacts.canonical_blob_name,
         b"# Directive\n",
         "text/markdown; charset=utf-8",
     )
+    assert runner.blobs.validate_hash.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -442,26 +529,26 @@ async def test_blob_payload_hash_mismatch_is_an_integrity_failure() -> None:
 async def test_trusted_state_skips_document_intelligence() -> None:
     source = _source()
     metadata = _metadata(source)
-    state = PublishedSourceState(
-        source_filename=source.source_name,
-        source_hash=source.source_hash,
-        source_fingerprint="b" * 64,
-        processing_hash=metadata.processing_hash,
-        directive_metadata=metadata,
-        artifact_generation_id="c" * 64,
-        publication_state="published",
-    )
+    state = _published_state(source, metadata, "c" * 64)
     runner = object.__new__(DirectiveIngestionRunner)
     runner.config = SimpleNamespace(processing_hash=metadata.processing_hash)
     runner.source_states = SimpleNamespace(load=AsyncMock(return_value=state))
     runner._state_has_live_publication = AsyncMock(return_value=True)
     runner.extractor = SimpleNamespace(extract=AsyncMock())
+    runner.extraction_cache = SimpleNamespace(load=AsyncMock())
+    runner.extractor_identity = SimpleNamespace()
     runner.blobs = SimpleNamespace(quarantine=AsyncMock())
 
     result = await runner.extract_or_load_metadata([source], "run")
 
     assert result == [
-        SourceMetadata(source, metadata, extraction=None, source_state=state)
+        SourceMetadata(
+            source,
+            metadata,
+            extraction=None,
+            source_state=state,
+            extraction_evidence=_extraction_evidence(),
+        )
     ]
     runner.extractor.extract.assert_not_awaited()
 
@@ -475,6 +562,16 @@ async def test_inconsistent_state_reextracts_metadata() -> None:
     runner.source_states = SimpleNamespace(load=AsyncMock(return_value=None))
     runner._state_has_live_publication = AsyncMock()
     runner.extractor = SimpleNamespace(extract=AsyncMock(return_value=object()))
+    runner.extractor_identity = SimpleNamespace()
+    runner.extraction_cache = SimpleNamespace(
+        load=AsyncMock(return_value=None),
+        store=AsyncMock(
+            side_effect=lambda _identity, _extractor, extraction: SimpleNamespace(
+                document=extraction,
+                evidence=_extraction_evidence(),
+            )
+        ),
+    )
     runner.blobs = SimpleNamespace(quarantine=AsyncMock())
 
     import directive_ingestion.metadata as metadata_module
@@ -526,6 +623,16 @@ async def test_corrupt_blob_payload_reextracts_instead_of_trusting_state(
     runner.content = SimpleNamespace(validate_bundle=AsyncMock())
     runner.search = SimpleNamespace(validate_current_generation=AsyncMock())
     runner.extractor = SimpleNamespace(extract=AsyncMock(return_value=object()))
+    runner.extractor_identity = SimpleNamespace()
+    runner.extraction_cache = SimpleNamespace(
+        load=AsyncMock(return_value=None),
+        store=AsyncMock(
+            side_effect=lambda _identity, _extractor, extraction: SimpleNamespace(
+                document=extraction,
+                evidence=_extraction_evidence(),
+            )
+        ),
+    )
     import directive_ingestion.metadata as metadata_module
 
     monkeypatch.setattr(
@@ -635,6 +742,7 @@ async def test_source_state_is_written_only_after_cross_store_validation() -> No
         source=_source(),
         canonical=SimpleNamespace(metadata=metadata),
         search_chunks=[object()],
+        extraction_evidence=_extraction_evidence(),
     )
     runner = object.__new__(DirectiveIngestionRunner)
     runner.catalog = SimpleNamespace(
@@ -676,7 +784,10 @@ async def test_prepare_changed_documents_builds_first_generation() -> None:
     )
     runner.summaries = SimpleNamespace(summarize=AsyncMock(return_value={}))
     runner.search = SimpleNamespace(build_chunks=AsyncMock(return_value=[]))
-    runner.blobs = SimpleNamespace(quarantine=AsyncMock())
+    runner.blobs = SimpleNamespace(
+        quarantine=AsyncMock(),
+        put_immutable=AsyncMock(),
+    )
     runner.catalog = SimpleNamespace(get_published_version=AsyncMock(return_value=None))
     runner.source_states = SimpleNamespace(record=AsyncMock())
     import directive_ingestion.reconcile as reconcile_module
@@ -686,10 +797,25 @@ async def test_prepare_changed_documents_builds_first_generation() -> None:
     original_bundle = reconcile_module._build_published_bundle
     reconcile_module.parse_canonical = lambda *_args: canonical
     reconcile_module._build_manifest = lambda *_args: object()
-    reconcile_module._build_published_bundle = lambda *_args: (object(), ())
+    reconcile_module._build_published_bundle = lambda *_args: (
+        SimpleNamespace(
+            artifacts=SimpleNamespace(source_blob_name="source.pdf"),
+            artifact_generation_id="d" * 64,
+        ),
+        (),
+    )
     try:
         prepared = await runner.prepare_changed_documents(
-            [SourceMetadata(source, metadata, object(), None)], "run"
+            [
+                SourceMetadata(
+                    source,
+                    metadata,
+                    object(),
+                    None,
+                    extraction_evidence=_extraction_evidence(),
+                )
+            ],
+            "run",
         )
     finally:
         reconcile_module.parse_canonical = original_parse
@@ -697,7 +823,8 @@ async def test_prepare_changed_documents_builds_first_generation() -> None:
         reconcile_module._build_published_bundle = original_bundle
 
     assert len(prepared) == 1
-    assert prepared[0].source is source
+    assert prepared[0].source.identity == source.identity
+    assert not hasattr(prepared[0].source, "content")
     runner.summaries.summarize.assert_awaited_once_with(canonical)
 
 
@@ -808,11 +935,34 @@ async def test_validate_output_has_finalize_guard_shape() -> None:
         mandate_container="user_mandates",
         search_service="search",
     )
-    runner.discover_sources = AsyncMock(return_value=[source])
-    runner.extract_or_load_metadata = AsyncMock(
-        return_value=[SourceMetadata(source, metadata, None, None)]
+    evidence_document = _evidence_document(
+        source,
+        metadata,
+        disposition="changed",
     )
-    runner._validate_and_quarantine = AsyncMock()
+    inventory = SourceInventory.create(
+        "run",
+        [
+            SourceInventoryEntry.create(
+                source.descriptor,
+                source.identity,
+                evidence_document.source_state_blob,
+            )
+        ],
+    )
+    runner.source_planner = SimpleNamespace(
+        validate=AsyncMock(
+            return_value=SimpleNamespace(
+                documents=(evidence_document,),
+                inventory_snapshot=SourceInventorySnapshot(
+                    inventory=inventory,
+                    etag='"etag"',
+                    valid=True,
+                ),
+            )
+        )
+    )
+    runner.validation_evidence = SimpleNamespace(store=AsyncMock())
     import directive_ingestion.reconcile as reconcile_module
 
     original_mandates = reconcile_module.parse_mandates
@@ -833,11 +983,12 @@ async def test_validate_output_has_finalize_guard_shape() -> None:
         "processing_hash",
         "search_index",
         "source_inventory_digest",
+        "validation_evidence_digest",
         "record_schema",
         "run_id",
         "validation_digest",
     }.issubset(value)
-    assert value["record_schema"] == "directive.validate.v2"
+    assert value["record_schema"] == "directive.validate.v3"
     assert value["mandate_checksum"] == "b" * 64
     assert value["validation_digest"] == _public_record_digest(
         _validation_digest_projection(value)
@@ -855,7 +1006,12 @@ async def test_malformed_source_state_reprocesses_and_is_replaced() -> None:
 
     assert await repository.load(source, "a" * 64) is None
 
-    await repository.record(source, _metadata(source), "c" * 64)
+    await repository.record(
+        source,
+        _metadata(source),
+        "c" * 64,
+        extraction_evidence=_extraction_evidence(),
+    )
     blobs.replace_json.assert_awaited_once()
 
 
@@ -875,7 +1031,16 @@ async def test_malformed_state_repairs_without_restaging_live_generation() -> No
     runner.blobs = SimpleNamespace(quarantine=AsyncMock())
 
     prepared = await runner.prepare_changed_documents(
-        [SourceMetadata(source, metadata, object(), None)], "run"
+        [
+            SourceMetadata(
+                source,
+                metadata,
+                object(),
+                None,
+                extraction_evidence=_extraction_evidence(),
+            )
+        ],
+        "run",
     )
 
     assert prepared == []
@@ -883,11 +1048,79 @@ async def test_malformed_state_repairs_without_restaging_live_generation() -> No
         source,
         metadata,
         bundle.artifact_generation_id,
+        extraction_evidence=_extraction_evidence(),
         published_bundle=bundle,
         validation_warnings=(),
     )
     runner.summaries.summarize.assert_not_awaited()
     runner.search.build_chunks.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_partial_embedding_failure_writes_no_publication_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    metadata = _metadata(source)
+    canonical = SimpleNamespace(
+        metadata=metadata,
+        markdown="# Directive\n",
+        sections=(),
+        findings=(),
+        relations=(),
+    )
+    text_chunk = TextChunk(
+        id="chunk-1",
+        section_id="section",
+        ordinal=1,
+        content="content",
+        content_kind="text",
+        page_from=1,
+        page_to=1,
+    )
+    runner = object.__new__(DirectiveIngestionRunner)
+    runner.config = SimpleNamespace(
+        processing_hash=metadata.processing_hash,
+        chunk_token_limit=800,
+        chunk_overlap_tokens=120,
+    )
+    runner._repair_source_state_if_live = AsyncMock(return_value=False)
+    runner.catalog = SimpleNamespace(
+        get_published_version=AsyncMock(return_value=None)
+    )
+    runner.summaries = SimpleNamespace(summarize=AsyncMock(return_value={}))
+    runner.search = SimpleNamespace(
+        build_chunks=AsyncMock(side_effect=RuntimeError("embedding batch failed"))
+    )
+    runner.blobs = SimpleNamespace(
+        put_immutable=AsyncMock(),
+        quarantine=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "directive_ingestion.reconcile.parse_canonical",
+        lambda *_args, **_kwargs: canonical,
+    )
+    monkeypatch.setattr(
+        "directive_ingestion.reconcile.chunk_sections",
+        lambda *_args, **_kwargs: ([text_chunk], ()),
+    )
+
+    with pytest.raises(RuntimeError, match="embedding batch failed"):
+        await runner.prepare_changed_documents(
+            [
+                SourceMetadata(
+                    source,
+                    metadata,
+                    object(),
+                    None,
+                    extraction_evidence=_extraction_evidence(),
+                )
+            ],
+            "run",
+        )
+
+    runner.blobs.put_immutable.assert_not_awaited()
+    runner.blobs.quarantine.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -914,7 +1147,10 @@ async def test_corrupt_live_generation_gets_isolated_repair_generation() -> None
     )
     runner.summaries = SimpleNamespace(summarize=AsyncMock(return_value={}))
     runner.search = SimpleNamespace(build_chunks=AsyncMock(return_value=[]))
-    runner.blobs = SimpleNamespace(quarantine=AsyncMock())
+    runner.blobs = SimpleNamespace(
+        quarantine=AsyncMock(),
+        put_immutable=AsyncMock(),
+    )
     runner.catalog = SimpleNamespace(
         get_published_version=AsyncMock(
             return_value=SimpleNamespace(artifact_generation_id=generation_id)
@@ -934,10 +1170,25 @@ async def test_corrupt_live_generation_gets_isolated_repair_generation() -> None
     reconcile_module._build_manifest = lambda _value, *_args: captured.append(
         _args[-1]
     ) or object()
-    reconcile_module._build_published_bundle = lambda *_args: (object(), ())
+    reconcile_module._build_published_bundle = lambda *_args: (
+        SimpleNamespace(
+            artifacts=SimpleNamespace(source_blob_name="source.pdf"),
+            artifact_generation_id="d" * 64,
+        ),
+        (),
+    )
     try:
         await runner.prepare_changed_documents(
-            [SourceMetadata(source, metadata, object(), None)], "run"
+            [
+                SourceMetadata(
+                    source,
+                    metadata,
+                    object(),
+                    None,
+                    extraction_evidence=_extraction_evidence(),
+                )
+            ],
+            "run",
         )
     finally:
         reconcile_module.parse_canonical = original_parse
@@ -1171,7 +1422,7 @@ async def test_exact_corpus_retires_all_removed_store_records() -> None:
 async def test_run_daily_unchanged_corpus_performs_no_publication_writes() -> None:
     source = _source()
     metadata = _metadata(source)
-    state = SimpleNamespace()
+    state = _published_state(source, metadata, "d" * 64)
     parsed = SimpleNamespace(
         assignments=(), checksum="c" * 64, user_count=0
     )
@@ -1195,12 +1446,44 @@ async def test_run_daily_unchanged_corpus_performs_no_publication_writes() -> No
         mandate_container="mandates",
         search_service="search",
     )
-    runner.discover_sources = AsyncMock(return_value=[source])
-    runner.extract_or_load_metadata = AsyncMock(
-        return_value=[SourceMetadata(source, metadata, None, state)]
+    evidence, approval = _daily_approval(
+        runner,
+        source,
+        metadata,
+        parsed.checksum,
     )
-    runner._validate_and_quarantine = AsyncMock()
-    runner.prepare_changed_documents = AsyncMock(return_value=[])
+    inventory = SourceInventory.create(
+        "run",
+        [
+            SourceInventoryEntry.create(
+                source.descriptor,
+                source.identity,
+                evidence.documents[0].source_state_blob,
+            )
+        ],
+    )
+    inventory_snapshot = SourceInventorySnapshot(
+        inventory=inventory,
+        etag='"etag"',
+        valid=True,
+    )
+    runner.validation_evidence = SimpleNamespace(
+        load=AsyncMock(return_value=evidence)
+    )
+    runner.source_planner = SimpleNamespace(
+        revalidate_descriptors=AsyncMock()
+    )
+    runner.source_inventory = SimpleNamespace(
+        load_snapshot=AsyncMock(return_value=inventory_snapshot),
+        commit=AsyncMock(),
+    )
+    runner._validate_published_approval = AsyncMock()
+    runner._prepare_approved_documents = AsyncMock(
+        return_value=(
+            [SourceMetadata(source, metadata, None, state)],
+            [],
+        )
+    )
     runner._validate_relations = AsyncMock()
     runner.mandates = SimpleNamespace(
         is_current=AsyncMock(return_value=True),
@@ -1216,8 +1499,9 @@ async def test_run_daily_unchanged_corpus_performs_no_publication_writes() -> No
     )
     runner.search = SimpleNamespace(ensure_resources=AsyncMock())
     runner._publish_transaction = AsyncMock()
-    runner.reconcile_exact_corpus = AsyncMock()
-    runner.verify = AsyncMock()
+    runner._reconcile_after_publication = AsyncMock()
+    runner._bind_source_state_validation_digest = AsyncMock()
+    runner.verify = AsyncMock(return_value={"success": True})
     runner.catalog = SimpleNamespace(record_run=AsyncMock())
     runner.commits = SimpleNamespace(
         load=AsyncMock(return_value=None),
@@ -1232,17 +1516,19 @@ async def test_run_daily_unchanged_corpus_performs_no_publication_writes() -> No
     original_mandates = reconcile_module.parse_mandates
     reconcile_module.parse_mandates = lambda *_args: parsed
     try:
-        result = await runner.run_daily()
+        result = await runner.run_daily(**approval)
     finally:
         reconcile_module.parse_mandates = original_mandates
 
     assert result.changed_count == 0
     assert result.mandate_snapshot_id == "mandates-" + "c" * 64 + "-repaired"
+    assert result.verification == {"success": True}
     runner.search.ensure_resources.assert_not_awaited()
     runner._publish_transaction.assert_not_awaited()
     runner.mandates.publish.assert_not_awaited()
     runner.catalog.record_run.assert_not_awaited()
     runner.commits.clear.assert_not_awaited()
+    runner.source_inventory.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1279,12 +1565,48 @@ async def test_mandate_only_activation_is_reported_as_a_change() -> None:
         mandate_container="mandates",
         search_service="search",
     )
-    runner.discover_sources = AsyncMock(return_value=[source])
-    runner.extract_or_load_metadata = AsyncMock(
-        return_value=[SourceMetadata(source, metadata, None, object())]
+    evidence, approval = _daily_approval(
+        runner,
+        source,
+        metadata,
+        parsed.checksum,
     )
-    runner._validate_and_quarantine = AsyncMock()
-    runner.prepare_changed_documents = AsyncMock(return_value=[])
+    inventory = SourceInventory.create(
+        "run",
+        [
+            SourceInventoryEntry.create(
+                source.descriptor,
+                source.identity,
+                evidence.documents[0].source_state_blob,
+            )
+        ],
+    )
+    inventory_snapshot = SourceInventorySnapshot(
+        inventory=inventory,
+        etag='"etag"',
+        valid=True,
+    )
+    runner.validation_evidence = SimpleNamespace(
+        load=AsyncMock(return_value=evidence)
+    )
+    runner.source_planner = SimpleNamespace(
+        revalidate_descriptors=AsyncMock()
+    )
+    runner.source_inventory = SimpleNamespace(
+        load_snapshot=AsyncMock(return_value=inventory_snapshot),
+        commit=AsyncMock(),
+    )
+    runner._validate_published_approval = AsyncMock()
+    runner._prepare_approved_documents = AsyncMock(
+        return_value=(
+            [SourceMetadata(source, metadata, None, _published_state(
+                source,
+                metadata,
+                "d" * 64,
+            ))],
+            [],
+        )
+    )
     runner._validate_relations = AsyncMock()
     runner.mandates = SimpleNamespace(
         is_current=AsyncMock(return_value=False),
@@ -1295,7 +1617,12 @@ async def test_mandate_only_activation_is_reported_as_a_change() -> None:
         return_value=([], SimpleNamespace(snapshot=snapshot, changed=True))
     )
     runner._reconcile_after_publication = AsyncMock()
-    runner.verify = AsyncMock()
+    runner._bind_source_state_validation_digest = AsyncMock()
+    runner._begin_publication_gate = AsyncMock(
+        return_value=SimpleNamespace()
+    )
+    runner._commit_publication_gate = AsyncMock()
+    runner.verify = AsyncMock(return_value={"success": True})
     runner.catalog = SimpleNamespace(record_run=AsyncMock())
     runner.commits = SimpleNamespace(
         load=AsyncMock(return_value=None),
@@ -1311,7 +1638,7 @@ async def test_mandate_only_activation_is_reported_as_a_change() -> None:
     original_mandates = reconcile_module.parse_mandates
     reconcile_module.parse_mandates = lambda *_args: parsed
     try:
-        result = await runner.run_daily()
+        result = await runner.run_daily(**approval)
     finally:
         reconcile_module.parse_mandates = original_mandates
 

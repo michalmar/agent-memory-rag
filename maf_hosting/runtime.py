@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from .gateway import close_gateway_transport_sync
 from .identity import (
     configure_observability_identity,
     install_agent365_identity_middleware,
@@ -24,10 +25,13 @@ def run_hosted_agent(
 
         server_type = StatefulResponsesHostServer
     server = server_type(build_agent())
-    if agent_id:
-        install_agent365_identity_middleware(
-            server,
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-        )
-    server.run()
+    try:
+        if agent_id:
+            install_agent365_identity_middleware(
+                server,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+            )
+        server.run()
+    finally:
+        close_gateway_transport_sync()

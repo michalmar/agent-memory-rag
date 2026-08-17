@@ -8,18 +8,22 @@ from time import monotonic
 from typing import Any, Iterable
 
 import httpx
+import tiktoken
 from directive_contracts import DirectiveChunk, DirectiveMetadata
 
 from .canonical import CanonicalDirective
 from .chunking import TextChunk
 from .config import IngestionConfig
 from .integrity import IntegrityValidationError
+from .provider_retry import RetryBudget, retry_provider_call
+from .run_metrics import IngestionRunMetrics
 
 _VISIBILITY_TIMEOUT_SECONDS = 600.0
 _VISIBILITY_INITIAL_BACKOFF_SECONDS = 1.0
 _VISIBILITY_MAX_BACKOFF_SECONDS = 10.0
 _VISIBILITY_REQUIRED_STABLE_OBSERVATIONS = 2
 _VISIBILITY_ID_BATCH_SIZE = 250
+_TOKENIZER = tiktoken.get_encoding("o200k_base")
 
 
 class DirectiveSearchRepository:
@@ -35,6 +39,20 @@ class DirectiveSearchRepository:
         self._client = httpx.AsyncClient(
             base_url=config.search_endpoint,
             timeout=httpx.Timeout(180),
+        )
+        self._retry_policy = config.retry_policy
+        self._retry_budget = RetryBudget(
+            self._retry_policy.stage_retry_budget
+        )
+        self._indexing_semaphore = asyncio.Semaphore(
+            config.concurrency.search_indexing
+        )
+        self._metrics: IngestionRunMetrics | None = None
+
+    def attach_metrics(self, metrics: IngestionRunMetrics | None) -> None:
+        self._metrics = metrics
+        self._retry_budget = RetryBudget(
+            self._retry_policy.stage_retry_budget
         )
 
     async def close(self) -> None:
@@ -156,18 +174,70 @@ class DirectiveSearchRepository:
         directive: CanonicalDirective,
         text_chunks: list[TextChunk],
     ) -> list[DirectiveChunk]:
-        vectors: list[list[float]] = []
-        for batch in _batches(text_chunks, 16):
-            response = await self._openai.embeddings.create(
-                model=self._config.embedding_deployment,
-                input=[item.content for item in batch],
-                dimensions=self._config.embedding_dimensions,
+        batches = _embedding_batches(
+            text_chunks,
+            max_item_tokens=getattr(
+                self._config,
+                "embedding_max_item_tokens",
+                8192,
+            ),
+            max_items=getattr(
+                self._config,
+                "embedding_max_items_per_request",
+                256,
+            ),
+            max_aggregate_tokens=getattr(
+                self._config,
+                "embedding_max_aggregate_tokens",
+                240000,
+            ),
+        )
+        semaphore = asyncio.Semaphore(
+            getattr(
+                getattr(self._config, "concurrency", None),
+                "embeddings",
+                2,
             )
+        )
+
+        async def embed(batch: list[TextChunk]) -> list[list[float]]:
+            input_tokens = sum(
+                len(_TOKENIZER.encode(item.content)) for item in batch
+            )
+
+            def record_attempt() -> None:
+                if self._metrics is not None:
+                    self._metrics.increment("embedding_requests")
+                    self._metrics.increment("embedding_items", len(batch))
+                    self._metrics.increment(
+                        "embedding_input_tokens",
+                        input_tokens,
+                    )
+
+            async with semaphore:
+                response = await retry_provider_call(
+                    lambda: self._openai.embeddings.create(
+                        model=self._config.embedding_deployment,
+                        input=[item.content for item in batch],
+                        dimensions=self._config.embedding_dimensions,
+                    ),
+                    policy=self._retry_policy,
+                    budget=self._retry_budget,
+                    on_attempt=record_attempt,
+                    on_retry=self._record_openai_retry,
+                    on_throttle=self._record_openai_throttle,
+                )
             batch_vectors = [item.embedding for item in response.data]
             if len(batch_vectors) != len(batch):
                 raise RuntimeError(
                     "Embedding response count does not match chunk count"
                 )
+            return batch_vectors
+
+        vectors: list[list[float]] = []
+        for batch_vectors in await asyncio.gather(
+            *(embed(batch) for batch in batches)
+        ):
             vectors.extend(batch_vectors)
         sections = {
             section.section_id: section for section in directive.sections
@@ -208,27 +278,33 @@ class DirectiveSearchRepository:
         return records
 
     async def stage_chunks(self, chunks: list[DirectiveChunk]) -> None:
-        for batch in _batches(chunks, 250):
-            actions = [
-                {
-                    **_search_document(chunk),
-                    "@search.action": "mergeOrUpload",
-                }
-                for chunk in batch
+        await self._upload_action_batches(
+            [
+                [
+                    {
+                        **_search_document(chunk),
+                        "@search.action": "mergeOrUpload",
+                    }
+                    for chunk in batch
+                ]
+                for batch in _batches(chunks, 250)
             ]
-            await self._upload_actions(actions)
+        )
 
     async def publish_chunks(self, chunks: list[DirectiveChunk]) -> None:
-        for batch in _batches(chunks, 500):
-            actions = [
-                {
-                    "id": chunk.id,
-                    "publication_state": "published",
-                    "@search.action": "merge",
-                }
-                for chunk in batch
+        await self._upload_action_batches(
+            [
+                [
+                    {
+                        "id": chunk.id,
+                        "publication_state": "published",
+                        "@search.action": "merge",
+                    }
+                    for chunk in batch
+                ]
+                for batch in _batches(chunks, 500)
             ]
-            await self._upload_actions(actions)
+        )
 
     async def retire_chunks(self, chunks: list[DirectiveChunk]) -> None:
         await self._merge_chunk_state(
@@ -505,6 +581,9 @@ class DirectiveSearchRepository:
         deadline = monotonic() + _VISIBILITY_TIMEOUT_SECONDS
         backoff = _VISIBILITY_INITIAL_BACKOFF_SECONDS
         while True:
+            metrics = getattr(self, "_metrics", None)
+            if metrics is not None:
+                metrics.increment("search_visibility_poll_count")
             result = await self._request(
                 "POST",
                 f"/indexes/{self._config.search_index}/docs/search",
@@ -543,6 +622,9 @@ class DirectiveSearchRepository:
         deadline = monotonic() + _VISIBILITY_TIMEOUT_SECONDS
         backoff = _VISIBILITY_INITIAL_BACKOFF_SECONDS
         while True:
+            metrics = getattr(self, "_metrics", None)
+            if metrics is not None:
+                metrics.increment("search_visibility_poll_count")
             actual_ids = set(await self._find_keys(filter_expression))
             if expected_ids.issubset(actual_ids):
                 if actual_ids == stable_ids:
@@ -580,6 +662,9 @@ class DirectiveSearchRepository:
         deadline = monotonic() + _VISIBILITY_TIMEOUT_SECONDS
         backoff = _VISIBILITY_INITIAL_BACKOFF_SECONDS
         while True:
+            metrics = getattr(self, "_metrics", None)
+            if metrics is not None:
+                metrics.increment("search_visibility_poll_count")
             actual_ids = set(await self._find_keys(filter_expression))
             if actual_ids == expected_ids:
                 stable_observations += 1
@@ -617,6 +702,16 @@ class DirectiveSearchRepository:
             )
             raise RuntimeError(f"Search document upload failed: {details}")
 
+    async def _upload_action_batches(
+        self,
+        batches: list[list[dict[str, Any]]],
+    ) -> None:
+        async def upload(actions: list[dict[str, Any]]) -> None:
+            async with self._indexing_semaphore:
+                await self._upload_actions(actions)
+
+        await asyncio.gather(*(upload(actions) for actions in batches))
+
     async def _headers(self) -> dict[str, str]:
         token = await self._credential.get_token(
             "https://search.azure.com/.default"
@@ -635,7 +730,7 @@ class DirectiveSearchRepository:
         payload: dict[str, Any] | None = None,
         allow_not_found: bool = False,
     ) -> dict[str, Any]:
-        for attempt in range(5):
+        async def operation() -> httpx.Response:
             response = await self._client.request(
                 method,
                 path,
@@ -644,23 +739,64 @@ class DirectiveSearchRepository:
                 json=payload,
             )
             if allow_not_found and response.status_code == 404:
-                return {}
-            if response.status_code not in {408, 429, 500, 502, 503, 504}:
-                if response.is_error:
-                    raise RuntimeError(
-                        f"{method} {path} failed with HTTP "
-                        f"{response.status_code}: {response.text}"
+                return response
+            response.raise_for_status()
+            return response
+
+        action_count = (
+            len(payload.get("value", []))
+            if isinstance(payload, dict)
+            and isinstance(payload.get("value"), list)
+            else 0
+        )
+
+        def record_attempt() -> None:
+            if self._metrics is not None:
+                self._metrics.increment("search_requests")
+                if path.endswith("/docs/search"):
+                    self._metrics.increment("search_query_count")
+                if action_count:
+                    self._metrics.increment("search_action_count", action_count)
+                    self._metrics.increment(
+                        "search_documents",
+                        action_count,
                     )
-                return response.json() if response.content else {}
-            if attempt == 4:
-                raise RuntimeError(
-                    f"{method} {path} failed after retries with HTTP "
-                    f"{response.status_code}: {response.text}"
-                )
-            retry_after = response.headers.get("retry-after")
-            delay = float(retry_after) if retry_after else 2**attempt
-            await asyncio.sleep(min(delay, 30))
-        raise AssertionError("unreachable")
+
+        response = await retry_provider_call(
+            operation,
+            policy=self._retry_policy,
+            budget=self._retry_budget,
+            on_attempt=record_attempt,
+            on_retry=self._record_search_retry,
+            on_throttle=self._record_search_throttle,
+        )
+        if allow_not_found and response.status_code == 404:
+            return {}
+        return response.json() if response.content else {}
+
+    def _record_openai_retry(self, error: Exception) -> None:
+        self._record_retry(error, "openai")
+
+    def _record_search_retry(self, error: Exception) -> None:
+        self._record_retry(error, "search")
+
+    def _record_openai_throttle(self, error: Exception) -> None:
+        self._record_throttle(error, "openai")
+
+    def _record_search_throttle(self, error: Exception) -> None:
+        self._record_throttle(error, "search")
+
+    def _record_retry(self, error: Exception, provider: str) -> None:
+        del error
+        if self._metrics is None:
+            return
+        self._metrics.increment("retry_count")
+        self._metrics.increment(f"retry_{provider}")
+
+    def _record_throttle(self, error: Exception, provider: str) -> None:
+        del error
+        if self._metrics is not None:
+            self._metrics.increment(f"throttle_{provider}")
 
     def _validate_existing_index(self, index: dict[str, Any]) -> None:
         fields = {field["name"]: field for field in index.get("fields", [])}
@@ -981,3 +1117,39 @@ def _id_filter(ids: set[str]) -> str:
 def _batches(values: list[Any], size: int) -> Iterable[list[Any]]:
     for start in range(0, len(values), size):
         yield values[start : start + size]
+
+
+def _embedding_batches(
+    values: list[TextChunk],
+    *,
+    max_item_tokens: int,
+    max_items: int,
+    max_aggregate_tokens: int,
+) -> list[list[TextChunk]]:
+    if min(max_item_tokens, max_items, max_aggregate_tokens) < 1:
+        raise ValueError("Embedding limits must be positive")
+    batches: list[list[TextChunk]] = []
+    current: list[TextChunk] = []
+    current_tokens = 0
+    for item in values:
+        tokens = len(_TOKENIZER.encode(item.content))
+        if tokens > max_item_tokens:
+            raise ValueError(
+                f"Embedding item exceeds {max_item_tokens} tokens"
+            )
+        if current and (
+            len(current) >= max_items
+            or current_tokens + tokens > max_aggregate_tokens
+        ):
+            batches.append(current)
+            current = []
+            current_tokens = 0
+        if tokens > max_aggregate_tokens:
+            raise ValueError(
+                "Embedding item exceeds aggregate request token limit"
+            )
+        current.append(item)
+        current_tokens += tokens
+    if current:
+        batches.append(current)
+    return batches

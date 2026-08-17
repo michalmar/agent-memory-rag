@@ -75,7 +75,7 @@ if [[ "${1:-}" == --self-test ]]; then
 fi
 
 case "${1:-}" in
-  validate|publish|all)
+  validate|publish|verify|audit|all)
     PHASE="$1"
     shift
     ;;
@@ -132,8 +132,8 @@ sha256_text() {
     echo "ERROR: validate phase requires DIRECTIVE_VALIDATE_EVIDENCE_FILE" >&2
     exit 2
   }
-[[ "$PHASE" != publish || -n "$VALIDATION_EVIDENCE_FILE" ]] || {
-  echo "ERROR: publish phase requires DIRECTIVE_VALIDATE_EVIDENCE_FILE" >&2
+[[ ( "$PHASE" != publish && "$PHASE" != verify && "$PHASE" != audit ) || -n "$VALIDATION_EVIDENCE_FILE" ]] || {
+  echo "ERROR: publish, verify, and audit phases require DIRECTIVE_VALIDATE_EVIDENCE_FILE" >&2
   exit 2
 }
 if [[ "$PHASE" == all && -z "$VALIDATION_EVIDENCE_FILE" ]]; then
@@ -145,6 +145,7 @@ SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
 RG="$(tf resource_group)"
 ACR_NAME="$(tf acr_name)"
 ACR_LOGIN="$(tf acr_login_server)"
+BACKEND_APP_NAME="$(tf backend_app_name)"
 JOB_NAME="$(tf directive_ingestion_job_name)"
 IDENTITY_PRINCIPAL_ID="$(tf directive_ingestion_identity_principal_id)"
 COSMOS_ENDPOINT="$(tf cosmos_endpoint)"
@@ -170,8 +171,8 @@ JOB_CPU="1"
 JOB_MEMORY="2Gi"
 VALIDATION_CONFIRMATION="${DIRECTIVE_VALIDATE_CONFIRMATION:-}"
 VERIFY_EVIDENCE_FILE="${DIRECTIVE_VERIFY_EVIDENCE_FILE:-}"
-EXPECTED_PROCESSING_VERSION="directive-v2-czech-layout"
-EXPECTED_SEARCH_INDEX="directive-chunks-v2"
+EXPECTED_PROCESSING_VERSION="directive-v3-bounded-ingestion"
+EXPECTED_SEARCH_INDEX="directive-chunks-v3"
 MAX_VALIDATION_EVIDENCE_AGE_SECONDS="${DIRECTIVE_VALIDATE_EVIDENCE_MAX_AGE_SECONDS:-86400}"
 INDEX_SCHEMA_FILE="$(mktemp)"
 EXPECTED_ENVIRONMENT_FILE="$(mktemp)"
@@ -185,8 +186,10 @@ SOURCE_INVENTORY_DIGEST=""
 EXPECTED_ENVIRONMENT_DIGEST=""
 APPROVED_ENVIRONMENT_DIGEST=""
 APPROVED_SOURCE_INVENTORY_DIGEST=""
+APPROVED_VALIDATION_EVIDENCE_DIGEST=""
 STARTED_EXECUTIONS=()
 EXECUTION_ENV_VARS=()
+EXECUTION_OVERRIDE_FILE=""
 PUBLICATION_MARKER_RESERVED=false
 PUBLICATION_DISPATCH_ATTEMPTED=false
 PUBLICATION_EXECUTION_SNAPSHOT="[]"
@@ -262,7 +265,8 @@ cleanup() {
     "$EXPECTED_ENVIRONMENT_FILE" \
     "$VALIDATION_SUMMARY_FILE" \
     "$VERIFY_SUMMARY_FILE" \
-    "$SOURCE_INVENTORY_FILE"
+    "$SOURCE_INVENTORY_FILE" \
+    "$EXECUTION_OVERRIDE_FILE"
   if [[ -n "${BUILD_CONTEXT:-}" && -d "$BUILD_CONTEXT" ]]; then
     rm -rf "$BUILD_CONTEXT"
   fi
@@ -438,7 +442,7 @@ safe_summary_lines() {
 
 show_execution_logs() {
   local execution_name="$1"
-  local raw_logs
+  local raw_logs replica_name explicit_logs
   raw_logs="$(
     az containerapp job logs show \
       --name "$JOB_NAME" \
@@ -449,13 +453,39 @@ show_execution_logs() {
       --format text 2>/dev/null || true
   )"
   case "${CURRENT_EXECUTION_LABEL:-}" in
-    "Metadata validation") safe_summary_lines "$raw_logs" "$VALIDATION_SUMMARY_FILE" || return 1 ;;
-    "Directive verification") safe_summary_lines "$raw_logs" "$VERIFY_SUMMARY_FILE" || return 1 ;;
+    "Metadata validation"|"Directive verification"|"Directive deep audit"|"Directive ingestion")
+      replica_name="$(
+        az containerapp job replica list \
+          --name "$JOB_NAME" \
+          --resource-group "$RG" \
+          --execution "$execution_name" \
+          --query '[0].name' \
+          --output tsv 2>/dev/null || true
+      )"
+      if [[ -n "$replica_name" ]]; then
+        explicit_logs="$(
+          az containerapp job logs show \
+            --name "$JOB_NAME" \
+            --resource-group "$RG" \
+            --execution "$execution_name" \
+            --replica "$replica_name" \
+            --container "$JOB_CONTAINER" \
+            --tail 300 \
+            --format text 2>/dev/null || true
+        )"
+        [[ -z "$explicit_logs" ]] || raw_logs="$explicit_logs"
+      fi
+      if [[ "${CURRENT_EXECUTION_LABEL:-}" == "Metadata validation" ]]; then
+        safe_summary_lines "$raw_logs" "$VALIDATION_SUMMARY_FILE" || return 1
+      else
+        safe_summary_lines "$raw_logs" "$VERIFY_SUMMARY_FILE" || return 1
+      fi
+      ;;
     *) : >"$INDEX_SCHEMA_FILE" ;;
   esac
   if [[ -s "$VALIDATION_SUMMARY_FILE" && "${CURRENT_EXECUTION_LABEL:-}" == "Metadata validation" ]]; then
     jq -c '{success, record_field_names: (keys | sort)}' "$VALIDATION_SUMMARY_FILE"
-  elif [[ -s "$VERIFY_SUMMARY_FILE" && "${CURRENT_EXECUTION_LABEL:-}" == "Directive verification" ]]; then
+  elif [[ -s "$VERIFY_SUMMARY_FILE" && ( "${CURRENT_EXECUTION_LABEL:-}" == "Directive verification" || "${CURRENT_EXECUTION_LABEL:-}" == "Directive deep audit" || "${CURRENT_EXECUTION_LABEL:-}" == "Directive ingestion" ) ]]; then
     jq -c '{success, record_field_names: (keys | sort)}' "$VERIFY_SUMMARY_FILE"
   else
     echo "[redacted] no approved ingestion summary lines were emitted"
@@ -490,19 +520,21 @@ reserve_publication_approval() {
   marker_file="$(mktemp)"
   provenance_file="$(mktemp)"
   jq -S -n \
-    --arg record_schema "directive.approval.v2" \
+    --arg record_schema "directive.approval.v3" \
     --arg validation_digest "$VALIDATION_PRODUCER_DIGEST" \
     --arg source_digest "$SOURCE_INVENTORY_DIGEST" \
     --arg environment_digest "$EXPECTED_ENVIRONMENT_DIGEST" \
     --arg processing_hash "$(jq -r '.producer_record.processing_hash' "$VALIDATION_EVIDENCE_FILE")" \
     --arg mandate_checksum "$(jq -r '.producer_record.mandate_checksum' "$VALIDATION_EVIDENCE_FILE")" \
+    --arg validation_evidence_digest "$APPROVED_VALIDATION_EVIDENCE_DIGEST" \
     '{
       record_schema: $record_schema,
       validation_digest: $validation_digest,
       source_inventory_digest: $source_digest,
       environment_digest: $environment_digest,
       processing_hash: $processing_hash,
-      mandate_checksum: $mandate_checksum
+      mandate_checksum: $mandate_checksum,
+      validation_evidence_digest: $validation_evidence_digest
     }' >"$marker_file"
   jq -S -n \
     --arg image_digest "$IMAGE_DIGEST" \
@@ -512,8 +544,10 @@ reserve_publication_approval() {
     --arg processing_version "$EXPECTED_PROCESSING_VERSION" \
     --arg search_index "$EXPECTED_SEARCH_INDEX" \
     --arg validation_digest "$VALIDATION_PRODUCER_DIGEST" \
+    --arg validation_evidence_digest "$APPROVED_VALIDATION_EVIDENCE_DIGEST" \
     '{
       validation_digest: $validation_digest,
+      validation_evidence_digest: $validation_evidence_digest,
       image_digest: $image_digest,
       subscription_id: $subscription,
       resource_group: $resource_group,
@@ -547,7 +581,7 @@ reserve_publication_approval() {
   rm -f "$marker_file" "$provenance_file"
 }
 
-assert_live_v2_config() {
+assert_live_target_config() {
   local container_json live_image live_processing live_index
   container_json="$(
     az containerapp job show \
@@ -594,6 +628,37 @@ assert_live_maintenance_mode() {
   )"
   directive_assert_execution_mode_json "$container_json" maintenance || {
     echo "ERROR: directive job template is not in nonpublishing maintenance mode" >&2
+    return 1
+  }
+}
+
+assert_backend_gate_awareness() {
+  local backend_container backend_gate_enabled backend_index
+  backend_container="$(
+    az containerapp show \
+      --name "$BACKEND_APP_NAME" \
+      --resource-group "$RG" \
+      --query "properties.template.containers[?name=='backend'] | [0]" \
+      --output json
+  )"
+  backend_gate_enabled="$(
+    jq -r \
+      '[.env[]? | select(.name == "DIRECTIVE_PUBLICATION_GATE_ENABLED") | .value] |
+       if length == 1 then .[0] else "" end' \
+      <<<"$backend_container"
+  )"
+  backend_index="$(
+    jq -r \
+      '[.env[]? | select(.name == "DIRECTIVE_SEARCH_INDEX") | .value] |
+       if length == 1 then .[0] else "" end' \
+      <<<"$backend_container"
+  )"
+  [[ "$backend_gate_enabled" == "true" ]] || {
+    echo "ERROR: backend gate-awareness marker is not enabled in the live backend app" >&2
+    return 1
+  }
+  [[ "$backend_index" == "$EXPECTED_SEARCH_INDEX" ]] || {
+    echo "ERROR: live backend directive Search index is not $EXPECTED_SEARCH_INDEX" >&2
     return 1
   }
 }
@@ -649,10 +714,14 @@ prepare_execution_env_vars() {
   local expected_argument="$1"
   local env_json env_file
   local approval_validation="" approval_environment="" approval_source=""
-  if [[ "$expected_argument" == run-daily || "$expected_argument" == verify ]]; then
+  local approval_validation_evidence=""
+  if [[ "$expected_argument" == run-daily || "$expected_argument" == verify || "$expected_argument" == verify-deep ]]; then
     approval_validation="$VALIDATION_PRODUCER_DIGEST"
     approval_environment="$EXPECTED_ENVIRONMENT_DIGEST"
     approval_source="$APPROVED_SOURCE_INVENTORY_DIGEST"
+  fi
+  if [[ "$expected_argument" == run-daily ]]; then
+    approval_validation_evidence="$APPROVED_VALIDATION_EVIDENCE_DIGEST"
   fi
   env_json="$(
     az containerapp job show \
@@ -665,9 +734,9 @@ prepare_execution_env_vars() {
   if ! directive_render_execution_env_vars \
     "$env_json" "$expected_argument" "$EXPECTED_PROCESSING_VERSION" \
     "$EXPECTED_SEARCH_INDEX" "$approval_validation" "$approval_environment" \
-    "$approval_source" >"$env_file"; then
+    "$approval_source" "$approval_validation_evidence" >"$env_file"; then
     rm -f "$env_file"
-    die "Live job environment cannot be used as a complete v2 execution override"
+    die "Live job environment cannot be used as a complete target execution override"
   fi
   EXECUTION_ENV_VARS=()
   while IFS=$'\t' read -r name value; do
@@ -676,7 +745,7 @@ prepare_execution_env_vars() {
   done <"$env_file"
   rm -f "$env_file"
   [[ "${#EXECUTION_ENV_VARS[@]}" -gt 0 ]] || die \
-    "Complete v2 execution override has no environment values"
+    "Complete target execution override has no environment values"
 }
 
 track_started_execution() {
@@ -717,7 +786,7 @@ recover_publication_execution() {
       "$before_json" "$executions" run-daily "$IMAGE" \
       "$EXPECTED_ENVIRONMENT_DIGEST" "$APPROVED_SOURCE_INVENTORY_DIGEST" \
       "$VALIDATION_PRODUCER_DIGEST" "$EXPECTED_PROCESSING_VERSION" \
-      "$EXPECTED_SEARCH_INDEX" >"$candidates_file"
+      "$EXPECTED_SEARCH_INDEX" "$APPROVED_VALIDATION_EVIDENCE_DIGEST" >"$candidates_file"
   then
     recovery_status=0
   else
@@ -736,10 +805,12 @@ recover_publication_execution() {
 start_job_execution() {
   local expected_argument="$1"
   local execution_name execution_name_file job_start_args=()
+  local approval_kind
+  local override_container
   local execution_snapshot
   assert_live_maintenance_mode
   assert_no_active_execution
-  if [[ "$expected_argument" == run-daily || "$expected_argument" == verify ]]; then
+  if [[ "$expected_argument" == run-daily || "$expected_argument" == verify || "$expected_argument" == verify-deep ]]; then
     [[ "$VALIDATION_PRODUCER_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
       "Approved validation digest is invalid"
     [[ "$EXPECTED_ENVIRONMENT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
@@ -747,7 +818,14 @@ start_job_execution() {
     [[ "$APPROVED_SOURCE_INVENTORY_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
       "Approved source inventory digest is invalid"
   fi
-  prepare_execution_env_vars "$expected_argument"
+  approval_kind="$(directive_execution_approval_kind "$expected_argument")"
+  if [[ "$approval_kind" == publication ]]; then
+    [[ "$APPROVED_VALIDATION_EVIDENCE_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die \
+      "Approved validation evidence digest is invalid"
+  fi
+  local environment_mode="$expected_argument"
+  [[ "$environment_mode" != verify-deep ]] || environment_mode=verify
+  prepare_execution_env_vars "$environment_mode"
   if [[ "$expected_argument" == run-daily ]]; then
     execution_snapshot="$(snapshot_execution_ids)" || die \
       "Could not snapshot executions before publication dispatch"
@@ -755,14 +833,35 @@ start_job_execution() {
     PUBLICATION_DISPATCH_ATTEMPTED=true
   fi
   execution_name_file="$(mktemp)"
-  directive_build_job_start_override_args \
-    "$expected_argument" "$JOB_NAME" "$RG" "$JOB_CONTAINER" "$IMAGE" \
-    "$JOB_CPU" "$JOB_MEMORY" "${EXECUTION_ENV_VARS[@]}" || \
-    die "Complete job start override is malformed"
+  if [[ "$expected_argument" == verify-deep ]]; then
+    EXECUTION_OVERRIDE_FILE="$(mktemp)"
+    chmod 600 "$EXECUTION_OVERRIDE_FILE"
+    directive_render_job_execution_override_json \
+      "$expected_argument" "$JOB_CONTAINER" "$IMAGE" "$JOB_CPU" "$JOB_MEMORY" \
+      "${EXECUTION_ENV_VARS[@]}" >"$EXECUTION_OVERRIDE_FILE" || \
+      die "Deep-audit execution template is malformed"
+    override_container="$(jq -c -e '.containers | select(length == 1) | .[0]' \
+      "$EXECUTION_OVERRIDE_FILE")" || die "Deep-audit execution template is incomplete"
+    directive_assert_approved_execution_json \
+      "$override_container" verify-deep "$IMAGE" "$EXPECTED_ENVIRONMENT_DIGEST" \
+      "$APPROVED_SOURCE_INVENTORY_DIGEST" "$VALIDATION_PRODUCER_DIGEST" \
+      "$EXPECTED_PROCESSING_VERSION" "$EXPECTED_SEARCH_INDEX" || \
+      die "Deep-audit execution template is not the approved target"
+    directive_build_job_start_yaml_args \
+      "$JOB_NAME" "$RG" "$EXECUTION_OVERRIDE_FILE" || \
+      die "Deep-audit job start override is malformed"
+  else
+    directive_build_job_start_override_args \
+      "$expected_argument" "$JOB_NAME" "$RG" "$JOB_CONTAINER" "$IMAGE" \
+      "$JOB_CPU" "$JOB_MEMORY" "${EXECUTION_ENV_VARS[@]}" || \
+      die "Complete job start override is malformed"
+  fi
   job_start_args=("${DIRECTIVE_JOB_START_ARGS[@]}")
   if ! az containerapp job start "${job_start_args[@]}" >"$execution_name_file"
   then
     rm -f "$execution_name_file"
+    rm -f "$EXECUTION_OVERRIDE_FILE"
+    EXECUTION_OVERRIDE_FILE=""
     if [[ "$expected_argument" == run-daily ]]; then
       recover_publication_execution "$execution_snapshot" || return 1
       execution_name="$STARTED_EXECUTION_NAME"
@@ -772,6 +871,8 @@ start_job_execution() {
   else
     execution_name="$(<"$execution_name_file")"
     rm -f "$execution_name_file"
+    rm -f "$EXECUTION_OVERRIDE_FILE"
+    EXECUTION_OVERRIDE_FILE=""
   fi
   if [[ -z "$execution_name" ]]; then
     if [[ "$expected_argument" == run-daily ]]; then
@@ -797,7 +898,13 @@ start_job_execution() {
   directive_assert_execution_override_json \
     "$execution_container" "$expected_argument" "$IMAGE" "$JOB_CPU" "$JOB_MEMORY" || \
     die "Execution did not apply the complete pinned container override"
-  if [[ "$expected_argument" == run-daily || "$expected_argument" == verify ]]; then
+  if [[ "$approval_kind" == publication ]]; then
+    directive_assert_approved_execution_json \
+      "$execution_container" "$expected_argument" "$IMAGE" \
+      "$EXPECTED_ENVIRONMENT_DIGEST" "$APPROVED_SOURCE_INVENTORY_DIGEST" \
+      "$VALIDATION_PRODUCER_DIGEST" "$EXPECTED_PROCESSING_VERSION" \
+      "$EXPECTED_SEARCH_INDEX" "$APPROVED_VALIDATION_EVIDENCE_DIGEST"
+  elif [[ "$approval_kind" == verification ]]; then
     directive_assert_approved_execution_json \
       "$execution_container" "$expected_argument" "$IMAGE" \
       "$EXPECTED_ENVIRONMENT_DIGEST" "$APPROVED_SOURCE_INVENTORY_DIGEST" \
@@ -809,7 +916,7 @@ start_job_execution() {
   fi
 }
 
-assert_v2_search_schema() {
+assert_target_search_schema() {
   az rest \
     --method get \
     --url "https://${SEARCH_NAME}.search.windows.net/indexes/${EXPECTED_SEARCH_INDEX}?api-version=2026-04-01" \
@@ -831,7 +938,7 @@ assert_v2_search_schema() {
       ([.fields[]? | select(.name == "content_vector") | .dimensions]
         | any(. == 3072))
     ' "$INDEX_SCHEMA_FILE" >/dev/null || {
-      echo "ERROR: v2 Search index schema is incompatible" >&2
+      echo "ERROR: target Search index schema is incompatible" >&2
       return 1
     }
 }
@@ -888,7 +995,7 @@ require_one_summary_record() {
 validation_confirmation_token() {
   local record_digest
   record_digest="$(sha256_file "$VALIDATION_EVIDENCE_FILE")"
-  printf 'DIRECTIVE-PUBLISH-V2-%s\n' \
+  printf 'DIRECTIVE-PUBLISH-V3-%s\n' \
     "$(sha256_text "$record_digest
 $IMAGE_DIGEST
 $SOURCE_INVENTORY_DIGEST
@@ -897,7 +1004,8 @@ $VALIDATION_PRODUCER_DIGEST" | cut -c1-24)"
 }
 
 refresh_source_inventory() {
-  local source_count blob_name relative source_hash extension source_prefix prefix_length
+  local source_count blob_name blob_etag blob_version_id blob_size blob_last_modified
+  local relative source_hash extension source_prefix prefix_length
   source_prefix="$(tf directive_source_prefix)"
   : >"$SOURCE_INVENTORY_FILE"
   az storage blob list \
@@ -905,9 +1013,9 @@ refresh_source_inventory() {
     --container-name "$SOURCE_BLOB_CONTAINER" \
     --prefix "$source_prefix" \
     --auth-mode login \
-    --query "[].name" \
+    --query "[].{name:name,etag:properties.etag,version_id:versionId,size:properties.contentLength,last_modified:properties.lastModified}" \
     --output tsv |
-    while IFS= read -r blob_name; do
+    while IFS=$'\t' read -r blob_name blob_etag blob_version_id blob_size blob_last_modified; do
       extension="$(printf '%s' "${blob_name##*.}" | tr '[:upper:]' '[:lower:]')"
       [[ "$extension" == pdf ]] || continue
       prefix_length=${#source_prefix}
@@ -933,7 +1041,9 @@ refresh_source_inventory() {
           --output none
         sha256_file "$source_file"
       )"
-      printf '%s\t%s\n' "$relative" "$source_hash"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$relative" "$blob_etag" "$blob_version_id" "$blob_size" \
+        "$blob_last_modified" "$source_hash"
     done >"$SOURCE_INVENTORY_FILE"
   source_count="$(awk 'NF { count++ } END { print count + 0 }' "$SOURCE_INVENTORY_FILE")"
   [[ "$source_count" -gt 0 ]] || {
@@ -943,7 +1053,21 @@ refresh_source_inventory() {
   SOURCE_INVENTORY_DIGEST="$(
     sha256_text "$(
       LC_ALL=C sort "$SOURCE_INVENTORY_FILE" |
-        jq -RnSc '[inputs | split("\t") | {source_name: .[0], source_hash: .[1]}] | sort_by(.source_name)'
+        jq -RnSc '
+          [
+            inputs
+            | split("\t")
+            | {
+                source_name: .[0],
+                etag: (if .[1] == "" then null else .[1] end),
+                version_id: (if .[2] == "" then null else .[2] end),
+                size: (.[3] | tonumber),
+                last_modified: (if .[4] == "" then null else .[4] end),
+                source_hash: .[5]
+              }
+          ]
+          | sort_by(.source_name)
+        '
     )"
   )"
 }
@@ -974,6 +1098,7 @@ load_validation_evidence() {
   APPROVED_ENVIRONMENT_DIGEST="$(jq -r '.wrapper.environment_digest // empty' "$VALIDATION_EVIDENCE_FILE")"
   VALIDATION_RECORD_DIGEST="$(jq -r '.wrapper.validation_record_digest // empty' "$VALIDATION_EVIDENCE_FILE")"
   VALIDATION_PRODUCER_DIGEST="$(jq -r '.producer_record.validation_digest // empty' "$VALIDATION_EVIDENCE_FILE")"
+  APPROVED_VALIDATION_EVIDENCE_DIGEST="$(jq -r '.producer_record.validation_evidence_digest // empty' "$VALIDATION_EVIDENCE_FILE")"
   [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
     echo "ERROR: validation evidence image digest is not immutable" >&2
     return 1
@@ -992,6 +1117,10 @@ load_validation_evidence() {
   }
   [[ "$VALIDATION_PRODUCER_DIGEST" =~ ^[0-9a-f]{64}$ ]] || {
     echo "ERROR: validation producer digest is invalid" >&2
+    return 1
+  }
+  [[ "$APPROVED_VALIDATION_EVIDENCE_DIGEST" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "ERROR: validation evidence digest is invalid" >&2
     return 1
   }
 }
@@ -1051,6 +1180,7 @@ write_validation_evidence() {
   VALIDATION_PRODUCER_DIGEST="$(jq -r '.validation_digest' "$VALIDATION_SUMMARY_FILE")"
   APPROVED_SOURCE_INVENTORY_DIGEST="$SOURCE_INVENTORY_DIGEST"
   APPROVED_ENVIRONMENT_DIGEST="$EXPECTED_ENVIRONMENT_DIGEST"
+  APPROVED_VALIDATION_EVIDENCE_DIGEST="$(jq -r '.validation_evidence_digest' "$VALIDATION_SUMMARY_FILE")"
   echo "validation_record_digest=$VALIDATION_RECORD_DIGEST"
 }
 
@@ -1060,11 +1190,11 @@ validate_metadata_summary() {
   validated_file="$(mktemp)"
   directive_validate_producer_record \
     "$VALIDATION_SUMMARY_FILE" "$validated_file" \
-    directive.validate.v2 "$EXPECTED_ENVIRONMENT_FILE" \
+    directive.validate.v3 "$EXPECTED_ENVIRONMENT_FILE" \
     "$SOURCE_INVENTORY_DIGEST" "$EXPECTED_PROCESSING_VERSION" \
     "$EXPECTED_SEARCH_INDEX" || {
     rm -f "$validated_file"
-    echo "ERROR: validation summary does not match the complete v2 contract" >&2
+    echo "ERROR: validation summary does not match the complete target contract" >&2
     return 1
   }
   mv "$validated_file" "$VALIDATION_SUMMARY_FILE"
@@ -1120,13 +1250,17 @@ revalidate_validation_evidence() {
     die "Validation evidence environment digest changed"
   [[ "$(jq -r '.producer_record.validation_digest' "$VALIDATION_EVIDENCE_FILE")" == "$VALIDATION_PRODUCER_DIGEST" ]] || \
     die "Validation evidence producer digest changed"
+  [[ "$(jq -r '.producer_record.validation_evidence_digest' "$VALIDATION_EVIDENCE_FILE")" == "$APPROVED_VALIDATION_EVIDENCE_DIGEST" ]] || \
+    die "Validation evidence digest changed"
 }
 
 write_verification_evidence() {
   local source_record="$1"
   [[ -n "$VERIFY_EVIDENCE_FILE" ]] || return 0
   require_one_summary_record "$source_record" "Directive verification"
-  local canonical_record record_digest validated_record
+  local canonical_record record_digest validated_record verification_mode
+  verification_mode=exact
+  [[ "$PHASE" != audit ]] || verification_mode=deep-source-audit
   validated_record="$(mktemp)"
   directive_validate_producer_record \
     "$source_record" "$validated_record" \
@@ -1134,7 +1268,7 @@ write_verification_evidence() {
     "$SOURCE_INVENTORY_DIGEST" "$EXPECTED_PROCESSING_VERSION" \
     "$EXPECTED_SEARCH_INDEX" || {
     rm -f "$validated_record"
-    echo "ERROR: verification summary is incomplete for v2 finalization" >&2
+    echo "ERROR: verification summary is incomplete for target finalization" >&2
     return 1
   }
   [[ "$(jq -r '.validation_digest' "$validated_record")" == "$VALIDATION_PRODUCER_DIGEST" ]] || {
@@ -1156,6 +1290,7 @@ write_verification_evidence() {
       --arg job "$JOB_NAME" \
       --arg processing_version "$EXPECTED_PROCESSING_VERSION" \
       --arg search_index "$EXPECTED_SEARCH_INDEX" \
+      --arg verification_mode "$verification_mode" \
       '
         {
           producer_record: .,
@@ -1171,7 +1306,8 @@ write_verification_evidence() {
             resource_group: $resource_group,
             job_name: $job,
             processing_version: $processing_version,
-            search_index: $search_index
+            search_index: $search_index,
+            verification_mode: $verification_mode
           }
         }
       ' "$validated_record"
@@ -1186,14 +1322,16 @@ write_verification_evidence() {
     --arg environment_digest "$EXPECTED_ENVIRONMENT_DIGEST" \
     --arg source_digest "$SOURCE_INVENTORY_DIGEST" \
     --arg validation_digest "$VALIDATION_PRODUCER_DIGEST" \
+    --arg verification_mode "$verification_mode" \
     '
-      .producer_record.search_index == "directive-chunks-v2" and
-      .producer_record.processing_version == "directive-v2-czech-layout" and
+    .producer_record.search_index == "directive-chunks-v3" and
+    .producer_record.processing_version == "directive-v3-bounded-ingestion" and
       .producer_record.validation_digest == $validation_digest and
       .wrapper.environment_digest == $environment_digest and
-      .wrapper.source_inventory_digest == $source_digest
+      .wrapper.source_inventory_digest == $source_digest and
+      .wrapper.verification_mode == $verification_mode
     ' "$VERIFY_EVIDENCE_FILE" >/dev/null || {
-    echo "ERROR: verification evidence environment or v2 configuration mismatch" >&2
+    echo "ERROR: verification evidence environment or target configuration mismatch" >&2
     return 1
   }
 }
@@ -1255,7 +1393,7 @@ assert_execution_mode() {
   return 1
 }
 
-if [[ "$PHASE" == publish ]]; then
+if [[ "$PHASE" == publish || "$PHASE" == verify || "$PHASE" == audit ]]; then
   load_validation_evidence
 else
   BUILD_CONTEXT="$(mktemp -d "${TMPDIR:-/tmp}/directive-ingest-build.XXXXXX")"
@@ -1313,16 +1451,59 @@ az containerapp job update \
   --command directive-ingest \
   --args maintenance \
   --output none
-assert_live_v2_config
+assert_live_target_config
 ensure_maintenance_mode
 
-echo "==> Bootstrapping the v2 Search index through a per-execution override"
+if [[ "$PHASE" == verify || "$PHASE" == audit ]]; then
+  verification_mode=verify
+  verification_label="Directive verification"
+  if [[ "$PHASE" == audit ]]; then
+    verification_mode=verify-deep
+    verification_label="Directive deep audit"
+  fi
+  refresh_source_inventory
+  [[ "$SOURCE_INVENTORY_DIGEST" == "$(jq -r '.producer_record.source_inventory_digest' "$VALIDATION_EVIDENCE_FILE")" ]] || \
+    die "Source inventory changed since validation evidence was issued"
+  status="$(
+    az containerapp job execution show \
+      --name "$JOB_NAME" \
+      --resource-group "$RG" \
+      --job-execution-name "$VALIDATE_EXECUTION" \
+      --query properties.status \
+      --output tsv
+  )"
+  [[ "$status" == Succeeded ]] || die "Pinned validation execution is not successful"
+  revalidate_validation_evidence
+  assert_backend_gate_awareness
+  assert_live_target_config
+  assert_live_maintenance_mode
+  assert_target_search_schema
+  echo "==> Starting exact read-only publication ${PHASE}"
+  start_job_execution "$verification_mode"
+  VERIFY_EXECUTION="$STARTED_EXECUTION_NAME"
+  echo "==> ${verification_label} execution: $VERIFY_EXECUTION"
+  wait_for_execution "$VERIFY_EXECUTION" "$verification_label" 120 10
+  refresh_source_inventory
+  [[ "$SOURCE_INVENTORY_DIGEST" == "$(jq -r '.producer_record.source_inventory_digest' "$VALIDATION_EVIDENCE_FILE")" ]] || \
+    die "Source inventory changed before verification evidence was captured"
+  write_verification_evidence "$VERIFY_SUMMARY_FILE"
+  echo "==> Directive ${PHASE} succeeded: $VERIFY_EXECUTION; job remains in maintenance mode"
+  exit 0
+fi
+
+echo "==> Bootstrapping the target Search index through a per-execution override"
 start_job_execution bootstrap
 BOOTSTRAP_EXECUTION="$STARTED_EXECUTION_NAME"
 echo "==> Bootstrap execution: $BOOTSTRAP_EXECUTION"
 wait_for_execution "$BOOTSTRAP_EXECUTION" "Search bootstrap" 120 10
-assert_live_v2_config
-assert_v2_search_schema
+assert_live_target_config
+assert_target_search_schema
+
+echo "==> Bootstrapping the committed publication gate"
+start_job_execution bootstrap-gate
+GATE_BOOTSTRAP_EXECUTION="$STARTED_EXECUTION_NAME"
+echo "==> Gate bootstrap execution: $GATE_BOOTSTRAP_EXECUTION"
+wait_for_execution "$GATE_BOOTSTRAP_EXECUTION" "Publication gate bootstrap" 120 10
 
 if [[ "$PHASE" != publish ]]; then
   echo "==> Running managed-identity data-plane preflight"
@@ -1375,9 +1556,10 @@ else
 fi
 
 confirm_validation "$VALIDATION_CONFIRMATION_TOKEN"
-assert_live_v2_config
+assert_backend_gate_awareness
+assert_live_target_config
 assert_live_maintenance_mode
-assert_v2_search_schema
+assert_target_search_schema
 refresh_source_inventory
 [[ "$SOURCE_INVENTORY_DIGEST" == "$(jq -r '.producer_record.source_inventory_digest' "$VALIDATION_EVIDENCE_FILE")" ]] || \
   die "Source inventory changed immediately before publication"
@@ -1391,11 +1573,8 @@ EXECUTION_NAME="$STARTED_EXECUTION_NAME"
 echo "==> Ingestion execution: $EXECUTION_NAME"
 wait_for_execution "$EXECUTION_NAME" "Directive ingestion" 240 30
 
-echo "==> Verifying published directive state"
-start_job_execution verify
-VERIFY_EXECUTION="$STARTED_EXECUTION_NAME"
-echo "==> Verification execution: $VERIFY_EXECUTION"
-wait_for_execution "$VERIFY_EXECUTION" "Directive verification" 120 10
+echo "==> Capturing internal publication verification evidence"
+VERIFY_EXECUTION="$EXECUTION_NAME"
 refresh_source_inventory
 [[ "$SOURCE_INVENTORY_DIGEST" == "$(jq -r '.producer_record.source_inventory_digest' "$VALIDATION_EVIDENCE_FILE")" ]] || \
   die "Source inventory changed before verification evidence was captured"

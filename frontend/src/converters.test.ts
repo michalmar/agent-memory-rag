@@ -20,6 +20,36 @@ describe('tool result conversion', () => {
     expect(
       convertToolResult('get_directive_content', content, 'surface-2'),
     ).toEqual([]);
+    expect(
+      convertToolResult('search_directives', content, 'surface-3'),
+    ).toEqual([]);
+  });
+
+  it('suppresses citation-free get_directive responses, including not-found envelopes', () => {
+    expect(
+      convertToolResult(
+        'get_directive',
+        JSON.stringify({
+          data: {
+            status: 'not_found',
+            directive_id: '12345678',
+          },
+        }),
+        'surface-1',
+      ),
+    ).toEqual([]);
+    expect(
+      convertToolResult(
+        'get_directive',
+        JSON.stringify({
+          data: {
+            directive_id: '12345678',
+            title: 'Directive title',
+          },
+        }),
+        'surface-2',
+      ),
+    ).toEqual([]);
   });
 
   it('preserves existing generic support tool rendering', () => {

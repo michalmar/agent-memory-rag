@@ -46,13 +46,9 @@ _PROJECT_INNER_STATE_SCHEMA_VERSION = 7
 logger = logging.getLogger("foundry_hosted_maf")
 
 _TOOL_STAGES = {
-    "resolve_directive": WorkflowStage.RESOLVING,
+    "get_directive": WorkflowStage.RESOLVING,
     "search_directives": WorkflowStage.SEARCHING,
-    "get_directive_manifest": WorkflowStage.VERIFYING_COVERAGE,
     "get_directive_content": WorkflowStage.LOADING_CONTENT,
-    "search_within_directive": WorkflowStage.SEARCHING,
-    "get_related_directives": WorkflowStage.FOLLOWING_REFERENCES,
-    "get_precomputed_summary": WorkflowStage.LOADING_CONTENT,
     "get_user_directive_mandates": WorkflowStage.CHECKING_MANDATORY_STATUS,
 }
 _STAGE_MESSAGES = {

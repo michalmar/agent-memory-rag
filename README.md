@@ -389,14 +389,14 @@ The ignored assignment workflow prevents identity mappings from entering new
 snapshots. Historical commits contain the former demo mapping; purging shared
 Git history is a separate, disruptive operation and is not part of deployment.
 
-### Directive v2 maintenance and cutover
+### Directive v3 maintenance and bounded ingestion
 
-Directive v2 is a destructive rebuild with no dual-read, dual-write, backup, or
-data-conversion rollback path. Schedule a maintenance window, stop new
+Directive v3 uses a destructive rebuild with no dual-read, dual-write, backup,
+or data-conversion rollback path. Schedule a maintenance window, stop new
 directive requests, confirm the source inventory and mandate CSV, and verify
 that no ingestion execution is active. The `directive-source` Blob container
-and its contents are protected input data and are never deleted or mutated by
-reset automation.
+and its PDFs are protected input data and are never deleted or mutated by reset
+automation.
 
 The reset command is dry-run by default. Inspect its exact subscription,
 resource group, storage/Cosmos/Search/job inventory and copy the printed token:
@@ -406,7 +406,7 @@ resource group, storage/Cosmos/Search/job inventory and copy the printed token:
   --inventory-evidence /tmp/directive-reset-inventory.json
 ./scripts/reset_directive_derived_data.sh reset --execute \
   --inventory-evidence /tmp/directive-reset-inventory.json \
-  --confirm DIRECTIVE-RESET-V2-<token-from-fresh-dry-run>
+  --confirm DIRECTIVE-RESET-V3-<token-from-fresh-dry-run>
 ```
 
 The dry-run evidence contains a short-lived random-nonce token bound to the
@@ -415,27 +415,24 @@ invalidate it. A successful reset consumes the evidence file.
 
 The reset deletes only the three derived Cosmos containers, recreates them with
 Terraform and the retained `/directive_id`, `/directive_version_id`, and
-`/user_id` partition keys, then purges only `directives/`, `source-state/`,
-obsolete `quarantine/`, `publication-approval/`, and `publication-commit/`
-prefixes from the artifact container. It never edits Terraform state or
-touches source data. Deploy the compatible image with
-`scripts/deploy_directive_ingestion.sh`; the job runs preflight, metadata-only
-`validate`, an explicit operator confirmation, full ingestion (which bootstraps
-`directive-chunks-v2`), and cross-store `verify`. Terraform's durable job
-default is the nonpublishing `maintenance` command; the reset also removes any
-existing derived v2 Search index while retaining v1. Apply the reviewed Terraform
-plan before the window, including
-`azurerm_role_assignment.deployer_directive_source_reader`, then run validation
-and inspect its complete sanitized evidence separately:
+`/user_id` partition keys, then purges the approved derived artifact prefixes
+and both v2 and v3 directive Search indexes. It never edits Terraform state or
+touches source data. The next deployment bootstraps only
+`directive-chunks-v3`.
+
+Apply the reviewed Terraform plan before the window, including
+`azurerm_role_assignment.deployer_directive_source_reader`. Then build and pin
+the compatible image, run managed-identity preflight and metadata-only
+validation, and inspect the complete sanitized evidence:
 
 ```bash
-terraform -chdir=infra plan -input=false -out=directive-v2.tfplan
-terraform -chdir=infra apply directive-v2.tfplan
-DIRECTIVE_VALIDATE_EVIDENCE_FILE=/tmp/directive-v2-validation.json \
+terraform -chdir=infra plan -input=false -out=directive-v3.tfplan
+terraform -chdir=infra apply directive-v3.tfplan
+DIRECTIVE_VALIDATE_EVIDENCE_FILE=/tmp/directive-v3-validation.json \
   ./scripts/deploy_directive_ingestion.sh validate <immutable-release-tag>
 ```
 
-Validation prints a fresh `DIRECTIVE-PUBLISH-V2-...` approval token bound to the
+Validation prints a fresh `DIRECTIVE-PUBLISH-V3-...` approval token bound to the
 complete canonical validation record, pinned image digest, and source inventory
 digest. The producer `run_id` is distinct from Azure execution IDs, which remain
 only in the evidence wrapper. During publish, the deployment script derives the
@@ -443,10 +440,11 @@ approved digests and mandate checksum from that evidence and atomically reserves
 `publication-approval/<validation-digest>.json` with create-only semantics.
 Operators do not create the marker or export `DIRECTIVE_APPROVED_*` values.
 Replays are rejected and the marker is retained after successful publication. The
-marker core is an exact `directive.approval.v2` record containing
+marker core is an exact `directive.approval.v3` record containing
 `validation_digest`, `environment_digest`, `source_inventory_digest`, and
-`processing_hash`, plus the exact `mandate_checksum`; Azure image and execution
-provenance is kept only in its wrapper.
+`processing_hash`, plus the exact `mandate_checksum` and
+`validation_evidence_digest`; Azure image and execution provenance is kept only
+in its wrapper.
 The producer contract also caps the publication at 32 sorted, unique directives
 and requires complete cross-store counts and digests. The script passes derived,
 nonsecret per-execution approval overrides; the live execution must echo the same
@@ -456,44 +454,44 @@ response.
 Publish later, noninteractively, only with that evidence and token:
 
 ```bash
-DIRECTIVE_VALIDATE_EVIDENCE_FILE=/tmp/directive-v2-validation.json \
-DIRECTIVE_VALIDATE_CONFIRMATION=DIRECTIVE-PUBLISH-V2-<token> \
-DIRECTIVE_VERIFY_EVIDENCE_FILE=/tmp/directive-v2-verify.json \
+DIRECTIVE_VALIDATE_EVIDENCE_FILE=/tmp/directive-v3-validation.json \
+DIRECTIVE_VALIDATE_CONFIRMATION=DIRECTIVE-PUBLISH-V3-<token> \
+DIRECTIVE_VERIFY_EVIDENCE_FILE=/tmp/directive-v3-verify.json \
   ./scripts/deploy_directive_ingestion.sh publish
 ```
 
-The job template remains in maintenance throughout; publication and verify use
-per-execution overrides and leave the template in maintenance on success or
-failure. The operator running the inventory needs the Terraform-managed
-source-container-only Blob Data Reader assignment on `directive-source`;
-artifact cleanup remains separately scoped to `directive-artifacts`.
-
-Keep the legacy directive Search graph (`directive-kb-v1` →
-`directive-chunks-ks-v1` → `directive-chunks-v1`) until v2 verification is
-accepted. A separate, freshly guarded finalize dry-run binds its token to the
-recent sanitized v2 verification evidence; only then may the legacy graph be
-deleted in dependency order:
+Publication performs exact cross-store verification before it returns success.
+Run an independent exact verification or a full source-body rehash audit against
+the same approval evidence when required:
 
 ```bash
-./scripts/reset_directive_derived_data.sh finalize \
-  --verification-file /tmp/directive-v2-verify.json \
-  --inventory-evidence /tmp/directive-v2-finalize-inventory.json
-./scripts/reset_directive_derived_data.sh finalize --execute \
-  --verification-file /tmp/directive-v2-verify.json \
-  --inventory-evidence /tmp/directive-v2-finalize-inventory.json \
-  --confirm DIRECTIVE-FINALIZE-V2-<token-from-fresh-dry-run>
+DIRECTIVE_VALIDATE_EVIDENCE_FILE=/tmp/directive-v3-validation.json \
+DIRECTIVE_VERIFY_EVIDENCE_FILE=/tmp/directive-v3-verify.json \
+  ./scripts/deploy_directive_ingestion.sh verify
+DIRECTIVE_VALIDATE_EVIDENCE_FILE=/tmp/directive-v3-validation.json \
+DIRECTIVE_VERIFY_EVIDENCE_FILE=/tmp/directive-v3-deep-audit.json \
+  ./scripts/deploy_directive_ingestion.sh audit
 ```
 
-Finalize re-enters nonpublishing maintenance and drains executions before
-starting (or refetch-equivalently revalidating) the exact pinned verify
-execution and producer log, then rechecking the source inventory, image, and
-v2 Search count. Recovery is rebuild-only: leave maintenance enabled, correct the
-deployment inputs, and rerun the guarded sequence.
+The durable job template remains on the nonpublishing `maintenance` command;
+publication, verification, and audit use guarded per-execution overrides. The
+deep audit uses an exact execution-template override because Azure CLI cannot
+encode its second argument through ordinary `--args`. Both verification modes
+are read-only. The old finalize workflow is disabled because reset removes the
+complete legacy Search graph.
 
-If a run fails, recovery is a rebuild: correct the parser, contract,
-configuration, or preserved source input, bump the processing version when
-semantics changed, reset partial derived data, and rerun ingestion. There is no
-rollback conversion procedure.
+On activation failure, v3 restores the prior committed publication when
+compensation completes; otherwise the publication gate becomes
+`recovery_required` and reads fail closed. Keep the job in maintenance and use a
+separately reviewed recovery procedure before changing live gate, catalog, or
+Search state. The controlled live rollback/recovery injection remains pending
+and requires explicit destructive confirmation.
+
+Automated Cosmos item TTL and Blob lifecycle management remain disabled pending
+a future operational/data-owner retention review. Storage soft delete and
+versioning remain enabled. Any future expiry policy must be limited to approved
+diagnostic or cache record types and prefixes; it must never match source PDFs,
+canonical artifacts, stable publication data, or current pointers.
 
 For a new Microsoft Entra tenant or subscription, follow the
 [cross-tenant Azure deployment runbook](docs/CROSS-TENANT-AZURE-DEPLOYMENT.md).
@@ -512,12 +510,12 @@ Agent changes required before deployment.
    resulting `mand.csv`.
 6. Generate and inspect a `directive-ingest validate` record for the exact target
    environment and source corpus:
-   `DIRECTIVE_VALIDATE_EVIDENCE_FILE=/tmp/directive-v2-validation.json
+   `DIRECTIVE_VALIDATE_EVIDENCE_FILE=/tmp/directive-v3-validation.json
    ./scripts/deploy_directive_ingestion.sh validate <immutable-release-tag>`.
-   Confirm the resulting `DIRECTIVE-PUBLISH-V2-...` token, then run
-   `DIRECTIVE_VALIDATE_EVIDENCE_FILE=/tmp/directive-v2-validation.json
-   DIRECTIVE_VALIDATE_CONFIRMATION=DIRECTIVE-PUBLISH-V2-<token>
-   DIRECTIVE_VERIFY_EVIDENCE_FILE=/tmp/directive-v2-verify.json
+   Confirm the resulting `DIRECTIVE-PUBLISH-V3-...` token, then run
+   `DIRECTIVE_VALIDATE_EVIDENCE_FILE=/tmp/directive-v3-validation.json
+   DIRECTIVE_VALIDATE_CONFIRMATION=DIRECTIVE-PUBLISH-V3-<token>
+   DIRECTIVE_VERIFY_EVIDENCE_FILE=/tmp/directive-v3-verify.json
    ./scripts/deploy_directive_ingestion.sh publish`. The script derives the
    approval values from evidence and reserves the approval marker itself. The
    mandate checksum is derived from canonical tenant-qualified mandate assignments,

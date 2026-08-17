@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESET_SCRIPT="$SCRIPT_DIR/reset_directive_derived_data.sh"
+INFRA_JOB_TF="$SCRIPT_DIR/../infra/directive_ingestion_job.tf"
 FIXTURE="$(mktemp)"
 PLAN="$(mktemp)"
 BAD_PLAN="$(mktemp)"
@@ -24,6 +25,10 @@ RELEASE_VENV="$(mktemp -d)"
 RELEASE_LOG="$(mktemp)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/directive_infrastructure_guards.sh"
+[[ "$(directive_execution_approval_kind run-daily)" == publication ]]
+[[ "$(directive_execution_approval_kind verify)" == verification ]]
+[[ "$(directive_execution_approval_kind verify-deep)" == verification ]]
+[[ "$(directive_execution_approval_kind maintenance)" == none ]]
 
 cleanup() {
   rm -f \
@@ -61,6 +66,21 @@ if awk '
   in_function && /^}/ { exit }
 ' "$SCRIPT_DIR/deploy_directive_ingestion.sh" | grep -q 'containerapp job logs show'; then
   echo "publication revalidation still depends on ephemeral execution replicas" >&2
+  exit 1
+fi
+grep -q 'DIRECTIVE_DOCUMENT_INTELLIGENCE_CONCURRENCY *= *"4"' "$INFRA_JOB_TF"
+grep -q 'DIRECTIVE_EMBEDDING_CONCURRENCY *= *"2"' "$INFRA_JOB_TF"
+grep -q 'DIRECTIVE_SUMMARY_CONCURRENCY *= *"2"' "$INFRA_JOB_TF"
+grep -q 'DIRECTIVE_SEARCH_INDEXING_CONCURRENCY *= *"2"' "$INFRA_JOB_TF"
+grep -q 'DIRECTIVE_PROVIDER_OPERATION_TIMEOUT_SECONDS *= *"180"' "$INFRA_JOB_TF"
+grep -q 'delete_search_index_if_present "\$V2_INDEX" "target"' "$RESET_SCRIPT"
+grep -q 'delete_search_index_if_present "\$V1_INDEX" "legacy"' "$RESET_SCRIPT"
+if grep -q 'DIRECTIVE-FINALIZE-V3' "$RESET_SCRIPT"; then
+  echo "finalize token flow still exists in reset script" >&2
+  exit 1
+fi
+if grep -q 'legacy Search remains' "$RESET_SCRIPT"; then
+  echo "reset still preserves the legacy Search index" >&2
   exit 1
 fi
 
@@ -104,18 +124,22 @@ EOF
 
 directive_assert_execution_mode_json "$(<"$FIXTURE")" verify
 cat >"$FIXTURE" <<'EOF'
+{"name":"directive-ingestion","command":["directive-ingest"],"args":["verify","--deep-source-audit"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resources":{"cpu":1,"memory":"2Gi"}}
+EOF
+directive_assert_execution_mode_json "$(<"$FIXTURE")" verify-deep
+cat >"$FIXTURE" <<'EOF'
 {"name":"directive-ingestion","command":["directive-ingest"],"args":["validate"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resources":{"cpu":1,"memory":"2Gi"}}
 EOF
 directive_assert_unapproved_execution_json "$(<"$FIXTURE")" validate
 
-BASE_EXECUTION_ENV='[{"name":"AZURE_CLIENT_ID","value":"client"},{"name":"DIRECTIVE_PROCESSING_VERSION","value":"directive-v2-czech-layout"},{"name":"DIRECTIVE_SEARCH_INDEX","value":"directive-chunks-v2"}]'
+BASE_EXECUTION_ENV='[{"name":"AZURE_CLIENT_ID","value":"client"},{"name":"DIRECTIVE_PROCESSING_VERSION","value":"directive-v3-bounded-ingestion"},{"name":"DIRECTIVE_SEARCH_INDEX","value":"directive-chunks-v3"}]'
 for mode in bootstrap preflight validate; do
   START_ENV=()
   while IFS=$'\t' read -r name value; do
     START_ENV+=("$name=$value")
   done < <(
     directive_render_execution_env_vars \
-      "$BASE_EXECUTION_ENV" "$mode" directive-v2-czech-layout directive-chunks-v2
+      "$BASE_EXECUTION_ENV" "$mode" directive-v3-bounded-ingestion directive-chunks-v3
   )
   directive_build_job_start_override_args \
     "$mode" job-test rg-test directive-ingestion \
@@ -128,11 +152,20 @@ for mode in run-daily verify; do
   while IFS=$'\t' read -r name value; do
     START_ENV+=("$name=$value")
   done < <(
-    directive_render_execution_env_vars \
-      "$BASE_EXECUTION_ENV" "$mode" directive-v2-czech-layout directive-chunks-v2 \
-      dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
-      eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
-      ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+    if [[ "$mode" == run-daily ]]; then
+      directive_render_execution_env_vars \
+        "$BASE_EXECUTION_ENV" "$mode" directive-v3-bounded-ingestion directive-chunks-v3 \
+        dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+        eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+        ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
+        1111111111111111111111111111111111111111111111111111111111111111
+    else
+      directive_render_execution_env_vars \
+        "$BASE_EXECUTION_ENV" "$mode" directive-v3-bounded-ingestion directive-chunks-v3 \
+        dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+        eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+        ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+    fi
   )
   directive_build_job_start_override_args \
     "$mode" job-test rg-test directive-ingestion \
@@ -140,8 +173,52 @@ for mode in run-daily verify; do
     1 2Gi "${START_ENV[@]}"
 done
 
+DEEP_ENV=()
+while IFS=$'\t' read -r name value; do
+  DEEP_ENV+=("$name=$value")
+done < <(
+  directive_render_execution_env_vars \
+    "$BASE_EXECUTION_ENV" verify directive-v3-bounded-ingestion directive-chunks-v3 \
+    dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+    eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+)
+directive_render_job_execution_override_json \
+  verify-deep directive-ingestion \
+  registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  1 2Gi "${DEEP_ENV[@]}" >"$FIXTURE"
+DEEP_CONTAINER="$(jq -c -e '.containers | select(length == 1) | .[0]' "$FIXTURE")"
+directive_assert_approved_execution_json \
+  "$DEEP_CONTAINER" verify-deep \
+  registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
+  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  directive-v3-bounded-ingestion directive-chunks-v3
+directive_build_job_start_yaml_args job-test rg-test "$FIXTURE"
+[[ "${DIRECTIVE_JOB_START_ARGS[4]}" == --yaml ]]
+[[ "${DIRECTIVE_JOB_START_ARGS[5]}" == "$FIXTURE" ]]
+if directive_build_job_start_override_args \
+  verify-deep job-test rg-test directive-ingestion \
+  registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  1 2Gi "${DEEP_ENV[@]}" >/dev/null 2>&1; then
+  echo "deep-audit execution accepted the unsupported direct --args path" >&2
+  exit 1
+fi
+if directive_assert_approved_execution_json \
+  "$(jq -c '.containers[0].args = ["verify"] | .containers[0]' "$FIXTURE")" \
+  verify-deep \
+  registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
+  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  directive-v3-bounded-ingestion directive-chunks-v3 >/dev/null 2>&1; then
+  echo "deep-audit execution template accepted missing source-audit flag" >&2
+  exit 1
+fi
+
 cat >"$FIXTURE" <<'EOF'
-{"name":"directive-ingestion","command":["directive-ingest"],"args":["run-daily"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resources":{"cpu":1,"memory":"2Gi"},"env":[{"name":"DIRECTIVE_PROCESSING_VERSION","value":"directive-v2-czech-layout"},{"name":"DIRECTIVE_SEARCH_INDEX","value":"directive-chunks-v2"},{"name":"DIRECTIVE_APPROVED_VALIDATION_DIGEST","value":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},{"name":"DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST","value":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST","value":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}]}
+{"name":"directive-ingestion","command":["directive-ingest"],"args":["run-daily"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resources":{"cpu":1,"memory":"2Gi"},"env":[{"name":"DIRECTIVE_PROCESSING_VERSION","value":"directive-v3-bounded-ingestion"},{"name":"DIRECTIVE_SEARCH_INDEX","value":"directive-chunks-v3"},{"name":"DIRECTIVE_APPROVED_VALIDATION_DIGEST","value":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},{"name":"DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST","value":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST","value":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},{"name":"DIRECTIVE_APPROVED_VALIDATION_EVIDENCE_DIGEST","value":"1111111111111111111111111111111111111111111111111111111111111111"}]}
 EOF
 directive_assert_approved_execution_json \
   "$(<"$FIXTURE")" \
@@ -150,16 +227,18 @@ directive_assert_approved_execution_json \
   eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
   ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
   dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
-  directive-v2-czech-layout directive-chunks-v2
+  directive-v3-bounded-ingestion directive-chunks-v3 \
+  1111111111111111111111111111111111111111111111111111111111111111
 BEFORE_EXECUTIONS='[{"name":"old-run"}]'
-NEW_EXECUTION='[{"name":"old-run"},{"name":"new-run","properties":{"template":{"containers":[{"name":"directive-ingestion","command":["directive-ingest"],"args":["run-daily"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resources":{"cpu":1,"memory":"2Gi"},"env":[{"name":"DIRECTIVE_PROCESSING_VERSION","value":"directive-v2-czech-layout"},{"name":"DIRECTIVE_SEARCH_INDEX","value":"directive-chunks-v2"},{"name":"DIRECTIVE_APPROVED_VALIDATION_DIGEST","value":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},{"name":"DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST","value":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST","value":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}]}]}}}]'
+NEW_EXECUTION='[{"name":"old-run"},{"name":"new-run","properties":{"template":{"containers":[{"name":"directive-ingestion","command":["directive-ingest"],"args":["run-daily"],"image":"registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resources":{"cpu":1,"memory":"2Gi"},"env":[{"name":"DIRECTIVE_PROCESSING_VERSION","value":"directive-v3-bounded-ingestion"},{"name":"DIRECTIVE_SEARCH_INDEX","value":"directive-chunks-v3"},{"name":"DIRECTIVE_APPROVED_VALIDATION_DIGEST","value":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},{"name":"DIRECTIVE_APPROVED_ENVIRONMENT_DIGEST","value":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"name":"DIRECTIVE_APPROVED_SOURCE_INVENTORY_DIGEST","value":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},{"name":"DIRECTIVE_APPROVED_VALIDATION_EVIDENCE_DIGEST","value":"1111111111111111111111111111111111111111111111111111111111111111"}]}]}}}]'
 if directive_select_new_approved_execution_names \
   "$BEFORE_EXECUTIONS" "$BEFORE_EXECUTIONS" run-daily \
   registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
   ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
   dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
-  directive-v2-czech-layout directive-chunks-v2 >/dev/null 2>&1; then
+  directive-v3-bounded-ingestion directive-chunks-v3 \
+  1111111111111111111111111111111111111111111111111111111111111111 >/dev/null 2>&1; then
   echo "zero-candidate lost-response recovery was accepted" >&2
   exit 1
 fi
@@ -169,7 +248,30 @@ fi
   eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
   ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
   dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
-  directive-v2-czech-layout directive-chunks-v2)" == new-run ]]
+  directive-v3-bounded-ingestion directive-chunks-v3 \
+  1111111111111111111111111111111111111111111111111111111111111111)" == new-run ]]
+ LARGE_BEFORE="$(python3 - <<'PY'
+import json
+print(json.dumps([{"name": "old-run", "padding": "x" * 3000000}]))
+PY
+ )"
+ LARGE_CURRENT="$(
+  python3 - "$NEW_EXECUTION" <<'PY'
+import json
+import sys
+executions = json.loads(sys.argv[1])
+executions[0]["padding"] = "x" * 3000000
+print(json.dumps(executions))
+PY
+ )"
+ [[ "$(directive_select_new_approved_execution_names \
+  "$LARGE_BEFORE" "$LARGE_CURRENT" run-daily \
+  registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
+  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  directive-v3-bounded-ingestion directive-chunks-v3 \
+  1111111111111111111111111111111111111111111111111111111111111111)" == new-run ]]
  AMBIGUOUS_EXECUTION="$(jq -c '. + [.[1] | .name = "new-run-2"]' <<<"$NEW_EXECUTION")"
  if directive_select_new_approved_execution_names \
   "$BEFORE_EXECUTIONS" \
@@ -179,11 +281,13 @@ fi
   eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
   ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
   dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
-  directive-v2-czech-layout directive-chunks-v2 >/dev/null; then
+  directive-v3-bounded-ingestion directive-chunks-v3 \
+  1111111111111111111111111111111111111111111111111111111111111111 >/dev/null; then
   echo "ambiguous new execution recovery was accepted" >&2
   exit 1
  fi
-sed 's/"run-daily"/"verify"/' "$FIXTURE" >"$FIXTURE.verify"
+jq '(.args[0] = "verify") | .env |= map(select(.name != "DIRECTIVE_APPROVED_VALIDATION_EVIDENCE_DIGEST"))' \
+  "$FIXTURE" >"$FIXTURE.verify"
 directive_assert_approved_execution_json \
   "$(<"$FIXTURE.verify")" \
   verify \
@@ -191,11 +295,21 @@ directive_assert_approved_execution_json \
   eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
   ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
   dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
-  directive-v2-czech-layout directive-chunks-v2
+  directive-v3-bounded-ingestion directive-chunks-v3
+jq '.args = ["verify", "--deep-source-audit"]' \
+  "$FIXTURE.verify" >"$FIXTURE.verify-deep"
+directive_assert_approved_execution_json \
+  "$(<"$FIXTURE.verify-deep")" \
+  verify-deep \
+  registry.example/directive-ingestion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
+  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  directive-v3-bounded-ingestion directive-chunks-v3
 cat >"$FIXTURE" <<'EOF'
-{"record_schema":"directive.approval.v2","validation_digest":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","environment_digest":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","source_inventory_digest":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","processing_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mandate_checksum":"2222222222222222222222222222222222222222222222222222222222222222"}
+{"record_schema":"directive.approval.v3","validation_digest":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","environment_digest":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","source_inventory_digest":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","processing_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mandate_checksum":"2222222222222222222222222222222222222222222222222222222222222222","validation_evidence_digest":"1111111111111111111111111111111111111111111111111111111111111111"}
 EOF
-jq -e 'keys == ["environment_digest","mandate_checksum","processing_hash","record_schema","source_inventory_digest","validation_digest"]' "$FIXTURE" >/dev/null
+jq -e 'keys == ["environment_digest","mandate_checksum","processing_hash","record_schema","source_inventory_digest","validation_digest","validation_evidence_digest"]' "$FIXTURE" >/dev/null
 if jq -e '.wrapper' "$FIXTURE" >/dev/null 2>&1; then
   echo "approval producer marker contains wrapper provenance" >&2
   exit 1
@@ -260,21 +374,21 @@ environment = {
     "content_container": "directive_content",
     "mandate_container": "user_mandates",
     "search_service": "searchtest",
-    "search_index": "directive-chunks-v2",
+    "search_index": "directive-chunks-v3",
 }
 digest = lambda value: hashlib.sha256(
     json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
 ).hexdigest()
 source = "b" * 64
 base = {
-    "record_schema": "directive.validate.v2",
+    "record_schema": "directive.validate.v3",
     "success": True,
     "run_id": "validate-run",
     "environment": environment,
     "environment_digest": digest(environment),
-    "processing_version": "directive-v2-czech-layout",
+    "processing_version": "directive-v3-bounded-ingestion",
     "processing_hash": "a" * 64,
-    "search_index": "directive-chunks-v2",
+    "search_index": "directive-chunks-v3",
     "source_inventory_digest": source,
     "source_count": 1,
     "directive_count": 1,
@@ -286,10 +400,29 @@ base = {
     "warnings": [],
     "warning_count": 0,
     "failures": [],
+    "validation_evidence_digest": "1" * 64,
 }
-base["validation_digest"] = digest({
-    k: v for k, v in base.items() if k not in {"run_id", "validation_digest"}
-})
+base["validation_digest"] = digest({k: base[k] for k in (
+    "record_schema",
+    "success",
+    "environment",
+    "environment_digest",
+    "processing_version",
+    "processing_hash",
+    "search_index",
+    "source_count",
+    "directive_count",
+    "normalized_directive_ids",
+    "directive_version_ids",
+    "mandate_count",
+    "mandate_user_count",
+    "mandate_checksum",
+    "warnings",
+    "warning_count",
+    "failures",
+    "source_inventory_digest",
+    "validation_evidence_digest",
+)})
 validate_path.write_text(json.dumps(base, separators=(",", ":")) + "\n")
 cross_store = {
     "catalog": {"directive_count": 1, "version_count": 1, "current_count": 1, "identity_digest": "c" * 64},
@@ -307,7 +440,17 @@ cross_store = {
         "user_count": 0, "identity_digest": "3" * 64,
     },
 }
-verify = {k: v for k, v in base.items() if k not in {"record_schema", "mandate_count", "mandate_user_count", "failures", "validation_digest"}}
+verify = {
+    k: v for k, v in base.items()
+    if k not in {
+        "record_schema",
+        "mandate_count",
+        "mandate_user_count",
+        "failures",
+        "validation_digest",
+        "validation_evidence_digest",
+    }
+}
 verify.update({"record_schema": "directive.verify.v2", "run_id": "verify-run", "warnings": [], "warning_count": 0, "cross_store": cross_store})
 verify["validation_digest"] = base["validation_digest"]
 projection = {k: verify[k] for k in (
@@ -325,19 +468,19 @@ environment_path.write_text(json.dumps(environment, separators=(",", ":")))
 PY
 directive_validate_producer_record \
   "$VALIDATE_RECORD" "$NORMALIZED_RECORD" \
-  directive.validate.v2 "$ENVIRONMENT" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
-  directive-v2-czech-layout directive-chunks-v2
+  directive.validate.v3 "$ENVIRONMENT" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  directive-v3-bounded-ingestion directive-chunks-v3
 directive_validate_producer_record \
   "$VERIFY_RECORD" "$NORMALIZED_RECORD" \
   directive.verify.v2 "$ENVIRONMENT" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
-  directive-v2-czech-layout directive-chunks-v2
+  directive-v3-bounded-ingestion directive-chunks-v3
 
 expect_invalid_verify() {
   local label="$1"
   if directive_validate_producer_record \
     "$BAD_RECORD" "$NORMALIZED_RECORD" \
     directive.verify.v2 "$ENVIRONMENT" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
-    directive-v2-czech-layout directive-chunks-v2 >/dev/null 2>&1; then
+    directive-v3-bounded-ingestion directive-chunks-v3 >/dev/null 2>&1; then
     echo "$label was accepted" >&2
     exit 1
   fi
@@ -416,7 +559,7 @@ printf '%s\n' "$*" >>"$MOCK_LOG"
 case "$*" in
   *"account show"*"--query id"*) printf 'sub-123\n' ;;
   *"account show"*"--query name"*) printf 'test-subscription\n' ;;
-  *"storage blob list"*) printf 'source.pdf\n' ;;
+  *"storage blob list"*) printf 'source.pdf\t"etag-1"\tversion-1\t19\t2026-08-16T00:00:00+00:00\n' ;;
   *"storage blob download"*)
     previous=""
     for arg in "$@"; do
@@ -460,15 +603,15 @@ MOCK_LOG="$MOCK_LOG" AZ_BIN="$MOCK_AZ" TERRAFORM_BIN="$MOCK_TERRAFORM" \
   /bin/bash -u "$RESET_SCRIPT" dry-run --inventory-evidence "$EVIDENCE" >"$INVENTORY_OUTPUT"
 if MOCK_LOG="$MOCK_LOG" AZ_BIN="$MOCK_AZ" TERRAFORM_BIN="$MOCK_TERRAFORM" \
   /bin/bash -u "$RESET_SCRIPT" finalize >/dev/null 2>"$FINALIZE_ERROR"; then
-  echo "finalize without evidence was accepted before execution" >&2
+  echo "disabled finalize workflow was accepted" >&2
   exit 1
 fi
-grep -q 'Finalize requires --verification-file from a successful v2 verify execution' \
+grep -q 'Finalize workflow is disabled; use the single guarded reset workflow' \
   "$FINALIZE_ERROR"
 grep -q '^artifact_prefix=publication-lock/$' "$INVENTORY_OUTPUT"
 grep -q '^artifact_prefix=publication-claims/$' "$INVENTORY_OUTPUT"
-grep -q '^search_v1_knowledge_base=directive-kb-v1$' "$INVENTORY_OUTPUT"
-grep -q '^search_v1_knowledge_source=directive-chunks-ks-v1$' "$INVENTORY_OUTPUT"
+grep -q '^search_legacy_index=directive-chunks-v2$' "$INVENTORY_OUTPUT"
+grep -q '^search_target_index=directive-chunks-v3$' "$INVENTORY_OUTPUT"
 if grep -Eq 'containerapp job (update|start|stop)|cosmosdb sql container delete|storage blob delete|rest .*--method delete|terraform.*(plan|apply)' "$MOCK_LOG"; then
   echo "dry-run issued a mutating Azure or Terraform command" >&2
   exit 1

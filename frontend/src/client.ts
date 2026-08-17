@@ -51,8 +51,6 @@ export type WorkflowStage =
   | 'resolving'
   | 'searching'
   | 'loading_content'
-  | 'following_references'
-  | 'comparing_versions'
   | 'checking_mandatory_status'
   | 'verifying_coverage'
   | 'preparing_answer';

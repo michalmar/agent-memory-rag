@@ -15,7 +15,11 @@ from directive_ingestion.metadata import (
     normalize_label,
     render_first_two_pages,
 )
-from directive_ingestion.source import SourceDocument, SourceProvenance
+from directive_ingestion.source import (
+    SourceDescriptor,
+    SourceDocument,
+    SourceIdentity,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 PROCESSING_HASH = hashlib.sha256(b"processing").hexdigest()
@@ -105,11 +109,19 @@ def _payload(
 
 
 def _source() -> SourceDocument:
+    content = b"%PDF-test"
     return SourceDocument(
-        source_name="neutrální dokument.pdf",
-        source_hash="a" * 64,
-        content=b"%PDF-test",
-        _provenance=SourceProvenance(kind="test", locator="test"),
+        descriptor=SourceDescriptor(
+            source_name="neutrální dokument.pdf",
+            kind="test",
+            locator="test",
+            etag=None,
+            version_id=None,
+            size=len(content),
+            last_modified=None,
+        ),
+        identity=SourceIdentity("neutrální dokument.pdf", "a" * 64),
+        content=content,
     )
 
 

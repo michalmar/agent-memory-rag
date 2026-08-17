@@ -39,6 +39,36 @@ class ParsedSection:
     content: str
     token_count: int
     content_hash: str
+    provenance: tuple["ProvenanceSegment", ...] = ()
+
+    def page_range_for(self, start: int, end: int) -> tuple[int, int]:
+        pages = [
+            segment.page_number
+            for segment in self.provenance
+            if segment.output_start < end and segment.output_end > start
+        ]
+        if not pages:
+            return self.page_from, self.page_to
+        return min(pages), max(pages)
+
+
+@dataclass(frozen=True, slots=True)
+class ProvenanceSegment:
+    output_start: int
+    output_end: int
+    source_start: int
+    source_end: int
+    page_number: int
+
+    def __post_init__(self) -> None:
+        if (
+            self.output_start < 0
+            or self.output_end <= self.output_start
+            or self.source_start < 0
+            or self.source_end <= self.source_start
+            or self.page_number < 1
+        ):
+            raise ValueError("Canonical provenance segment is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,18 +87,80 @@ class CanonicalDirective:
 @dataclass(frozen=True, slots=True)
 class _BodyMarkdown:
     text: str
-    source_offsets: tuple[int, ...]
+    provenance: tuple[ProvenanceSegment, ...]
 
     def offset_for_index(self, index: int) -> int:
-        if not self.source_offsets:
+        if not self.provenance:
             return 0
-        return self.source_offsets[min(max(index, 0), len(self.source_offsets) - 1)]
+        bounded = min(max(index, 0), max(len(self.text) - 1, 0))
+        for segment in self.provenance:
+            if segment.output_start <= bounded < segment.output_end:
+                source_length = segment.source_end - segment.source_start
+                output_length = segment.output_end - segment.output_start
+                relative = bounded - segment.output_start
+                return segment.source_start + min(
+                    source_length - 1,
+                    int(relative * source_length / output_length),
+                )
+        return self.provenance[-1].source_end - 1
 
     def index_for_source_offset(self, offset: int) -> int | None:
-        for index, source_offset in enumerate(self.source_offsets):
-            if source_offset >= offset:
-                return index
+        for segment in self.provenance:
+            if offset <= segment.source_start:
+                return segment.output_start
+            if segment.source_start < offset < segment.source_end:
+                source_length = segment.source_end - segment.source_start
+                output_length = segment.output_end - segment.output_start
+                return segment.output_start + min(
+                    output_length - 1,
+                    int(
+                        (offset - segment.source_start)
+                        * output_length
+                        / source_length
+                    ),
+                )
         return None
+
+    def segments_for_range(
+        self,
+        start: int,
+        end: int,
+        *,
+        output_start: int = 0,
+    ) -> tuple[ProvenanceSegment, ...]:
+        values: list[ProvenanceSegment] = []
+        for segment in self.provenance:
+            overlap_start = max(start, segment.output_start)
+            overlap_end = min(end, segment.output_end)
+            if overlap_start >= overlap_end:
+                continue
+            source_length = segment.source_end - segment.source_start
+            output_length = segment.output_end - segment.output_start
+            source_start = segment.source_start + int(
+                (overlap_start - segment.output_start)
+                * source_length
+                / output_length
+            )
+            source_end = segment.source_start + max(
+                1,
+                int(
+                    (overlap_end - segment.output_start)
+                    * source_length
+                    / output_length
+                ),
+            )
+            values.append(
+                ProvenanceSegment(
+                    output_start=(
+                        output_start + overlap_start - start
+                    ),
+                    output_end=output_start + overlap_end - start,
+                    source_start=source_start,
+                    source_end=min(segment.source_end, source_end),
+                    page_number=segment.page_number,
+                )
+            )
+        return tuple(values)
 
 
 def normalize_markdown(markdown: str) -> str:
@@ -81,8 +173,16 @@ def parse_canonical(
     source: SourceDocument,
     extraction: ExtractedDocument,
     processing_hash: str,
+    *,
+    metadata_candidate: DirectiveMetadataCandidate | None = None,
 ) -> CanonicalDirective:
-    candidate = extract_metadata(source, extraction, processing_hash)
+    candidate = metadata_candidate or extract_metadata(
+        source,
+        extraction,
+        processing_hash,
+    )
+    if candidate.metadata.source_hash != source.source_hash:
+        raise ValueError("Metadata candidate does not match the source identity")
     body = _body_markdown(extraction)
     metadata_section = _metadata_markdown(candidate)
     markdown = normalize_markdown(
@@ -121,40 +221,61 @@ def _metadata_markdown(candidate: DirectiveMetadataCandidate) -> str:
 def _body_markdown(extraction: ExtractedDocument) -> _BodyMarkdown:
     if extraction.total_pages < 3:
         return _BodyMarkdown("", ())
-    body, offsets = _source_body(extraction)
-    if not body:
-        body, offsets = _line_body(extraction)
+    body = _source_body(extraction)
+    if not body.text:
+        body = _line_body(extraction)
     repeated_edge_offsets = _repeated_header_footer_offsets(extraction)
     counter_offsets = _edge_counter_offsets(extraction)
     output: list[str] = []
-    output_offsets: list[int] = []
+    output_provenance: list[ProvenanceSegment] = []
     position = 0
-    for line in body.splitlines(keepends=True):
+    output_length = 0
+    for line in body.text.splitlines(keepends=True):
         line_text = line.rstrip("\n")
-        line_offsets = offsets[position : position + len(line_text)]
+        line_start = position
+        line_end = position + len(line_text)
         position += len(line)
         if _is_decorative_body_line(
-            line_offsets,
+            body,
+            line_start,
+            line_end,
             repeated_edge_offsets,
             counter_offsets,
         ):
             continue
         rendered = line_text
-        rendered_offsets = line_offsets
         if not rendered:
             continue
         if output:
             output.append("\n")
-            output_offsets.append(rendered_offsets[0])
+            origin = body.offset_for_index(line_start)
+            page = extraction.page_for_offset(origin)
+            output_provenance.append(
+                ProvenanceSegment(
+                    output_start=output_length,
+                    output_end=output_length + 1,
+                    source_start=origin,
+                    source_end=origin + 1,
+                    page_number=page,
+                )
+            )
+            output_length += 1
         output.append(rendered)
-        output_offsets.extend(rendered_offsets)
+        output_provenance.extend(
+            body.segments_for_range(
+                line_start,
+                line_end,
+                output_start=output_length,
+            )
+        )
+        output_length += len(rendered)
     return _BodyMarkdown(
-        "".join(output).strip(),
-        tuple(output_offsets[: len("".join(output).strip())]),
+        "".join(output),
+        tuple(output_provenance),
     )
 
 
-def _source_body(extraction: ExtractedDocument) -> tuple[str, tuple[int, ...]]:
+def _source_body(extraction: ExtractedDocument) -> _BodyMarkdown:
     spans = sorted(
         (
             span
@@ -164,7 +285,8 @@ def _source_body(extraction: ExtractedDocument) -> tuple[str, tuple[int, ...]]:
         key=lambda span: (span.offset, span.length),
     )
     pieces: list[str] = []
-    offsets: list[int] = []
+    provenance: list[ProvenanceSegment] = []
+    output_length = 0
     previous_end = -1
     for span in spans:
         if span.offset < previous_end:
@@ -176,40 +298,81 @@ def _source_body(extraction: ExtractedDocument) -> tuple[str, tuple[int, ...]]:
             continue
         if pieces:
             pieces.append("\n")
-            offsets.append(span.offset + leading)
+            provenance.append(
+                ProvenanceSegment(
+                    output_start=output_length,
+                    output_end=output_length + 1,
+                    source_start=span.offset + leading,
+                    source_end=span.offset + leading + 1,
+                    page_number=span.page_number,
+                )
+            )
+            output_length += 1
         pieces.append(text)
-        offsets.extend(range(span.offset + leading, span.offset + leading + len(text)))
+        provenance.append(
+            ProvenanceSegment(
+                output_start=output_length,
+                output_end=output_length + len(text),
+                source_start=span.offset + leading,
+                source_end=span.offset + leading + len(text),
+                page_number=span.page_number,
+            )
+        )
+        output_length += len(text)
         previous_end = span.offset + span.length
-    return "".join(pieces), tuple(offsets)
+    return _BodyMarkdown("".join(pieces), tuple(provenance))
 
 
-def _line_body(extraction: ExtractedDocument) -> tuple[str, tuple[int, ...]]:
+def _line_body(extraction: ExtractedDocument) -> _BodyMarkdown:
     values = [
         line
         for line in extraction.lines
         if line.page_number >= 3 and line.text.strip()
     ]
-    text = "\n".join(line.text for line in values)
-    offsets: list[int] = []
+    pieces: list[str] = []
+    provenance: list[ProvenanceSegment] = []
+    output_length = 0
     for index, line in enumerate(values):
         origin = _source_offset(
             extraction, line.page_number, line.polygon, line.spans
         )
         if index:
-            offsets.append(origin)
-        offsets.extend(range(origin, origin + len(line.text)))
-    return text, tuple(offsets)
+            pieces.append("\n")
+            provenance.append(
+                ProvenanceSegment(
+                    output_start=output_length,
+                    output_end=output_length + 1,
+                    source_start=origin,
+                    source_end=origin + 1,
+                    page_number=line.page_number,
+                )
+            )
+            output_length += 1
+        pieces.append(line.text)
+        provenance.append(
+            ProvenanceSegment(
+                output_start=output_length,
+                output_end=output_length + len(line.text),
+                source_start=origin,
+                source_end=origin + max(1, len(line.text)),
+                page_number=line.page_number,
+            )
+        )
+        output_length += len(line.text)
+    return _BodyMarkdown("".join(pieces), tuple(provenance))
 
 
 def _is_decorative_body_line(
-    line_offsets: tuple[int, ...],
+    body: _BodyMarkdown,
+    line_start: int,
+    line_end: int,
     repeated_edge_offsets: set[int],
     counter_offsets: set[int],
 ) -> bool:
-    if not line_offsets:
+    if line_start >= line_end:
         return False
-    source_start = min(line_offsets)
-    source_end = max(line_offsets) + 1
+    source_start = body.offset_for_index(line_start)
+    source_end = body.offset_for_index(line_end - 1) + 1
     return any(source_start <= offset < source_end for offset in counter_offsets) or any(
         source_start <= offset < source_end for offset in repeated_edge_offsets
     )
@@ -381,7 +544,10 @@ def _build_sections(
 ) -> Iterable[ParsedSection]:
     hierarchy: dict[int, str] = {}
     for ordinal, (start, end, raw_title, level) in enumerate(specs):
-        content = markdown[start:end].strip() + "\n"
+        raw_content = markdown[start:end]
+        leading = len(raw_content) - len(raw_content.lstrip())
+        stripped = raw_content.strip()
+        content = stripped + "\n"
         numbered = _NUMBERED_TITLE.fullmatch(raw_title)
         number = numbered.group("number") if numbered else None
         title = numbered.group("title") if numbered else raw_title
@@ -390,12 +556,40 @@ def _build_sections(
             if depth > level:
                 del hierarchy[depth]
         path = tuple(hierarchy[depth] for depth in sorted(hierarchy))
-        page_from = 1 if ordinal == 0 else extraction.page_for_offset(
-            body.offset_for_index(start - body_start)
-        )
-        page_to = 2 if ordinal == 0 else extraction.page_for_offset(
-            body.offset_for_index(end - body_start - 1)
-        )
+        if ordinal == 0:
+            page_from = 1
+            page_to = min(2, extraction.total_pages)
+            provenance = tuple(
+                ProvenanceSegment(
+                    output_start=0,
+                    output_end=max(1, len(content)),
+                    source_start=page.spans[0].offset,
+                    source_end=page.spans[-1].offset + page.spans[-1].length,
+                    page_number=page.page_number,
+                )
+                for page in extraction.pages[:2]
+                if page.spans
+            )
+        else:
+            body_range_start = max(0, start + leading - body_start)
+            body_range_end = max(
+                body_range_start + 1,
+                start + leading + len(stripped) - body_start,
+            )
+            provenance = body.segments_for_range(
+                body_range_start,
+                body_range_end,
+            )
+            pages = [segment.page_number for segment in provenance]
+            if pages:
+                page_from, page_to = min(pages), max(pages)
+            else:
+                page_from = extraction.page_for_offset(
+                    body.offset_for_index(start - body_start)
+                )
+                page_to = extraction.page_for_offset(
+                    body.offset_for_index(end - body_start - 1)
+                )
         if page_to < page_from:
             page_to = page_from
         slug = _slug(title)
@@ -411,6 +605,7 @@ def _build_sections(
             content=content,
             token_count=len(_TOKENIZER.encode(content)),
             content_hash=hashlib.sha256(content.encode()).hexdigest(),
+            provenance=provenance,
         )
 
 
