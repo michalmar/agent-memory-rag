@@ -1013,7 +1013,6 @@ export class NativeApp extends LitElement {
   }
 
   private async deleteConversation(c: ConversationSummary): Promise<void> {
-    if (!window.confirm(`Delete "${c.title ?? c.id}"? Its saved memory will also be removed.`)) return;
     const generation = this.identityGeneration;
     try {
       await this.client.deleteConversation(c.id);
