@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
+import unicodedata
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from dataclasses import replace
@@ -609,6 +611,7 @@ class FoundryHostedMafRuntime:
         active_stage = WorkflowStage.RESOLVING
         live_tool_names: dict[str, str] = {}
         answer_started = False
+        assistant_text_parts: list[str] = []
         if directive_runtime:
             yield WorkflowProgressEvent(
                 stage=active_stage,
@@ -665,6 +668,7 @@ class FoundryHostedMafRuntime:
                                     message=_STAGE_MESSAGES[active_stage],
                                 )
                         elif isinstance(event, TextDeltaEvent):
+                            assistant_text_parts.append(event.delta)
                             if not answer_started:
                                 answer_started = True
                                 active_stage = WorkflowStage.PREPARING_ANSWER
@@ -708,6 +712,7 @@ class FoundryHostedMafRuntime:
                     _enrich_directive_tool_events(
                         tool_events,
                         live_tool_names,
+                        "".join(assistant_text_parts),
                     )
                 )
             for event in tool_events:
@@ -734,9 +739,14 @@ class FoundryHostedMafRuntime:
                     completed_count=coverage[0],
                     total_count=coverage[1],
                 )
-            if directive_citations:
-                yield CitationsEvent(citations=directive_citations)
+            if directive_runtime:
+                yield CitationsEvent(
+                    citations=directive_citations,
+                    authoritative=True,
+                )
             for event in completed_events(completed_response):
+                if directive_runtime and isinstance(event, CitationsEvent):
+                    continue
                 yield event
             if directive_runtime:
                 yield WorkflowProgressEvent(
@@ -796,6 +806,7 @@ class FoundryHostedMafRuntime:
 def _enrich_directive_tool_events(
     events: list[NormalizedAgentEvent],
     known_tool_names: dict[str, str],
+    assistant_text: str,
 ) -> tuple[
     list[NormalizedAgentEvent],
     tuple[Citation, ...],
@@ -817,17 +828,22 @@ def _enrich_directive_tool_events(
             == "get_user_directive_mandates"
         ):
             status_values = event.result.data.get("statuses")
+            final_statuses: dict[str, MandatoryStatus] = {}
             if isinstance(status_values, dict):
                 for directive_id, status in status_values.items():
                     if not isinstance(directive_id, str):
                         continue
                     try:
-                        statuses[directive_id] = MandatoryStatus(status)
+                        final_statuses[directive_id] = MandatoryStatus(status)
                     except (TypeError, ValueError):
-                        statuses[directive_id] = MandatoryStatus.UNKNOWN
+                        final_statuses[directive_id] = MandatoryStatus.UNKNOWN
+            statuses = final_statuses
             candidate_snapshot_id = event.result.data.get("snapshot_id")
-            if isinstance(candidate_snapshot_id, str):
-                snapshot_id = candidate_snapshot_id
+            snapshot_id = (
+                candidate_snapshot_id
+                if isinstance(candidate_snapshot_id, str)
+                else None
+            )
         candidate_coverage = _coverage_counts(event.result.data)
         if candidate_coverage is not None:
             coverage = candidate_coverage
@@ -879,7 +895,243 @@ def _enrich_directive_tool_events(
                 continue
             citation_keys.add(key)
             citations.append(citation)
-    return enriched, tuple(citations), coverage
+    return (
+        enriched,
+        _select_final_directive_citations(
+            citations,
+            assistant_text=assistant_text,
+            statuses=statuses,
+        ),
+        coverage,
+    )
+
+
+def _select_final_directive_citations(
+    citations: list[Citation],
+    *,
+    assistant_text: str,
+    statuses: dict[str, MandatoryStatus],
+) -> tuple[Citation, ...]:
+    exact_mentions = [
+        (position, index, citation)
+        for index, citation in enumerate(citations)
+        if (
+            position := _citation_marker_position(
+                assistant_text,
+                citation.ref_id,
+            )
+        ) is not None
+    ]
+    if exact_mentions:
+        exact_mentions.sort(key=lambda item: (item[0], item[1]))
+        return tuple(citation for _, _, citation in exact_mentions)
+
+    mandated = tuple(
+        citation
+        for citation in citations
+        if citation.directive_id and citation.directive_id in statuses
+    )
+    if mandated:
+        return _select_mandated_directive_citations(
+            mandated,
+            assistant_text=assistant_text,
+            directive_ids=tuple(statuses),
+        )
+    if len(citations) == 1:
+        return (citations[0],)
+    return ()
+
+
+def _citation_marker_position(text: str, ref_id: str) -> int | None:
+    escaped_ref_id = re.escape(ref_id)
+    patterns = (
+        re.escape(f"[[cite:{ref_id}]]"),
+        re.escape(f"[{ref_id}]"),
+        re.escape(f"【{ref_id}】"),
+        rf"{escaped_ref_id}(?=|)",
+        rf"【\d+:{escaped_ref_id}†",
+    )
+    positions = [
+        match.start()
+        for pattern in patterns
+        if (match := re.search(pattern, text)) is not None
+    ]
+    return min(positions) if positions else None
+
+
+def _select_mandated_directive_citations(
+    citations: tuple[Citation, ...],
+    *,
+    assistant_text: str,
+    directive_ids: tuple[str, ...],
+) -> tuple[Citation, ...]:
+    normalized_text = _normalize_evidence_text(assistant_text)
+    selected: list[Citation] = []
+    for directive_id in directive_ids:
+        candidates = [
+            citation
+            for citation in citations
+            if citation.directive_id == directive_id
+        ]
+        if not candidates:
+            continue
+        if len(candidates) == 1:
+            selected.append(candidates[0])
+            continue
+        source_candidates = [
+            citation
+            for citation in candidates
+            if citation.section_id
+            or citation.section_number
+            or citation.section_title
+        ]
+        if len(source_candidates) == 1:
+            selected.append(source_candidates[0])
+            continue
+
+        title_matches = [
+            (position, index, citation)
+            for index, citation in enumerate(source_candidates)
+            if (
+                position := _section_evidence_position(
+                    normalized_text,
+                    assistant_text,
+                    citation,
+                )
+            )
+            is not None
+        ]
+        if title_matches:
+            title_matches.sort(key=lambda item: (item[0], item[1]))
+            selected.extend(
+                citation for _, _, citation in title_matches
+            )
+            continue
+
+        representative = next(
+            (
+                citation
+                for citation in candidates
+                if not citation.section_id
+            ),
+            candidates[0],
+        )
+        selected.append(
+            replace(
+                representative,
+                ref_id=(
+                    representative.directive_version_id
+                    or representative.directive_id
+                    or representative.ref_id
+                ),
+                section_id=None,
+                section_number=None,
+                section_title=None,
+                page_from=None,
+                page_to=None,
+                citation_scope="document",
+            )
+        )
+    return tuple(selected)
+
+
+def _section_evidence_position(
+    normalized_text: str,
+    assistant_text: str,
+    citation: Citation,
+) -> int | None:
+    section_title = citation.section_title
+    if not section_title:
+        title_position = None
+    else:
+        normalized_title = _normalize_evidence_text(section_title)
+        title_pattern = rf"(?<!\w){re.escape(normalized_title)}(?!\w)"
+        if len(normalized_title.split()) > 1:
+            match = re.search(title_pattern, normalized_text)
+            title_position = match.start() if match else None
+        else:
+            title_position = _single_word_title_position(
+                normalized_text,
+                title_pattern,
+                citation.section_number,
+            )
+    if title_position is not None:
+        return title_position
+    return _section_number_position(assistant_text, citation)
+
+
+def _single_word_title_position(
+    normalized_text: str,
+    title_pattern: str,
+    section_number: str | None,
+) -> int | None:
+    if not section_number:
+        return None
+    normalized_number = _normalize_evidence_text(section_number)
+    number_pattern = rf"(?<!\w){re.escape(normalized_number)}(?!\w)"
+    match = re.search(
+        (
+            rf"(?:{number_pattern}.{{0,48}}{title_pattern}"
+            rf"|{title_pattern}.{{0,48}}{number_pattern})"
+        ),
+        normalized_text,
+    )
+    return match.start() if match else None
+
+
+def _section_number_position(
+    assistant_text: str,
+    citation: Citation,
+) -> int | None:
+    if not citation.section_number:
+        return None
+    normalized_number = _normalize_evidence_text(citation.section_number)
+    number_pattern = rf"(?<!\w){re.escape(normalized_number)}(?!\w)"
+    section_pattern = (
+        rf"(?<!\w)(?:section|article|chapter|sec|art|čl|cl|kapitola|kap)"
+        rf"(?:\s+(?:number|no))?\s+{number_pattern}"
+    )
+    offset = 0
+    for line in assistant_text.splitlines():
+        normalized_line = _normalize_evidence_text(line)
+        match = re.search(section_pattern, normalized_line)
+        if match and _line_identifies_citation(normalized_line, citation):
+            return offset + match.start()
+        offset += len(normalized_line) + 1
+    return None
+
+
+def _line_identifies_citation(
+    normalized_line: str,
+    citation: Citation,
+) -> bool:
+    if citation.directive_id:
+        normalized_id = _normalize_evidence_text(citation.directive_id)
+        if normalized_id and _contains_normalized_phrase(
+            normalized_line,
+            normalized_id,
+        ):
+            return True
+    source_tokens = _normalize_evidence_text(citation.source_name).split()
+    return any(
+        _contains_normalized_phrase(
+            normalized_line,
+            " ".join(source_tokens[index : index + 3]),
+        )
+        for index in range(max(0, len(source_tokens) - 2))
+    )
+
+
+def _contains_normalized_phrase(text: str, phrase: str) -> bool:
+    return re.search(
+        rf"(?<!\w){re.escape(phrase)}(?!\w)",
+        text,
+    ) is not None
+
+
+def _normalize_evidence_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return " ".join(re.sub(r"[\W_]+", " ", normalized).split())
 
 
 def _coverage_counts(data: dict[str, Any]) -> tuple[int, int] | None:

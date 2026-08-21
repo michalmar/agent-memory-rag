@@ -1118,6 +1118,17 @@ class AGUIAdapterTests(unittest.TestCase):
         self.assertEqual(events[0].name, "agent_citations")
         self.assertEqual(events[0].value[0]["ref_id"], "returns-policy")
 
+        authoritative = tuple(
+            to_agui_events(
+                CitationsEvent((citation,), authoritative=True)
+            )
+        )[0]
+        self.assertTrue(authoritative.value["authoritative"])
+        self.assertEqual(
+            authoritative.value["citations"][0]["ref_id"],
+            "returns-policy",
+        )
+
 
 class RoutingAndPersistenceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:

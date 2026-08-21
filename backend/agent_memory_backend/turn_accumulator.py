@@ -41,6 +41,9 @@ class TurnAccumulator:
         elif isinstance(event, ToolResultEvent):
             self._add_citations(event.result.citations)
         elif isinstance(event, CitationsEvent):
+            if event.authoritative:
+                self.assistant_citations.clear()
+                self._citation_positions.clear()
             self._add_citations(event.citations)
         elif isinstance(event, UsageEvent):
             self.assistant_usage = {

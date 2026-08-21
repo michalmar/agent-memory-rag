@@ -94,6 +94,7 @@ export interface CitationSource {
   mandatory_status?: MandatoryStatus;
   mandate_snapshot_id?: string;
   retrieval_strategy?: string;
+  citation_scope?: 'document' | 'source';
   coverage?: Record<string, unknown>;
 }
 

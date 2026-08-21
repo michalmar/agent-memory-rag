@@ -6,12 +6,15 @@ import '../a2ui/surface-renderer.js';
 import { agentIcon, agentLabel } from '../agent-presentation.js';
 import type { ChatTurn } from '../chat-models.js';
 import {
-  findCitationByIdentity,
-  findCitationBySearchIndex,
   groupCitationsByDocument,
   replaceCitationMarkers,
+  selectCitations,
+  sourceCitationEntries,
 } from '../citations.js';
-import type { CitationDocument } from '../citations.js';
+import type {
+  CitationDocument,
+  CitationSelection,
+} from '../citations.js';
 import type {
   AgentOption,
   AgentType,
@@ -47,6 +50,19 @@ export function emptyStatePrompt(agentType: AgentType): string {
   return agentType === 'directive-rag'
     ? 'Search current directives, review exact content, or check mandatory status.'
     : 'Ask about an order, a policy, or saved context.';
+}
+
+export function formatRelativeTime(createdAt?: string, now = Date.now()): string {
+  if (!createdAt) return '';
+  const timestamp = Date.parse(createdAt);
+  if (!Number.isFinite(timestamp)) return '';
+  const elapsedSeconds = Math.max(
+    0,
+    Math.floor((now - timestamp) / 1000),
+  );
+  if (elapsedSeconds < 30) return 'moment ago';
+  const elapsedMinutes = Math.max(1, Math.floor(elapsedSeconds / 60));
+  return `${elapsedMinutes} min ago`;
 }
 
 export interface ChatTranscriptActions {
@@ -130,6 +146,8 @@ export class ChatTranscript extends LightDomElement {
   }
 
   private renderTurn(turn: ChatTurn) {
+    const selection = this.citationSelection(turn);
+    const citations = selection.citations;
     const responding =
       turn.role === 'assistant' && this.busy && this.turns.at(-1) === turn;
     const progressLabel = responding
@@ -139,7 +157,7 @@ export class ChatTranscript extends LightDomElement {
       && ['cancelled', 'failed'].includes(turn.progress.status)
       ? turn.progress
       : undefined;
-    const timeLabel = this.formatRelativeTime(turn.createdAt);
+    const timeLabel = formatRelativeTime(turn.createdAt, this.clock);
     return html`
       <article class="msg ${turn.role}">
         <div class="message-heading">
@@ -178,10 +196,10 @@ export class ChatTranscript extends LightDomElement {
             ? html`<div
                 class="message-body"
                 @click=${(event: MouseEvent) =>
-                  this.onMessageBodyClick(event, turn)}
+                  this.onMessageBodyClick(event, turn, citations)}
               >
                 ${turn.role === 'assistant'
-                  ? this.renderMarkdown(turn.text, turn)
+                  ? this.renderMarkdown(turn.text, turn, selection)
                   : turn.text}
               </div>`
             : responding || terminalProgress
@@ -200,7 +218,7 @@ export class ChatTranscript extends LightDomElement {
               </div>`
             : nothing}
           ${this.renderToolActivity(turn)}
-          ${this.renderCitations(turn)}
+          ${this.renderCitations(turn, citations)}
           ${this.renderAssistantFooter(turn, responding)}
           ${turn.error
             ? html`<div class="error-message" role="alert">
@@ -226,9 +244,10 @@ export class ChatTranscript extends LightDomElement {
     `;
   }
 
-  private renderCitations(turn: ChatTurn) {
-    if (turn.role !== 'assistant' || turn.citations.length === 0) return nothing;
-    const documents = groupCitationsByDocument(turn.citations);
+  private renderCitations(turn: ChatTurn, citations: CitationSource[]) {
+    if (turn.role !== 'assistant' || citations.length === 0) return nothing;
+    const documents = groupCitationsByDocument(citations);
+    const sources = sourceCitationEntries(citations);
     return html`
       <div class="message-citations">
         <div class="message-documents" role="group" aria-label="Documents">
@@ -238,23 +257,23 @@ export class ChatTranscript extends LightDomElement {
               this.renderDocument(document, index))}
           </ul>
         </div>
-        <details class="message-sources">
+        ${sources.length ? html`<details class="message-sources">
           <summary class="message-sources-summary">
             <span class="message-sources-label">Sources</span>
             <span
               class="message-sources-count"
-              aria-label=${`${turn.citations.length} sources`}
-            >${turn.citations.length}</span>
+              aria-label=${`${sources.length} sources`}
+            >${sources.length}</span>
             <span
               class="message-sources-chevron material-symbols-outlined"
               aria-hidden="true"
             >expand_more</span>
           </summary>
           <ol class="message-source-list" role="list">
-            ${turn.citations.map((citation, index) =>
+            ${sources.map(({ citation, index }) =>
               this.renderSource(turn, citation, index))}
           </ol>
-        </details>
+        </details>` : nothing}
       </div>
     `;
   }
@@ -479,9 +498,11 @@ export class ChatTranscript extends LightDomElement {
     if (citation.effective_from) {
       details.push(`Effective ${citation.effective_from}`);
     }
-    details.push(
-      `${document.sourceCount} citation${document.sourceCount === 1 ? '' : 's'}`,
-    );
+    if (document.sourceCount > 0) {
+      details.push(
+        `${document.sourceCount} citation${document.sourceCount === 1 ? '' : 's'}`,
+      );
+    }
     return details.join(' · ');
   }
 
@@ -536,36 +557,43 @@ export class ChatTranscript extends LightDomElement {
     );
   }
 
-  private linkCitationMarkers(text: string, turn: ChatTurn): string {
-    let fallbackIndex = 0;
+  private linkCitationMarkers(
+    text: string,
+    turn: ChatTurn,
+    selection: CitationSelection,
+  ): string {
+    let markerIndex = 0;
     return replaceCitationMarkers(text, (marker) => {
-      let index = findCitationByIdentity(turn.citations, marker);
-      if (index < 0) {
-        index = findCitationBySearchIndex(turn.citations, marker);
-      }
-      if (index < 0 && fallbackIndex < turn.citations.length) {
-        index = fallbackIndex;
-        fallbackIndex += 1;
-      }
+      const index = selection.markerIndexes[markerIndex] ?? -1;
+      markerIndex += 1;
       if (index < 0) return `[${marker.sourceName}]`;
-      fallbackIndex = Math.max(fallbackIndex, index + 1);
       const target = this.citationTarget(turn, index);
       const label = this.escapeAttribute(
-        this.citationName(turn.citations[index], index),
+        this.citationName(selection.citations[index], index),
       );
-      if (directiveOpenRequestFromCitation(turn.citations[index], index)) {
+      if (
+        directiveOpenRequestFromCitation(selection.citations[index], index)
+      ) {
         return `<sup class="inline-citation"><button type="button" class="inline-citation-button" data-citation-index="${index}" aria-haspopup="dialog" aria-label="Open source ${index + 1}: ${label}">${index + 1}</button></sup>`;
       }
       return `<sup class="inline-citation"><a href="#${target}" data-citation-target="${target}" aria-label="Source ${index + 1}: ${label}">${index + 1}</a></sup>`;
     });
   }
 
-  private renderMarkdown(text: string, turn: ChatTurn) {
-    const linked = this.linkCitationMarkers(text, turn);
+  private renderMarkdown(
+    text: string,
+    turn: ChatTurn,
+    selection: CitationSelection,
+  ) {
+    const linked = this.linkCitationMarkers(text, turn, selection);
     return unsafeHTML(renderSafeMarkdown(linked));
   }
 
-  private onMessageBodyClick(event: MouseEvent, turn: ChatTurn): void {
+  private onMessageBodyClick(
+    event: MouseEvent,
+    turn: ChatTurn,
+    citations: CitationSource[],
+  ): void {
     const element = event.target instanceof Element ? event.target : null;
     const citationButton = element?.closest<HTMLButtonElement>(
       'button[data-citation-index]',
@@ -575,7 +603,7 @@ export class ChatTranscript extends LightDomElement {
         citationButton.dataset.citationIndex ?? '',
         10,
       );
-      const citation = turn.citations[index];
+      const citation = citations[index];
       const request = citation
         ? directiveOpenRequestFromCitation(citation, index)
         : null;
@@ -599,26 +627,12 @@ export class ChatTranscript extends LightDomElement {
     source.focus({ preventScroll: true });
   }
 
-  private formatRelativeTime(createdAt?: string): string {
-    if (!createdAt) return '';
-    const timestamp = Date.parse(createdAt);
-    if (!Number.isFinite(timestamp)) return '';
-    const elapsedSeconds = Math.max(
-      0,
-      Math.floor((this.clock - timestamp) / 1000),
+  private citationSelection(turn: ChatTurn): CitationSelection {
+    return selectCitations(
+      turn.text,
+      turn.citations,
+      this.agentType === 'directive-rag',
     );
-    if (elapsedSeconds < 5) return 'right now';
-    if (elapsedSeconds < 60) return `${elapsedSeconds} sec ago`;
-    const elapsedMinutes = Math.floor(elapsedSeconds / 60);
-    if (elapsedMinutes < 60) return `${elapsedMinutes} min ago`;
-    const elapsedHours = Math.floor(elapsedMinutes / 60);
-    if (elapsedHours < 24) return `${elapsedHours} hr ago`;
-    const elapsedDays = Math.floor(elapsedHours / 24);
-    if (elapsedDays < 7) return `${elapsedDays} d ago`;
-    return new Date(timestamp).toLocaleDateString(undefined, {
-      month: 'short',
-      day: 'numeric',
-    });
   }
 
   private toolLabel(toolName: string): string {

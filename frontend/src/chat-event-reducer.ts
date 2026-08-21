@@ -175,10 +175,15 @@ export function reduceChatEvent(
         const usage = readUsage(event.value);
         if (usage) turn.usage = usage;
       } else if (event.name === 'agent_citations') {
-        turn.citations = mergeCitations(
-          turn.citations,
-          parseCitations(event.value),
-        );
+        const citations = parseCitations(event.value);
+        const authoritative =
+          event.value != null
+          && typeof event.value === 'object'
+          && !Array.isArray(event.value)
+          && (event.value as Record<string, unknown>).authoritative === true;
+        turn.citations = authoritative
+          ? citations
+          : mergeCitations(turn.citations, citations);
       } else if (event.name === 'agent_progress') {
         const progress = readProgress(event.value);
         if (progress) turn.progress = progress;

@@ -133,6 +133,9 @@ class DirectiveContractTests(unittest.TestCase):
         self.assertIn("current published directives", prompt)
         self.assertIn("non-authoritative guidance", prompt)
         self.assertIn("current published corpus is", prompt)
+        self.assertIn("[ref_id]", prompt)
+        self.assertIn("do not", prompt)
+        self.assertIn("unused search candidates", prompt)
         self.assertNotEqual(DIRECTIVE_RAG_PROMPT_VERSION, PROMPT_VERSION)
 
     def test_hosted_tool_payload_preserves_directive_citation_fields(self) -> None:

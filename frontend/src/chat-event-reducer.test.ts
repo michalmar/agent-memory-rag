@@ -68,6 +68,37 @@ describe('chat event reducer', () => {
     expect(state.toolNames.size).toBe(0);
   });
 
+  it('replaces provisional tool citations with the final agent snapshot', () => {
+    let state = createChatEventState(assistantTurn(), 0);
+    state = reduceChatEvent(state, {
+      type: 'TOOL_CALL_RESULT',
+      content: JSON.stringify({
+        citations: [
+          { ref_id: 'used', source_name: 'Used directive' },
+          { ref_id: 'unused', source_name: 'Unused directive' },
+        ],
+      }),
+    });
+    state = reduceChatEvent(state, {
+      type: 'CUSTOM',
+      name: 'agent_citations',
+      value: {
+        authoritative: true,
+        citations: [{ ref_id: 'used', source_name: 'Used directive' }],
+      },
+    });
+    expect(state.turn.citations).toEqual([
+      { ref_id: 'used', source_name: 'Used directive' },
+    ]);
+
+    state = reduceChatEvent(state, {
+      type: 'CUSTOM',
+      name: 'agent_citations',
+      value: { authoritative: true, citations: [] },
+    });
+    expect(state.turn.citations).toEqual([]);
+  });
+
   it('validates usage and preserves run errors', () => {
     expect(
       readUsage({

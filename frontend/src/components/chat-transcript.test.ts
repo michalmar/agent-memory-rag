@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   emptyStatePrompt,
+  formatRelativeTime,
   toolActivityLabel,
 } from './chat-transcript.js';
 
@@ -19,6 +20,23 @@ describe('chat transcript presentation', () => {
     );
     expect(emptyStatePrompt('agent-framework')).toBe(
       'Ask about an order, a policy, or saved context.',
+    );
+  });
+
+  it('formats response ages without individual seconds', () => {
+    const now = Date.parse('2026-08-21T13:48:30.000Z');
+
+    expect(formatRelativeTime('2026-08-21T13:48:01.000Z', now)).toBe(
+      'moment ago',
+    );
+    expect(formatRelativeTime('2026-08-21T13:48:00.000Z', now)).toBe(
+      '1 min ago',
+    );
+    expect(formatRelativeTime('2026-08-21T13:47:30.000Z', now)).toBe(
+      '1 min ago',
+    );
+    expect(formatRelativeTime('2026-08-21T12:46:30.000Z', now)).toBe(
+      '62 min ago',
     );
   });
 });

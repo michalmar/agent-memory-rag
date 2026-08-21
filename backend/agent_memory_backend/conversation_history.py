@@ -210,6 +210,9 @@ def _public_citation(value: Any) -> dict[str, Any] | None:
         field_value = value.get(key)
         if isinstance(field_value, str) and field_value:
             citation[key] = field_value
+    citation_scope = value.get("citation_scope")
+    if citation_scope in {"document", "source"}:
+        citation["citation_scope"] = citation_scope
     mandatory_status = value.get("mandatory_status")
     if mandatory_status in _MANDATORY_STATUS_VALUES:
         citation["mandatory_status"] = mandatory_status

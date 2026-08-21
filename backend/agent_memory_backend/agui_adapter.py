@@ -51,10 +51,18 @@ def to_agui_events(event: NormalizedAgentEvent) -> Iterable[object]:
     if isinstance(event, ToolEndedEvent):
         return (ToolCallEndEvent(tool_call_id=event.call_id),)
     if isinstance(event, CitationsEvent):
+        citations = [citation.to_dict() for citation in event.citations]
         return (
             CustomEvent(
                 name="agent_citations",
-                value=[citation.to_dict() for citation in event.citations],
+                value=(
+                    {
+                        "citations": citations,
+                        "authoritative": True,
+                    }
+                    if event.authoritative
+                    else citations
+                ),
             ),
         )
     if isinstance(event, WorkflowProgressEvent):

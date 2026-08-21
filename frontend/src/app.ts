@@ -9,8 +9,8 @@ import {
   reduceChatEvent,
 } from './chat-event-reducer.js';
 import {
-  findCitationByIdentity,
   replaceCitationMarkers,
+  selectCitations,
 } from './citations.js';
 import {
   AGUIClient,
@@ -605,8 +605,15 @@ export class NativeApp extends LitElement {
       return;
     }
     try {
+      const selection = selectCitations(
+        turn.text,
+        turn.citations,
+        this.agentType === 'directive-rag',
+      );
+      let markerIndex = 0;
       const text = replaceCitationMarkers(turn.text, (marker) => {
-        const index = findCitationByIdentity(turn.citations, marker);
+        const index = selection.markerIndexes[markerIndex] ?? -1;
+        markerIndex += 1;
         return index >= 0 ? `[${index + 1}]` : `[${marker.sourceName}]`;
       });
       await navigator.clipboard.writeText(text);

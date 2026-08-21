@@ -8,6 +8,9 @@ import {
   mergeCitations,
   parseCitations,
   replaceCitationMarkers,
+  resolveCitationIndex,
+  selectCitations,
+  sourceCitationEntries,
 } from './citations.js';
 
 describe('citation utilities', () => {
@@ -25,6 +28,10 @@ describe('citation utilities', () => {
     expect(parseCitations([citation])).toEqual([citation]);
     expect(parseCitations([{ ref_id: 'missing-name' }, null])).toEqual([]);
     expect(extractToolCitations('not-json')).toEqual([]);
+    expect(parseCitations([{
+      ...citation,
+      citation_scope: 'document',
+    }])[0].citation_scope).toBe('document');
   });
 
   it('merges duplicates while filling missing optional fields', () => {
@@ -72,6 +79,29 @@ describe('citation utilities', () => {
     expect(replaced).toBe('See [1].');
   });
 
+  it('does not use an ambiguous source name ahead of an exact search index', () => {
+    const citations = [
+      {
+        ref_id: 'section-1',
+        source_name: 'Travel policy',
+        search_idx: 4,
+      },
+      {
+        ref_id: 'section-2',
+        source_name: 'Travel policy',
+        search_idx: 7,
+      },
+    ];
+    const marker = {
+      searchIndex: 7,
+      refId: 'unknown',
+      sourceName: 'Travel policy',
+    };
+
+    expect(findCitationByIdentity(citations, marker)).toBe(-1);
+    expect(resolveCitationIndex(citations, marker, 0)).toBe(1);
+  });
+
   it('replaces Foundry citation markers using directive reference IDs', () => {
     const refId =
       '30336958:v1:s0003-3-authorization-and-driver-competence';
@@ -103,6 +133,98 @@ describe('citation utilities', () => {
         (marker) => `[${marker.refId}]`,
       ),
     ).toBe(`Compare [${refId}][related-section]`);
+  });
+
+  it('replaces plain directive citation markers', () => {
+    const refId = '30336958:v1:s0003-change-requests';
+    const citations = [
+      {
+        ref_id: refId,
+        source_name: 'Microsoft 365 policy',
+      },
+    ];
+
+    expect(
+      replaceCitationMarkers(
+        `Submit the request through ServiceDesk. [[cite:${refId}]]`,
+        (marker) => {
+          expect(resolveCitationIndex(citations, marker, 0)).toBe(0);
+          return '[1]';
+        },
+      ),
+    ).toBe('Submit the request through ServiceDesk. [1]');
+  });
+
+  it('keeps the authoritative citation snapshot in backend order', () => {
+    const citations = [
+      { ref_id: 'section-1', source_name: 'Travel policy', search_idx: 1 },
+      { ref_id: 'section-2', source_name: 'AI policy', search_idx: 2 },
+    ];
+
+    expect(selectCitations('Answer without markers.', citations)).toEqual({
+      citations,
+      markerIndexes: [],
+    });
+  });
+
+  it('resolves marker positions without filtering the final snapshot', () => {
+    const citations = [
+      { ref_id: 'first', source_name: 'First source', search_idx: 4 },
+      { ref_id: 'second', source_name: 'Second source', search_idx: 7 },
+    ];
+
+    expect(
+      selectCitations(
+        'Known 【7:unknown†Unknown】 and exact citefirst.',
+        citations,
+      ),
+    ).toEqual({
+      citations,
+      markerIndexes: [1, 0],
+    });
+  });
+
+  it('requires exact ref IDs for directive markers', () => {
+    const citations = [
+      { ref_id: 'first', source_name: 'First source', search_idx: 4 },
+      { ref_id: 'second', source_name: 'Second source', search_idx: 7 },
+    ];
+
+    expect(
+      selectCitations(
+        'Unknown 【7:not-a-ref†Second source】 and exact [first].',
+        citations,
+        true,
+      ),
+    ).toEqual({
+      citations,
+      markerIndexes: [-1, 0],
+    });
+  });
+
+  it('replaces an opaque SHA-256 ref marker exactly', () => {
+    const refId =
+      '012869405198d310ea60607d3454a4823eefd02eec8c995750639d26fc8afd5';
+    const text = `Grounded answer [${refId}]`;
+
+    expect(
+      replaceCitationMarkers(text, (marker) => {
+        expect(marker.refId).toBe(refId);
+        return '[1]';
+      }),
+    ).toBe('Grounded answer [1]');
+  });
+
+  it('replaces a bare corner-bracket ref marker exactly', () => {
+    const refId =
+      '012869405198d310ea60607d3454a4823eefdf02eec8c995750639d26fc8afd5';
+
+    expect(
+      replaceCitationMarkers(`Grounded answer 【${refId}】`, (marker) => {
+        expect(marker.refId).toBe(refId);
+        return '[1]';
+      }),
+    ).toBe('Grounded answer [1]');
   });
 
   it('preserves directive lineage and does not collapse distinct sections', () => {
@@ -191,6 +313,7 @@ describe('citation utilities', () => {
         mandatory_status: 'mandatory',
       },
     });
+
     expect(documents[1]).toMatchObject({
       firstSourceIndex: 2,
       sourceCount: 1,
@@ -199,6 +322,27 @@ describe('citation utilities', () => {
         mandatory_status: 'non_mandatory',
       },
     });
+  });
+
+  it('keeps document references out of the Sources list', () => {
+    const document = {
+      ref_id: 'DIR-1:v2',
+      source_name: 'Travel policy',
+      directive_id: 'DIR-1',
+      directive_version_id: 'DIR-1:v2',
+      citation_scope: 'document' as const,
+    };
+    const source = {
+      ...document,
+      ref_id: 'DIR-1:v2:s8',
+      section_id: 's8',
+      citation_scope: 'source' as const,
+    };
+
+    expect(sourceCitationEntries([document, source])).toEqual([
+      { citation: source, index: 1 },
+    ]);
+    expect(groupCitationsByDocument([document])[0].sourceCount).toBe(0);
   });
 
   it('groups non-directive chunks by source name', () => {

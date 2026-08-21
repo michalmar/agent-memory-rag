@@ -4,7 +4,7 @@ import type {
 } from './client.js';
 
 const CITATION_MARKER =
-  /【(\d+):([^†】]+)†([^】]+)】|cite([^]+)/g;
+  /【(\d+):([^†】]+)†([^】]+)】|cite([^]+)|\[\[cite:([^\]\r\n]+)\]\]|\[([^\[\]\r\n]+)\]|【([^【】\r\n]+)】/g;
 const FOUNDRY_CITATION_SEPARATOR = '';
 const MERGEABLE_CITATION_FIELDS = [
   'url',
@@ -21,6 +21,7 @@ const MERGEABLE_CITATION_FIELDS = [
   'mandatory_status',
   'mandate_snapshot_id',
   'retrieval_strategy',
+  'citation_scope',
   'coverage',
 ] as const;
 
@@ -34,6 +35,16 @@ export interface CitationDocument {
   citation: CitationSource;
   firstSourceIndex: number;
   sourceCount: number;
+}
+
+export interface CitationSelection {
+  citations: CitationSource[];
+  markerIndexes: number[];
+}
+
+export interface CitationSourceEntry {
+  citation: CitationSource;
+  index: number;
 }
 
 function citationValues(value: unknown): unknown[] {
@@ -79,6 +90,12 @@ export function parseCitations(value: unknown): CitationSource[] {
       'retrieval_strategy',
     ] as const) {
       if (typeof citation[field] === 'string') result[field] = citation[field];
+    }
+    if (
+      citation.citation_scope === 'document'
+      || citation.citation_scope === 'source'
+    ) {
+      result.citation_scope = citation.citation_scope;
     }
     for (const field of ['page_from', 'page_to'] as const) {
       const page = citation[field];
@@ -172,7 +189,7 @@ export function groupCitationsByDocument(
       documents.push({
         citation: { ...citation },
         firstSourceIndex: sourceIndex,
-        sourceCount: 1,
+        sourceCount: citation.citation_scope === 'document' ? 0 : 1,
       });
       continue;
     }
@@ -192,7 +209,9 @@ export function groupCitationsByDocument(
       currentStatus,
       citation.mandatory_status,
     );
-    document.sourceCount += 1;
+    if (citation.citation_scope !== 'document') {
+      document.sourceCount += 1;
+    }
   }
 
   return documents;
@@ -253,7 +272,28 @@ export function replaceCitationMarkers(
       refId: string | undefined,
       sourceName: string | undefined,
       foundryRefIds: string | undefined,
+      plainRefId: string | undefined,
+      opaqueRefId: string | undefined,
+      cornerRefId: string | undefined,
     ) => {
+      if (
+        plainRefId !== undefined
+        || opaqueRefId !== undefined
+        || cornerRefId !== undefined
+      ) {
+        const reference = (
+          plainRefId
+          ?? opaqueRefId
+          ?? cornerRefId
+          ?? ''
+        ).trim();
+        return reference
+          ? replacement({
+              refId: reference,
+              sourceName: reference,
+            })
+          : marker;
+      }
       if (foundryRefIds !== undefined) {
         const references = foundryRefIds
           .split(FOUNDRY_CITATION_SEPARATOR)
@@ -288,11 +328,14 @@ export function findCitationByIdentity(
   citations: CitationSource[],
   marker: CitationMarker,
 ): number {
-  return citations.findIndex(
-    (citation) =>
-      citation.ref_id === marker.refId ||
-      citation.source_name === marker.sourceName,
+  const refIndex = citations.findIndex(
+    (citation) => citation.ref_id === marker.refId,
   );
+  if (refIndex >= 0) return refIndex;
+
+  const sourceIndexes = citations.flatMap((citation, index) =>
+    citation.source_name === marker.sourceName ? [index] : []);
+  return sourceIndexes.length === 1 ? sourceIndexes[0] : -1;
 }
 
 export function findCitationBySearchIndex(
@@ -303,4 +346,66 @@ export function findCitationBySearchIndex(
   return citations.findIndex(
     (citation) => citation.search_idx === marker.searchIndex,
   );
+}
+
+export function resolveCitationIndex(
+  citations: CitationSource[],
+  marker: CitationMarker,
+  legacyFallbackIndex: number,
+  exactOnly = false,
+): number {
+  const refIndex = citations.findIndex(
+    (citation) => citation.ref_id === marker.refId,
+  );
+  if (refIndex >= 0) return refIndex;
+  if (exactOnly) return -1;
+  if (marker.searchIndex === undefined) return -1;
+
+  const searchIndex = findCitationBySearchIndex(citations, marker);
+  if (searchIndex >= 0) return searchIndex;
+
+  const identityIndex = findCitationByIdentity(citations, marker);
+  if (identityIndex >= 0) return identityIndex;
+
+  return marker.searchIndex !== undefined
+    && legacyFallbackIndex < citations.length
+    ? legacyFallbackIndex
+    : -1;
+}
+
+export function selectCitations(
+  text: string,
+  citations: CitationSource[],
+  exactMarkersOnly = false,
+): CitationSelection {
+  const resolvedIndexes: number[] = [];
+  let fallbackIndex = 0;
+
+  replaceCitationMarkers(text, (marker) => {
+    const index = resolveCitationIndex(
+      citations,
+      marker,
+      fallbackIndex,
+      exactMarkersOnly,
+    );
+    resolvedIndexes.push(index);
+    if (index < 0) return '';
+
+    fallbackIndex = Math.max(fallbackIndex, index + 1);
+    return '';
+  });
+
+  return {
+    citations,
+    markerIndexes: resolvedIndexes,
+  };
+}
+
+export function sourceCitationEntries(
+  citations: CitationSource[],
+): CitationSourceEntry[] {
+  return citations.flatMap((citation, index) =>
+    citation.citation_scope === 'document'
+      ? []
+      : [{ citation, index }]);
 }

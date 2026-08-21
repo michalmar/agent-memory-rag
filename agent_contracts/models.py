@@ -67,6 +67,7 @@ class Citation:
     mandatory_status: MandatoryStatus | None = None
     mandate_snapshot_id: str | None = None
     retrieval_strategy: str | None = None
+    citation_scope: str | None = None
     coverage: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -89,6 +90,7 @@ class Citation:
             "mandatory_status",
             "mandate_snapshot_id",
             "retrieval_strategy",
+            "citation_scope",
             "coverage",
         ):
             value = getattr(self, name)
@@ -175,6 +177,7 @@ class ToolEndedEvent:
 @dataclass(frozen=True)
 class CitationsEvent:
     citations: tuple[Citation, ...]
+    authoritative: bool = False
 
 
 @dataclass(frozen=True)
