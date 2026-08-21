@@ -570,6 +570,48 @@ Omit both directive arguments for a support-only run.
 each Hosted image build, run `azd deploy --no-prompt` from that agent's
 directory; the exact manifest pin creates a new Hosted Agent version and leaves
 prior versions available for rollback.
+
+For image-only releases without reading local Terraform or `azd` environments,
+export the target environment first:
+
+```bash
+export AZURE_CONFIG_DIR="<target Azure CLI profile directory>"
+export AZURE_TENANT_ID="<target tenant ID>"
+export AZURE_SUBSCRIPTION_ID="<target subscription ID>"
+export AZURE_RESOURCE_GROUP="<target resource group>"
+export ACR_NAME="<target ACR name>"
+export ACR_LOGIN_SERVER="<target ACR login server>"
+export BACKEND_CONTAINER_APP="<target backend Container App name>"
+export FRONTEND_CONTAINER_APP="<target frontend Container App name>"
+export DIRECTIVE_AGENT_NAME="<target Directive Agent name>"
+export FOUNDRY_PROJECT_ENDPOINT="<target Foundry project endpoint>"
+```
+
+Alternatively, store those assignments in a local environment file and pass
+its path to the script:
+
+```bash
+./scripts/deploy_app_only_directive.sh <release> \
+  --with-directive \
+  --env-file ./env/.env.rlp
+```
+
+The local `env/` directory is ignored by Git. To use already-exported
+variables instead, run:
+
+```bash
+./scripts/deploy_app_only_directive.sh <release>
+./scripts/deploy_app_only_directive.sh <release> --backend-only
+./scripts/deploy_app_only_directive.sh <release> --frontend-only
+./scripts/deploy_app_only_directive.sh <release> --with-directive
+./scripts/deploy_app_only_directive.sh <release> --directive-only
+```
+
+The default deploys backend and frontend. The Directive Hosted Agent is changed
+only when explicitly requested. Its deployment uses the Foundry REST API and
+does not require a local `azd` environment. The script contains no
+tenant-specific resource values; it validates the exported Azure CLI tenant and
+subscription before building or updating anything.
 `scripts/assign_hosted_agent_access.sh` idempotently assigns `AgentTools.Invoke`
 to both the shared project and published Agent Identities, assigns
 `Agent365.Observability.OtelWrite` only to the published identity, then configures
