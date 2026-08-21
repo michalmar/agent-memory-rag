@@ -136,6 +136,9 @@ class DirectiveContractTests(unittest.TestCase):
         self.assertIn("[ref_id]", prompt)
         self.assertIn("do not", prompt)
         self.assertIn("unused search candidates", prompt)
+        self.assertIn("discovery evidence", prompt)
+        self.assertIn("exactly matches", prompt)
+        self.assertIn("retrieve the referenced section", prompt)
         self.assertNotEqual(DIRECTIVE_RAG_PROMPT_VERSION, PROMPT_VERSION)
 
     def test_hosted_tool_payload_preserves_directive_citation_fields(self) -> None:

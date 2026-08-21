@@ -223,6 +223,472 @@ class DirectiveRuntimeStreamingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(selected, (second, first))
 
+    def test_exact_markers_are_rejected_when_section_labels_disagree(self) -> None:
+        section_three_one = Citation(
+            ref_id="section-3-1",
+            source_name="AI directive",
+            directive_id="MP/25/0277",
+            section_id="s3-1",
+            section_number="3.1",
+        )
+        section_six_one = Citation(
+            ref_id="section-6-1",
+            source_name="AI directive",
+            directive_id="MP/25/0277",
+            section_id="s6-1",
+            section_number="6.1",
+        )
+
+        selected = _select_final_directive_citations(
+            [section_three_one, section_six_one],
+            assistant_text=(
+                "Podle sekcí 3.2 a 6.2 platí omezení "
+                "[section-3-1][section-6-1]. "
+                "Výjimka se schvaluje podle sekce 8."
+            ),
+            statuses={"MP/25/0277": MandatoryStatus.NON_MANDATORY},
+        )
+
+        self.assertEqual(len(selected), 2)
+        self.assertTrue(
+            all(citation.citation_scope == "document" for citation in selected)
+        )
+
+    def test_exact_markers_allow_matching_section_labels(self) -> None:
+        section_three_two = Citation(
+            ref_id="section-3-2",
+            source_name="AI directive",
+            directive_id="MP/25/0277",
+            section_id="s3-2",
+            section_number="3.2",
+        )
+        section_six_two = Citation(
+            ref_id="section-6-2",
+            source_name="AI directive",
+            directive_id="MP/25/0277",
+            section_id="s6-2",
+            section_number="6.2",
+        )
+        section_eight = Citation(
+            ref_id="section-8",
+            source_name="AI directive",
+            directive_id="MP/25/0277",
+            section_id="s8",
+            section_number="8",
+        )
+
+        selected = _select_final_directive_citations(
+            [section_three_two, section_six_two, section_eight],
+            assistant_text=(
+                "Podle sekcí 3.2 a 6.2 platí omezení "
+                "[section-3-2][section-6-2]. "
+                "Výjimka se schvaluje podle sekce 8 [section-8]."
+            ),
+            statuses={"MP/25/0277": MandatoryStatus.NON_MANDATORY},
+        )
+
+        self.assertEqual(
+            selected,
+            (section_three_two, section_six_two, section_eight),
+        )
+
+    def test_wrong_title_matches_are_replaced_by_explicit_sections(self) -> None:
+        citations = [
+            Citation(
+                ref_id=f"section-{number.replace('.', '-')}",
+                source_name="Pravidla používání nástrojů umělé inteligence (AI)",
+                directive_id="MP/25/0277",
+                directive_version_id="MP/25/0277:v1.1",
+                section_id=f"s{number.replace('.', '-')}",
+                section_number=number,
+                section_title=title,
+                retrieval_strategy="focused",
+            )
+            for number, title in (
+                ("3.2", "OSTATNÍ AI NÁSTROJE"),
+                ("6.2", "OSTATNÍ AI NÁSTROJE"),
+                ("3.1", "PODNIKOVÝ COPILOT"),
+                ("6.1", "PODNIKOVÝ COPILOT"),
+                ("8", "SCHVÁLENÍ OSTATNÍCH AI NÁSTROJŮ"),
+            )
+        ]
+
+        selected = _select_final_directive_citations(
+            citations,
+            assistant_text=(
+                "Podle MP/25/0277, sekcí 3.2 a 6.2, lze do ChatGPT "
+                "vkládat pouze veřejná data.\n\n"
+                "Pro interní dokumenty je možné použít Podnikový Copilot. "
+                "Jiný nástroj lze použít pouze po schválení dle sekce 8."
+            ),
+            statuses={"MP/25/0277": MandatoryStatus.NON_MANDATORY},
+        )
+
+        self.assertEqual(
+            [citation.section_number for citation in selected],
+            ["3.2", "6.2", "8"],
+        )
+
+    def test_marker_free_czech_source_line_selects_all_listed_sections(
+        self,
+    ) -> None:
+        section_three_two = Citation(
+            ref_id="section-3-2",
+            source_name="Pravidla používání nástrojů umělé inteligence (AI)",
+            directive_id="MP/25/0277",
+            directive_version_id="MP/25/0277:v1.1",
+            section_id="s3-2",
+            section_number="3.2",
+        )
+        section_six_two = Citation(
+            ref_id="section-6-2",
+            source_name="Pravidla používání nástrojů umělé inteligence (AI)",
+            directive_id="MP/25/0277",
+            directive_version_id="MP/25/0277:v1.1",
+            section_id="s6-2",
+            section_number="6.2",
+        )
+
+        selected = _select_final_directive_citations(
+            [section_three_two, section_six_two],
+            assistant_text=(
+                "Zdroj: Pravidla používání nástrojů AI, "
+                "MP/25/0277, sekce 3.2 a 6.2."
+            ),
+            statuses={"MP/25/0277": MandatoryStatus.NON_MANDATORY},
+        )
+
+        self.assertEqual(selected, (section_three_two, section_six_two))
+
+    def test_wrong_exact_marker_keeps_resolvable_document_fallback(self) -> None:
+        section_three_one = Citation(
+            ref_id="section-3-1",
+            source_name="AI directive",
+            directive_id="MP/25/0277",
+            section_id="s3-1",
+            section_number="3.1",
+        )
+        section_three_two = Citation(
+            ref_id="section-3-2",
+            source_name="AI directive",
+            directive_id="MP/25/0277",
+            section_id="s3-2",
+            section_number="3.2",
+        )
+
+        selected = _select_final_directive_citations(
+            [section_three_one, section_three_two],
+            assistant_text=(
+                "Podle MP/25/0277, sekce 3.2, platí omezení "
+                "[section-3-1]."
+            ),
+            statuses={"MP/25/0277": MandatoryStatus.NON_MANDATORY},
+        )
+
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(selected[0].ref_id, section_three_one.ref_id)
+        self.assertEqual(selected[0].citation_scope, "document")
+        self.assertEqual(selected[1], section_three_two)
+
+    def test_rejected_marker_falls_back_to_its_own_document(self) -> None:
+        policy_a = Citation(
+            ref_id="policy-a-section-1",
+            source_name="Policy A",
+            directive_id="POLICY-A",
+            directive_version_id="POLICY-A:v1",
+            section_id="a1",
+            section_number="1",
+        )
+        policy_b = Citation(
+            ref_id="policy-b-section-1",
+            source_name="Policy B",
+            directive_id="POLICY-B",
+            directive_version_id="POLICY-B:v1",
+            section_id="b1",
+            section_number="1",
+        )
+
+        selected = _select_final_directive_citations(
+            [policy_a, policy_b],
+            assistant_text=(
+                "Policy A section 1 applies [policy-a-section-1].\n\n"
+                "Policy B requires section 2 [policy-b-section-1]."
+            ),
+            statuses={
+                "POLICY-A": MandatoryStatus.MANDATORY,
+                "POLICY-B": MandatoryStatus.MANDATORY,
+            },
+        )
+
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(selected[0].directive_id, "POLICY-B")
+        self.assertEqual(selected[0].citation_scope, "document")
+        self.assertEqual(selected[1], policy_a)
+
+    def test_each_reused_marker_is_validated_in_its_local_claim(self) -> None:
+        section_three = Citation(
+            ref_id="section-3",
+            source_name="Policy",
+            directive_id="DIR-1",
+            section_id="s3",
+            section_number="3",
+        )
+        section_four = Citation(
+            ref_id="section-4",
+            source_name="Policy",
+            directive_id="DIR-1",
+            section_id="s4",
+            section_number="4",
+        )
+
+        selected = _select_final_directive_citations(
+            [section_three, section_four],
+            assistant_text=(
+                "Section 3 applies [section-3].\n\n"
+                "Section 4 applies [section-3]."
+            ),
+            statuses={"DIR-1": MandatoryStatus.MANDATORY},
+        )
+
+        self.assertEqual(
+            [
+                citation.section_number
+                for citation in selected
+                if citation.citation_scope != "document"
+            ],
+            ["3", "4"],
+        )
+        self.assertTrue(
+            any(
+                citation.citation_scope == "document"
+                and citation.ref_id == section_three.ref_id
+                for citation in selected
+            )
+        )
+        self.assertEqual(selected[0].citation_scope, "document")
+        self.assertEqual(selected[0].ref_id, section_three.ref_id)
+
+    def test_rejected_marker_without_mandate_status_stays_resolvable(
+        self,
+    ) -> None:
+        citation = Citation(
+            ref_id="other-section-3",
+            source_name="Other policy",
+            directive_id="DIR-2",
+            directive_version_id="DIR-2:v1",
+            section_id="s3",
+            section_number="3",
+        )
+
+        selected = _select_final_directive_citations(
+            [citation],
+            assistant_text="Section 4 applies [other-section-3].",
+            statuses={},
+        )
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].ref_id, citation.ref_id)
+        self.assertEqual(selected[0].citation_scope, "document")
+
+    def test_exact_marker_directive_extends_explicit_correction_scope(
+        self,
+    ) -> None:
+        section_three = Citation(
+            ref_id="b-section-3",
+            source_name="Policy B",
+            directive_id="DIR-B",
+            section_id="b3",
+            section_number="3",
+        )
+        section_eight = Citation(
+            ref_id="b-section-8",
+            source_name="Policy B",
+            directive_id="DIR-B",
+            section_id="b8",
+            section_number="8",
+        )
+
+        selected = _select_final_directive_citations(
+            [section_three, section_eight],
+            assistant_text="Policy B section 8 applies [b-section-3].",
+            statuses={"DIR-A": MandatoryStatus.MANDATORY},
+        )
+
+        self.assertEqual(selected[0].citation_scope, "document")
+        self.assertEqual(selected[1], section_eight)
+
+    def test_external_article_does_not_suppress_matching_directive_section(
+        self,
+    ) -> None:
+        section_three_one = Citation(
+            ref_id="section-3-1",
+            source_name="AI directive",
+            directive_id="MP/25/0277",
+            section_id="s3-1",
+            section_number="3.1",
+        )
+
+        selected = _select_final_directive_citations(
+            [section_three_one],
+            assistant_text=(
+                "Podle článku 6 GDPR a sekce 3.1 interního předpisu "
+                "platí omezení [section-3-1]."
+            ),
+            statuses={"MP/25/0277": MandatoryStatus.NON_MANDATORY},
+        )
+
+        self.assertEqual(selected, (section_three_one,))
+
+    def test_external_article_does_not_select_same_numbered_section(
+        self,
+    ) -> None:
+        section_three_one = Citation(
+            ref_id="section-3-1",
+            source_name="AI directive",
+            directive_id="MP/25/0277",
+            section_id="s3-1",
+            section_number="3.1",
+        )
+        section_six = Citation(
+            ref_id="section-6",
+            source_name="AI directive",
+            directive_id="MP/25/0277",
+            section_id="s6",
+            section_number="6",
+        )
+
+        selected = _select_final_directive_citations(
+            [section_three_one, section_six],
+            assistant_text=(
+                "Podle sekce 3.1 interního předpisu a článku 6 GDPR "
+                "platí omezení [section-3-1]."
+            ),
+            statuses={"MP/25/0277": MandatoryStatus.NON_MANDATORY},
+        )
+
+        self.assertEqual(selected, (section_three_one,))
+
+    def test_external_article_alone_does_not_reject_exact_marker(self) -> None:
+        section_three_one = Citation(
+            ref_id="section-3-1",
+            source_name="AI directive",
+            directive_id="MP/25/0277",
+            section_id="s3-1",
+            section_number="3.1",
+        )
+
+        selected = _select_final_directive_citations(
+            [section_three_one],
+            assistant_text=(
+                "Požadavek vyplývá z článku 6 GDPR "
+                "[section-3-1]."
+            ),
+            statuses={"MP/25/0277": MandatoryStatus.NON_MANDATORY},
+        )
+
+        self.assertEqual(selected, (section_three_one,))
+
+    def test_unqualified_article_rejects_mismatched_exact_marker(self) -> None:
+        citation = Citation(
+            ref_id="section-3",
+            source_name="Policy",
+            directive_id="DIR-1",
+            section_id="s3",
+            section_number="3",
+        )
+
+        for answer in (
+            "Article 8 applies [section-3].",
+            "Art. 8 applies [section-3].",
+            "Chapter 8 applies [section-3].",
+            "kap. 8 platí [section-3].",
+        ):
+            with self.subTest(answer=answer):
+                selected = _select_final_directive_citations(
+                    [citation],
+                    assistant_text=answer,
+                    statuses={"DIR-1": MandatoryStatus.MANDATORY},
+                )
+                self.assertEqual(len(selected), 1)
+                self.assertEqual(selected[0].citation_scope, "document")
+
+    def test_post_punctuation_marker_uses_preceding_claim(self) -> None:
+        citation = Citation(
+            ref_id="section-3",
+            source_name="Policy",
+            directive_id="DIR-1",
+            section_id="s3",
+            section_number="3",
+        )
+
+        selected = _select_final_directive_citations(
+            [citation],
+            assistant_text="Article 8 applies. [section-3]",
+            statuses={"DIR-1": MandatoryStatus.MANDATORY},
+        )
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].citation_scope, "document")
+
+    def test_marker_free_fallback_rejects_mismatched_section_label(self) -> None:
+        section_three_one = Citation(
+            ref_id="section-3-1",
+            source_name="AI directive",
+            directive_id="MP/25/0277",
+            section_id="s3-1",
+            section_number="3.1",
+        )
+
+        selected = _select_final_directive_citations(
+            [section_three_one],
+            assistant_text="Podle sekce 3.2 platí omezení.",
+            statuses={"MP/25/0277": MandatoryStatus.NON_MANDATORY},
+        )
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].citation_scope, "document")
+
+    def test_preceding_foreign_identity_blocks_singleton_fallback(self) -> None:
+        citations = [
+            Citation(
+                ref_id=f"a-section-{number}",
+                source_name="Policy A",
+                directive_id="DIR-A",
+                directive_version_id="DIR-A:v1",
+                section_id=f"a{number}",
+                section_number=number,
+            )
+            for number in ("3", "8")
+        ]
+
+        selected = _select_final_directive_citations(
+            citations,
+            assistant_text="According to DIR-B, section 8 applies.",
+            statuses={"DIR-A": MandatoryStatus.MANDATORY},
+        )
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].citation_scope, "document")
+
+    def test_hyphenated_foreign_identity_rejects_exact_marker(self) -> None:
+        citation = Citation(
+            ref_id="b-section-8",
+            source_name="Policy B",
+            directive_id="DIR-B",
+            directive_version_id="DIR-B:v1",
+            section_id="b8",
+            section_number="8",
+        )
+
+        selected = _select_final_directive_citations(
+            [citation],
+            assistant_text="DIR-A section 8 applies [b-section-8].",
+            statuses={"DIR-B": MandatoryStatus.MANDATORY},
+        )
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].citation_scope, "document")
+
     def test_mandate_lookup_selects_complex_directive_id(self) -> None:
         selected_section = Citation(
             ref_id="opaque-section-id",
@@ -245,7 +711,7 @@ class DirectiveRuntimeStreamingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(selected, (selected_section,))
 
-    def test_mandate_fallback_selects_section_title_used_in_reply(self) -> None:
+    def test_source_line_selects_section_named_in_reply(self) -> None:
         section_three = Citation(
             ref_id="section-3",
             source_name="Microsoft 365 directive",
@@ -274,6 +740,487 @@ class DirectiveRuntimeStreamingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(selected, (section_eight,))
+
+    def test_source_article_replaces_wrong_exact_marker(self) -> None:
+        section_three = Citation(
+            ref_id="section-3",
+            source_name="Policy",
+            directive_id="DIR-1",
+            section_id="s3",
+            section_number="3",
+        )
+        section_eight = Citation(
+            ref_id="section-8",
+            source_name="Policy",
+            directive_id="DIR-1",
+            section_id="s8",
+            section_number="8",
+        )
+
+        selected = _select_final_directive_citations(
+            [section_three, section_eight],
+            assistant_text="Source: DIR-1, article 8 [section-3].",
+            statuses={"DIR-1": MandatoryStatus.MANDATORY},
+        )
+
+        self.assertEqual(selected[0].ref_id, section_three.ref_id)
+        self.assertEqual(selected[0].citation_scope, "document")
+        self.assertEqual(selected[1], section_eight)
+
+    def test_czech_article_abbreviation_replaces_wrong_marker(self) -> None:
+        section_three = Citation(
+            ref_id="section-3",
+            source_name="Policy",
+            directive_id="DIR-1",
+            section_id="s3",
+            section_number="3",
+        )
+        section_eight = Citation(
+            ref_id="section-8",
+            source_name="Policy",
+            directive_id="DIR-1",
+            section_id="s8",
+            section_number="8",
+        )
+
+        selected = _select_final_directive_citations(
+            [section_three, section_eight],
+            assistant_text="Zdroj: DIR-1, čl. 8 [section-3].",
+            statuses={"DIR-1": MandatoryStatus.MANDATORY},
+        )
+
+        self.assertEqual(selected[0].ref_id, section_three.ref_id)
+        self.assertEqual(selected[0].citation_scope, "document")
+        self.assertEqual(selected[1], section_eight)
+
+    def test_narrative_article_with_following_identity_is_validated(
+        self,
+    ) -> None:
+        section_three = Citation(
+            ref_id="section-3",
+            source_name="Policy",
+            directive_id="DIR-1",
+            section_id="s3",
+            section_number="3",
+        )
+        section_eight = Citation(
+            ref_id="section-8",
+            source_name="Policy",
+            directive_id="DIR-1",
+            section_id="s8",
+            section_number="8",
+        )
+
+        selected = _select_final_directive_citations(
+            [section_three, section_eight],
+            assistant_text=(
+                "Podle čl. 8 směrnice DIR-1 platí omezení [section-3]."
+            ),
+            statuses={"DIR-1": MandatoryStatus.MANDATORY},
+        )
+
+        self.assertEqual(selected[0].citation_scope, "document")
+        self.assertEqual(selected[1], section_eight)
+
+    def test_section_identity_cannot_fall_back_to_other_directive(self) -> None:
+        section_a = Citation(
+            ref_id="a-section-8",
+            source_name="Policy A",
+            directive_id="DIR-A",
+            section_id="a8",
+            section_number="8",
+        )
+        section_b = Citation(
+            ref_id="b-section-8",
+            source_name="Policy B",
+            directive_id="DIR-B",
+            section_id="b8",
+            section_number="8",
+        )
+
+        selected = _select_final_directive_citations(
+            [section_a, section_b],
+            assistant_text="Section 8 of DIR-B applies [a-section-8].",
+            statuses={"DIR-A": MandatoryStatus.MANDATORY},
+        )
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].directive_id, "DIR-A")
+        self.assertEqual(selected[0].citation_scope, "document")
+
+    def test_unretrieved_foreign_identity_cannot_use_singleton_fallback(
+        self,
+    ) -> None:
+        section_three = Citation(
+            ref_id="a-section-3",
+            source_name="Policy A",
+            directive_id="DIR-A",
+            section_id="a3",
+            section_number="3",
+        )
+        section_eight = Citation(
+            ref_id="a-section-8",
+            source_name="Policy A",
+            directive_id="DIR-A",
+            section_id="a8",
+            section_number="8",
+        )
+
+        selected = _select_final_directive_citations(
+            [section_three, section_eight],
+            assistant_text=(
+                "Section 3 of DIR-A applies [a-section-3]. "
+                "Section 8 of DIR-B has a separate rule."
+            ),
+            statuses={"DIR-A": MandatoryStatus.MANDATORY},
+        )
+
+        self.assertEqual(selected, (section_three,))
+
+    def test_section_identity_does_not_cross_sentence_boundary(self) -> None:
+        citations = [
+            Citation(
+                ref_id=ref_id,
+                source_name=f"Policy {directive_id[-1]}",
+                directive_id=directive_id,
+                section_id=ref_id,
+                section_number=number,
+            )
+            for ref_id, directive_id, number in (
+                ("opaque-a3", "DIR-A", "3"),
+                ("opaque-b3", "DIR-B", "3"),
+                ("opaque-b8", "DIR-B", "8"),
+            )
+        ]
+
+        selected = _select_final_directive_citations(
+            citations,
+            assistant_text=(
+                "Section 3 applies [opaque-a3]. "
+                "Section 8 of DIR-B applies [opaque-b8]."
+            ),
+            statuses={
+                "DIR-A": MandatoryStatus.MANDATORY,
+                "DIR-B": MandatoryStatus.MANDATORY,
+            },
+        )
+
+        self.assertEqual(
+            [
+                (citation.directive_id, citation.section_number)
+                for citation in selected
+                if citation.citation_scope != "document"
+            ],
+            [("DIR-A", "3"), ("DIR-B", "8")],
+        )
+
+    def test_section_identity_does_not_cross_later_reference(self) -> None:
+        citations = [
+            Citation(
+                ref_id=f"{directive_id}-{number}",
+                source_name=f"Policy {directive_id[-1]}",
+                directive_id=directive_id,
+                section_id=f"{directive_id[-1].lower()}{number}",
+                section_number=number,
+            )
+            for directive_id in ("DIR-A", "DIR-B")
+            for number in ("3", "8")
+        ]
+
+        selected = _select_final_directive_citations(
+            citations,
+            assistant_text=(
+                "Section 3 of DIR-A and section 8 of DIR-B apply."
+            ),
+            statuses={
+                "DIR-A": MandatoryStatus.MANDATORY,
+                "DIR-B": MandatoryStatus.MANDATORY,
+            },
+        )
+
+        self.assertEqual(
+            [
+                (citation.directive_id, citation.section_number)
+                for citation in selected
+            ],
+            [("DIR-A", "3"), ("DIR-B", "8")],
+        )
+
+    def test_same_section_number_can_apply_to_multiple_directives(self) -> None:
+        citations = [
+            Citation(
+                ref_id=f"{directive_id}-3",
+                source_name=f"Policy {directive_id[-1]}",
+                directive_id=directive_id,
+                section_id=f"{directive_id[-1].lower()}3",
+                section_number="3",
+            )
+            for directive_id in ("DIR-A", "DIR-B")
+        ]
+
+        selected = _select_final_directive_citations(
+            citations,
+            assistant_text=(
+                "Section 3 of DIR-A applies. "
+                "Section 3 of DIR-B also applies."
+            ),
+            statuses={
+                "DIR-A": MandatoryStatus.MANDATORY,
+                "DIR-B": MandatoryStatus.MANDATORY,
+            },
+        )
+
+        self.assertEqual(
+            [citation.directive_id for citation in selected],
+            ["DIR-A", "DIR-B"],
+        )
+
+    def test_foreign_identity_blocks_singleton_section_fallback(self) -> None:
+        citation = Citation(
+            ref_id="a-section-8",
+            source_name="Policy A",
+            directive_id="DIR-A",
+            directive_version_id="DIR-A:v1",
+            section_id="a8",
+            section_number="8",
+        )
+
+        selected = _select_final_directive_citations(
+            [citation],
+            assistant_text="Section 8 of DIR-B has a separate rule.",
+            statuses={"DIR-A": MandatoryStatus.MANDATORY},
+        )
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].citation_scope, "document")
+
+    def test_spaced_foreign_identity_blocks_singleton_section_fallback(
+        self,
+    ) -> None:
+        citation = Citation(
+            ref_id="policy-a-section-8",
+            source_name="Policy A",
+            directive_id="POLICY A",
+            section_id="a8",
+            section_number="8",
+        )
+
+        selected = _select_final_directive_citations(
+            [citation],
+            assistant_text="Section 8 of Policy B applies.",
+            statuses={"POLICY A": MandatoryStatus.MANDATORY},
+        )
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].citation_scope, "document")
+
+    def test_punctuated_foreign_identity_blocks_singleton_fallback(
+        self,
+    ) -> None:
+        citations = [
+            Citation(
+                ref_id=f"b-section-{number}",
+                source_name="Policy B",
+                directive_id="DIR-B",
+                directive_version_id="DIR-B:v1",
+                section_id=f"b{number}",
+                section_number=number,
+            )
+            for number in ("3", "8")
+        ]
+
+        for assistant_text in (
+            "Section 8 (DIR-X) has a separate rule.",
+            "Section 8, DIR-X has a separate rule.",
+        ):
+            with self.subTest(assistant_text=assistant_text):
+                selected = _select_final_directive_citations(
+                    citations,
+                    assistant_text=assistant_text,
+                    statuses={"DIR-B": MandatoryStatus.MANDATORY},
+                )
+                self.assertEqual(len(selected), 1)
+                self.assertEqual(selected[0].citation_scope, "document")
+
+    def test_unicode_and_unseparated_foreign_ids_block_fallback(self) -> None:
+        citations = [
+            Citation(
+                ref_id=f"b-section-{number}",
+                source_name="Policy B",
+                directive_id="DIR-B",
+                directive_version_id="DIR-B:v1",
+                section_id=f"b{number}",
+                section_number=number,
+            )
+            for number in ("3", "8")
+        ]
+
+        for assistant_text in (
+            "Section 8 of DIRB has a separate rule.",
+            "Section 8 of ČD/42-A has a separate rule.",
+        ):
+            with self.subTest(assistant_text=assistant_text):
+                selected = _select_final_directive_citations(
+                    citations,
+                    assistant_text=assistant_text,
+                    statuses={"DIR-B": MandatoryStatus.MANDATORY},
+                )
+                self.assertEqual(len(selected), 1)
+                self.assertEqual(selected[0].citation_scope, "document")
+
+    def test_short_source_name_validates_exact_marker(self) -> None:
+        citation = Citation(
+            ref_id="b-section-8",
+            source_name="Policy B",
+            directive_id="DIR-B",
+            section_id="b8",
+            section_number="8",
+        )
+
+        selected = _select_final_directive_citations(
+            [citation],
+            assistant_text="Section 8 of Policy B applies [b-section-8].",
+            statuses={"DIR-B": MandatoryStatus.MANDATORY},
+        )
+
+        self.assertEqual(selected, (citation,))
+
+    def test_overlapping_titles_prefer_most_specific_directive(self) -> None:
+        base_policy = Citation(
+            ref_id="base-section-8",
+            source_name="Information Security Policy",
+            directive_id="BASE",
+            section_id="base8",
+            section_number="8",
+        )
+        supplier_policy = Citation(
+            ref_id="supplier-section-8",
+            source_name="Information Security Policy for Suppliers",
+            directive_id="SUPPLIERS",
+            section_id="supplier8",
+            section_number="8",
+        )
+
+        selected = _select_final_directive_citations(
+            [base_policy, supplier_policy],
+            assistant_text=(
+                "Section 8 of Information Security Policy for Suppliers "
+                "applies [base-section-8]."
+            ),
+            statuses={
+                "BASE": MandatoryStatus.MANDATORY,
+                "SUPPLIERS": MandatoryStatus.MANDATORY,
+            },
+        )
+
+        self.assertEqual(selected[0].ref_id, "base-section-8")
+        self.assertEqual(selected[0].citation_scope, "document")
+        self.assertEqual(selected[1], supplier_policy)
+
+    def test_generic_directive_word_does_not_create_identity_conflict(
+        self,
+    ) -> None:
+        citation = Citation(
+            ref_id="section-8",
+            source_name="Policy",
+            directive_id="DIR-1",
+            section_id="s8",
+            section_number="8",
+        )
+
+        selected = _select_final_directive_citations(
+            [citation],
+            assistant_text="Section 8 of the directive applies [section-8].",
+            statuses={"DIR-1": MandatoryStatus.MANDATORY},
+        )
+
+        self.assertEqual(selected, (citation,))
+
+    def test_foreign_identity_rejects_exact_marker_without_foreign_result(
+        self,
+    ) -> None:
+        citation = Citation(
+            ref_id="a-section-8",
+            source_name="Policy A",
+            directive_id="DIR-A",
+            directive_version_id="DIR-A:v1",
+            section_id="a8",
+            section_number="8",
+        )
+
+        selected = _select_final_directive_citations(
+            [citation],
+            assistant_text="Section 8 of DIR-B applies [a-section-8].",
+            statuses={"DIR-A": MandatoryStatus.MANDATORY},
+        )
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].ref_id, citation.ref_id)
+        self.assertEqual(selected[0].citation_scope, "document")
+
+    def test_unavailable_source_article_downgrades_wrong_marker(self) -> None:
+        section_three = Citation(
+            ref_id="section-3",
+            source_name="Policy",
+            directive_id="DIR-1",
+            directive_version_id="DIR-1:v1",
+            section_id="s3",
+            section_number="3",
+        )
+
+        selected = _select_final_directive_citations(
+            [section_three],
+            assistant_text="Source: DIR-1, article 8 [section-3].",
+            statuses={"DIR-1": MandatoryStatus.MANDATORY},
+        )
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].citation_scope, "document")
+
+    def test_duplicate_title_in_prose_does_not_select_sections(self) -> None:
+        citations = [
+            Citation(
+                ref_id=f"section-{number}",
+                source_name="AI directive",
+                directive_id="MP/25/0277",
+                directive_version_id="MP/25/0277:v1.1",
+                section_id=f"s{number}",
+                section_number=number,
+                section_title="PODNIKOVÝ COPILOT",
+            )
+            for number in ("3.1", "6.1")
+        ]
+
+        selected = _select_final_directive_citations(
+            citations,
+            assistant_text="Pro interní dokumenty použijte Podnikový Copilot.",
+            statuses={"MP/25/0277": MandatoryStatus.NON_MANDATORY},
+        )
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].citation_scope, "document")
+
+    def test_article_with_following_identity_selects_section(self) -> None:
+        citations = [
+            Citation(
+                ref_id=f"section-{number}",
+                source_name="Policy",
+                directive_id="DIR-1",
+                directive_version_id="DIR-1:v1",
+                section_id=f"s{number}",
+                section_number=number,
+            )
+            for number in ("6", "7")
+        ]
+
+        selected = _select_final_directive_citations(
+            citations,
+            assistant_text="Article 6 of DIR-1 defines the external requirement.",
+            statuses={"DIR-1": MandatoryStatus.MANDATORY},
+        )
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].section_number, "6")
 
     def test_ambiguous_mandate_fallback_emits_document_only(self) -> None:
         citations = [
@@ -334,6 +1281,61 @@ class DirectiveRuntimeStreamingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(selected, (scope,))
 
+    def test_qualified_and_abbreviated_section_labels_are_supported(
+        self,
+    ) -> None:
+        citation = Citation(
+            ref_id="section-8",
+            source_name="Policy",
+            directive_id="DIR-1",
+            section_id="s8",
+            section_number="8",
+        )
+
+        for source_line in (
+            "Source: DIR-1, section No. 8.",
+            "Source: DIR-1, section number 8.",
+            "Source: DIR-1, Art. 8.",
+            "Source: DIR-1, Sec. 8.",
+            "Zdroj: DIR-1, kap. 8.",
+        ):
+            with self.subTest(source_line=source_line):
+                selected = _select_final_directive_citations(
+                    [citation],
+                    assistant_text=source_line,
+                    statuses={"DIR-1": MandatoryStatus.MANDATORY},
+                )
+                self.assertEqual(selected, (citation,))
+
+    def test_qualified_abbreviations_validate_wrong_exact_marker(self) -> None:
+        section_three = Citation(
+            ref_id="section-3",
+            source_name="Policy",
+            directive_id="DIR-1",
+            section_id="s3",
+            section_number="3",
+        )
+        section_eight = Citation(
+            ref_id="section-8",
+            source_name="Policy",
+            directive_id="DIR-1",
+            section_id="s8",
+            section_number="8",
+        )
+
+        for source_line in (
+            "Source: DIR-1, section No. 8 [section-3].",
+            "Zdroj: DIR-1, kap. 8 [section-3].",
+        ):
+            with self.subTest(source_line=source_line):
+                selected = _select_final_directive_citations(
+                    [section_three, section_eight],
+                    assistant_text=source_line,
+                    statuses={"DIR-1": MandatoryStatus.MANDATORY},
+                )
+                self.assertEqual(selected[0].citation_scope, "document")
+                self.assertEqual(selected[1], section_eight)
+
     def test_source_line_matches_section_number_and_document_identity(
         self,
     ) -> None:
@@ -371,6 +1373,134 @@ class DirectiveRuntimeStreamingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(selected, (section_eight,))
+
+    def test_source_line_scopes_sections_to_each_directive_clause(self) -> None:
+        citations = [
+            Citation(
+                ref_id=f"{directive_id}-{number}",
+                source_name=f"Policy {directive_id[-1]}",
+                directive_id=directive_id,
+                section_id=f"{directive_id[-1].lower()}{number}",
+                section_number=number,
+            )
+            for directive_id in ("DIR-A", "DIR-B")
+            for number in ("3", "8")
+        ]
+
+        selected = _select_final_directive_citations(
+            citations,
+            assistant_text=(
+                "Source: DIR-A, article 3; DIR-B, article 8."
+            ),
+            statuses={
+                "DIR-A": MandatoryStatus.MANDATORY,
+                "DIR-B": MandatoryStatus.MANDATORY,
+            },
+        )
+
+        self.assertEqual(
+            [
+                (citation.directive_id, citation.section_number)
+                for citation in selected
+            ],
+            [("DIR-A", "3"), ("DIR-B", "8")],
+        )
+
+    def test_source_line_scopes_comma_separated_directives(self) -> None:
+        citations = [
+            Citation(
+                ref_id=f"{directive_id}-{number}",
+                source_name=f"Policy {directive_id[-1]}",
+                directive_id=directive_id,
+                section_id=f"{directive_id[-1].lower()}{number}",
+                section_number=number,
+            )
+            for directive_id in ("DIR-A", "DIR-B")
+            for number in ("3", "8")
+        ]
+
+        selected = _select_final_directive_citations(
+            citations,
+            assistant_text="Source: DIR-A, section 3, DIR-B, section 8.",
+            statuses={
+                "DIR-A": MandatoryStatus.MANDATORY,
+                "DIR-B": MandatoryStatus.MANDATORY,
+            },
+        )
+
+        self.assertEqual(
+            [
+                (citation.directive_id, citation.section_number)
+                for citation in selected
+            ],
+            [("DIR-A", "3"), ("DIR-B", "8")],
+        )
+
+    def test_comma_separated_source_rejects_marker_from_prior_entry(
+        self,
+    ) -> None:
+        citations = [
+            Citation(
+                ref_id=f"{directive_id}-{number}",
+                source_name=f"Policy {directive_id[-1]}",
+                directive_id=directive_id,
+                section_id=f"{directive_id[-1].lower()}{number}",
+                section_number=number,
+            )
+            for directive_id, number in (("DIR-A", "3"), ("DIR-B", "8"))
+        ]
+
+        selected = _select_final_directive_citations(
+            citations,
+            assistant_text=(
+                "Source: DIR-A, section 3, DIR-B, section 8 [DIR-A-3]."
+            ),
+            statuses={
+                "DIR-A": MandatoryStatus.MANDATORY,
+                "DIR-B": MandatoryStatus.MANDATORY,
+            },
+        )
+
+        self.assertEqual(selected[0].ref_id, "DIR-A-3")
+        self.assertEqual(selected[0].citation_scope, "document")
+        self.assertEqual(selected[1], citations[0])
+        self.assertEqual(selected[2], citations[1])
+
+    def test_later_source_clause_validates_its_exact_marker(self) -> None:
+        citations = [
+            Citation(
+                ref_id=f"{directive_id}-{number}",
+                source_name=f"Policy {directive_id[-1]}",
+                directive_id=directive_id,
+                section_id=f"{directive_id[-1].lower()}{number}",
+                section_number=number,
+            )
+            for directive_id in ("DIR-A", "DIR-B")
+            for number in ("3", "8")
+        ]
+
+        selected = _select_final_directive_citations(
+            citations,
+            assistant_text=(
+                "Source: DIR-A, article 3 [DIR-A-3]; "
+                "DIR-B, article 8 [DIR-B-3]."
+            ),
+            statuses={
+                "DIR-A": MandatoryStatus.MANDATORY,
+                "DIR-B": MandatoryStatus.MANDATORY,
+            },
+        )
+
+        self.assertEqual(selected[0].ref_id, "DIR-B-3")
+        self.assertEqual(selected[0].citation_scope, "document")
+        self.assertEqual(
+            {
+                (citation.directive_id, citation.section_number)
+                for citation in selected
+                if citation.citation_scope != "document"
+            },
+            {("DIR-A", "3"), ("DIR-B", "8")},
+        )
 
     def test_section_number_rejects_overlapping_directive_id(self) -> None:
         citations = [

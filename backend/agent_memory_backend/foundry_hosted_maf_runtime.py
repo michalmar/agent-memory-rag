@@ -31,6 +31,7 @@ from agent_contracts import (
     WorkflowStage,
     WorkflowStatus,
 )
+from directive_contracts import normalize_directive_id
 from .azure_clients import get_credential
 from .foundry_runtime_base import (
     completed_events,
@@ -46,6 +47,20 @@ _PROBE_CLEANUP_BACKOFF_SECONDS = 0.5
 _DEFAULT_PROGRESS_HEARTBEAT_SECONDS = 10.0
 _PROJECT_INNER_STATE_SCHEMA_VERSION = 7
 logger = logging.getLogger("foundry_hosted_maf")
+_SECTION_REFERENCE = re.compile(
+    r"(?<!\w)(?P<label>"
+    r"sections?|articles?|chapters?|secs?\.?|arts?\.?|"
+    r"sekc(?:e|í)|čl(?:ánek|ánky|ánku|ánků|\.?)|"
+    r"cl(?:anek|anky|anku|anku|\.?)|"
+    r"kap(?:\.?)|kapitol(?:a|y|u|ou)"
+    r")(?:\s+(?:number|no\.?))?\s+"
+    r"(?P<values>"
+    r"\d+(?:\.\d+)*"
+    r"(?:\s*(?:,|/|&|and|or|a|nebo|či)\s*\d+(?:\.\d+)*)*"
+    r")",
+    re.IGNORECASE,
+)
+_SECTION_NUMBER = re.compile(r"\d+(?:\.\d+)*")
 
 _TOOL_STAGES = {
     "get_directive": WorkflowStage.RESOLVING,
@@ -915,34 +930,62 @@ def _select_final_directive_citations(
     exact_mentions = [
         (position, index, citation)
         for index, citation in enumerate(citations)
-        if (
-            position := _citation_marker_position(
+        for position in _citation_marker_positions(
                 assistant_text,
                 citation.ref_id,
             )
-        ) is not None
     ]
-    if exact_mentions:
-        exact_mentions.sort(key=lambda item: (item[0], item[1]))
-        return tuple(citation for _, _, citation in exact_mentions)
-
     mandated = tuple(
         citation
         for citation in citations
         if citation.directive_id and citation.directive_id in statuses
     )
-    if mandated:
-        return _select_mandated_directive_citations(
-            mandated,
+    explicit_directive_ids = list(statuses)
+    for _, _, citation in exact_mentions:
+        if (
+            citation.directive_id
+            and citation.directive_id not in explicit_directive_ids
+        ):
+            explicit_directive_ids.append(citation.directive_id)
+    explicit_citations = _select_explicit_section_citations(
+        tuple(citations),
+        assistant_text=assistant_text,
+        directive_ids=tuple(explicit_directive_ids),
+    )
+    if exact_mentions:
+        exact_mentions.sort(key=lambda item: (item[0], item[1]))
+        exact_citations = _select_exact_marker_citations(
+            exact_mentions,
+            available_citations=tuple(citations),
             assistant_text=assistant_text,
-            directive_ids=tuple(statuses),
         )
+        selected = _merge_citation_groups(
+            exact_citations,
+            explicit_citations,
+        )
+        return selected
+
+    if mandated:
+        selected = _filter_citations_by_section_labels(
+            explicit_citations
+            or _select_mandated_directive_citations(
+                mandated,
+                directive_ids=tuple(statuses),
+            ),
+            assistant_text=assistant_text,
+        )
+        if selected:
+            return selected
+        return (_to_document_citation(mandated[0]),)
     if len(citations) == 1:
-        return (citations[0],)
+        return _filter_citations_by_section_labels(
+            (citations[0],),
+            assistant_text=assistant_text,
+        )
     return ()
 
 
-def _citation_marker_position(text: str, ref_id: str) -> int | None:
+def _citation_marker_positions(text: str, ref_id: str) -> tuple[int, ...]:
     escaped_ref_id = re.escape(ref_id)
     patterns = (
         re.escape(f"[[cite:{ref_id}]]"),
@@ -951,21 +994,588 @@ def _citation_marker_position(text: str, ref_id: str) -> int | None:
         rf"{escaped_ref_id}(?=|)",
         rf"【\d+:{escaped_ref_id}†",
     )
-    positions = [
+    positions = {
         match.start()
         for pattern in patterns
-        if (match := re.search(pattern, text)) is not None
-    ]
-    return min(positions) if positions else None
+        for match in re.finditer(pattern, text)
+    }
+    return tuple(sorted(positions))
 
 
-def _select_mandated_directive_citations(
+def _explicit_section_numbers(
+    text: str,
+    *,
+    citation: Citation | None = None,
+) -> set[str]:
+    numbers: set[str] = set()
+    for reference in _SECTION_REFERENCE.finditer(text):
+        line_start = text.rfind("\n", 0, reference.start()) + 1
+        line_end = text.find("\n", reference.end())
+        if line_end < 0:
+            line_end = len(text)
+        normalized_line = _normalize_evidence_text(text[line_start:line_end])
+        if not _is_section_reference(reference):
+            identifies_citation = bool(
+                citation
+                and _reference_identifies_citation(
+                    text,
+                    reference,
+                    citation,
+                    normalized_line=normalized_line,
+                    line_end=line_end,
+                )
+            )
+            has_other_identity = bool(
+                citation
+                and (
+                    _reference_has_following_identity_hint(
+                        text,
+                        reference,
+                        line_end=line_end,
+                    )
+                    or _reference_has_preceding_identity_hint(text, reference)
+                )
+            )
+            if not identifies_citation and has_other_identity:
+                continue
+        numbers.update(
+            _normalize_section_number(number)
+            for number in _SECTION_NUMBER.findall(reference.group("values"))
+        )
+    return numbers
+
+
+def _normalize_section_number(value: str) -> str:
+    return value.strip().rstrip(".")
+
+
+def _is_section_reference(reference: re.Match[str]) -> bool:
+    normalized_label = _normalize_evidence_text(reference.group("label"))
+    return normalized_label.startswith(("section", "sec", "sekc"))
+
+
+def _is_source_evidence_line(normalized_line: str) -> bool:
+    return re.search(r"(?<!\w)(?:source|zdroj)(?!\w)", normalized_line) is not None
+
+
+def _reference_identifies_citation(
+    text: str,
+    reference: re.Match[str],
+    citation: Citation,
+    *,
+    normalized_line: str,
+    line_end: int,
+) -> bool:
+    if _is_source_evidence_line(normalized_line):
+        line_start = text.rfind("\n", 0, reference.start()) + 1
+        segment_start = text.rfind(
+            ";",
+            line_start,
+            reference.start(),
+        ) + 1
+        preceding_commas = tuple(
+            match.start()
+            for match in re.finditer(
+                ",",
+                text[segment_start:reference.start()],
+            )
+        )
+        local_start = (
+            segment_start + preceding_commas[-2] + 1
+            if len(preceding_commas) >= 2
+            else segment_start
+        )
+        local_prefix = text[local_start:reference.start()]
+        if _contains_concrete_directive_identity(local_prefix):
+            return _line_identifies_citation(
+                _normalize_evidence_text(local_prefix),
+                citation,
+            )
+        segment_end = text.find(";", reference.end(), line_end)
+        if segment_end < 0:
+            segment_end = line_end
+        normalized_segment = _normalize_evidence_text(
+            text[segment_start:segment_end]
+        )
+        if _line_identifies_citation(normalized_segment, citation):
+            return True
+    suffix_end = _reference_suffix_end(text, reference, line_end=line_end)
+    normalized_suffix = _normalize_evidence_text(
+        text[reference.end() : suffix_end]
+    )
+    if _line_identifies_citation(normalized_suffix, citation):
+        return True
+    prefix_start = _reference_prefix_start(text, reference)
+    normalized_prefix = _normalize_evidence_text(
+        text[prefix_start:reference.start()]
+    )
+    return _line_identifies_citation(normalized_prefix, citation)
+
+
+def _select_explicit_section_citations(
     citations: tuple[Citation, ...],
     *,
     assistant_text: str,
     directive_ids: tuple[str, ...],
 ) -> tuple[Citation, ...]:
-    normalized_text = _normalize_evidence_text(assistant_text)
+    selected: list[Citation] = []
+    selected_keys: set[tuple[str | None, str | None]] = set()
+    allowed_directive_ids = set(directive_ids)
+    for reference in _SECTION_REFERENCE.finditer(assistant_text):
+        line_start = assistant_text.rfind("\n", 0, reference.start()) + 1
+        line_end = assistant_text.find("\n", reference.end())
+        if line_end < 0:
+            line_end = len(assistant_text)
+        normalized_line = _normalize_evidence_text(
+            assistant_text[line_start:line_end]
+        )
+        is_section_label = _is_section_reference(reference)
+        for number_match in _SECTION_NUMBER.finditer(reference.group("values")):
+            section_number = _normalize_section_number(number_match.group())
+            candidates = [
+                citation
+                for citation in citations
+                if (
+                    citation.directive_id in allowed_directive_ids
+                    and citation.section_number
+                    and _normalize_section_number(citation.section_number)
+                    == section_number
+                )
+            ]
+            if not candidates:
+                continue
+            identified = [
+                citation
+                for citation in candidates
+                if _reference_identifies_citation(
+                    assistant_text,
+                    reference,
+                    citation,
+                    normalized_line=normalized_line,
+                    line_end=line_end,
+                )
+            ]
+            identified = _most_specific_identified_citations(
+                identified,
+                normalized_line=normalized_line,
+            )
+            candidate_directive_ids = {
+                citation.directive_id for citation in candidates
+            }
+            conflicting_directive_identity = any(
+                citation.directive_id not in allowed_directive_ids
+                and _line_contains_directive_id(normalized_line, citation)
+                for citation in citations
+            )
+            has_following_identity_hint = _reference_has_following_identity_hint(
+                assistant_text,
+                reference,
+                line_end=line_end,
+            )
+            has_preceding_identity_hint = _reference_has_preceding_identity_hint(
+                assistant_text,
+                reference,
+            )
+            if identified:
+                candidates = identified
+            elif not (
+                is_section_label
+                and len(allowed_directive_ids) == 1
+                and len(candidate_directive_ids) == 1
+                and not conflicting_directive_identity
+                and not has_following_identity_hint
+                and not has_preceding_identity_hint
+            ):
+                continue
+            candidates.sort(key=_citation_selection_priority)
+            citation = candidates[0]
+            key = (citation.directive_id, citation.section_id)
+            if key in selected_keys:
+                continue
+            selected_keys.add(key)
+            selected.append(citation)
+    return tuple(selected)
+
+
+def _reference_has_following_identity_hint(
+    text: str,
+    reference: re.Match[str],
+    *,
+    line_end: int,
+) -> bool:
+    suffix_end = _reference_suffix_end(text, reference, line_end=line_end)
+    suffix = text[reference.end() : suffix_end].lstrip()
+    identity_suffix = suffix.split("[", 1)[0].strip()
+    normalized_suffix = _normalize_evidence_text(suffix)
+    has_identity_cue = re.match(
+        (
+            r"^(?:of|from|under|in|dle|podle|"
+            r"directive|policy|směrnice|smernice|předpisu|predpisu)(?!\w)"
+        ),
+        normalized_suffix,
+    ) is not None
+    follows_punctuation = suffix.startswith(("(", ","))
+    if not has_identity_cue and not follows_punctuation:
+        candidate = re.match(r"[^\s,;:()]+", identity_suffix)
+        return bool(
+            candidate
+            and _contains_concrete_directive_identity(candidate.group())
+        )
+    if follows_punctuation:
+        suffix = suffix[1:].lstrip()
+        candidate = re.match(r"[^\s,;:()]+", suffix)
+        return bool(
+            candidate
+            and _contains_concrete_directive_identity(candidate.group())
+        )
+    return _contains_concrete_directive_identity(identity_suffix)
+
+
+def _reference_suffix_end(
+    text: str,
+    reference: re.Match[str],
+    *,
+    line_end: int,
+) -> int:
+    suffix = text[reference.end() : line_end]
+    boundary = re.search(r"(?:[.!?]\s+|;)", suffix)
+    next_reference = _SECTION_REFERENCE.search(
+        text,
+        reference.end(),
+        line_end,
+    )
+    candidates = [
+        position
+        for position in (
+            reference.end() + boundary.start() if boundary else None,
+            next_reference.start() if next_reference else None,
+        )
+        if position is not None
+    ]
+    return min(candidates, default=line_end)
+
+
+def _reference_has_preceding_identity_hint(
+    text: str,
+    reference: re.Match[str],
+) -> bool:
+    prefix_start = _reference_prefix_start(text, reference)
+    return _contains_concrete_directive_identity(
+        text[prefix_start:reference.start()]
+    )
+
+
+def _reference_prefix_start(
+    text: str,
+    reference: re.Match[str],
+) -> int:
+    reference_start = reference.start()
+    prefix_start = max(
+        text.rfind(";", 0, reference_start) + 1,
+        text.rfind("\n", 0, reference_start) + 1,
+    )
+    prefix = text[prefix_start:reference_start]
+    boundaries = tuple(
+        re.finditer(
+            r"(?:[.!?]\s+|(?<![\w/._-])(?:and|or|a|nebo|či)(?![\w/._-])\s+)",
+            prefix,
+            re.IGNORECASE,
+        )
+    )
+    if boundaries:
+        prefix_start += boundaries[-1].end()
+    return prefix_start
+
+
+def _contains_concrete_directive_identity(value: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", value)
+    if re.search(
+        r"(?<!\w)[A-Z][^\W\d_]+(?:\s+[A-Z][^\W_]*)+(?!\w)",
+        normalized,
+    ):
+        return True
+    for match in re.finditer(
+        r"(?<!\w)[^\W_]+(?:[/._-][^\W_]+)*(?!\w)",
+        normalized,
+    ):
+        token = match.group()
+        try:
+            normalize_directive_id(token)
+        except (TypeError, ValueError):
+            continue
+        if (
+            any(char.isdigit() or char in "/._-" for char in token)
+            or (len(token) >= 2 and token.isupper())
+        ):
+            return True
+    return False
+
+
+def _citation_selection_priority(citation: Citation) -> tuple[int, str]:
+    strategy_priority = {
+        "section_batch": 0,
+        "focused": 1,
+        "discovery": 2,
+    }
+    return (
+        strategy_priority.get(citation.retrieval_strategy or "", 3),
+        citation.ref_id,
+    )
+
+
+def _merge_citation_groups(
+    *groups: tuple[Citation, ...],
+) -> tuple[Citation, ...]:
+    selected: list[Citation] = []
+    selected_keys: set[tuple[str, str | None, str | None]] = set()
+    for group in groups:
+        for citation in group:
+            key = (
+                citation.ref_id,
+                citation.directive_version_id,
+                citation.section_id,
+            )
+            if key in selected_keys:
+                continue
+            selected_keys.add(key)
+            selected.append(citation)
+    return tuple(selected)
+
+
+def _to_document_citation(
+    citation: Citation,
+    *,
+    preserve_ref_id: bool = False,
+) -> Citation:
+    return replace(
+        citation,
+        ref_id=(
+            citation.ref_id
+            if preserve_ref_id
+            else (
+                citation.directive_version_id
+                or citation.directive_id
+                or citation.ref_id
+            )
+        ),
+        section_id=None,
+        section_number=None,
+        section_title=None,
+        page_from=None,
+        page_to=None,
+        citation_scope="document",
+    )
+
+
+def _select_exact_marker_citations(
+    exact_mentions: list[tuple[int, int, Citation]],
+    *,
+    available_citations: tuple[Citation, ...],
+    assistant_text: str,
+) -> tuple[Citation, ...]:
+    selected: list[Citation] = []
+    rejected_count = 0
+    for marker_position, _, citation in exact_mentions:
+        context = _local_marker_context(assistant_text, marker_position)
+        referenced_sections = _explicit_section_numbers(
+            context,
+            citation=citation,
+        )
+        conflicting_identity = _context_identifies_other_directive(
+            context,
+            citation=citation,
+            available_citations=available_citations,
+        )
+        if not conflicting_identity and (
+            not referenced_sections
+            or (
+                citation.section_number
+                and _normalize_section_number(citation.section_number)
+                in referenced_sections
+            )
+        ):
+            selected.append(citation)
+            continue
+
+        directive_id = citation.directive_id
+        rejected_count += 1
+        if directive_id:
+            selected.append(
+                _to_document_citation(
+                    citation,
+                    preserve_ref_id=True,
+                )
+            )
+
+    if rejected_count:
+        logger.warning(
+            "Directive citation markers rejected because local section labels "
+            "do not match citation metadata rejected_marker_count=%d",
+            rejected_count,
+        )
+    merged = _merge_citation_groups(tuple(selected))
+    return tuple(
+        citation
+        for citation in merged
+        if citation.citation_scope == "document"
+    ) + tuple(
+        citation
+        for citation in merged
+        if citation.citation_scope != "document"
+    )
+
+
+def _context_identifies_other_directive(
+    text: str,
+    *,
+    citation: Citation,
+    available_citations: tuple[Citation, ...],
+) -> bool:
+    matching_identity_found = False
+    conflicting_identity_found = False
+    for reference in _SECTION_REFERENCE.finditer(text):
+        if citation.section_number and (
+            _normalize_section_number(citation.section_number)
+            not in {
+                _normalize_section_number(number)
+                for number in _SECTION_NUMBER.findall(
+                    reference.group("values")
+                )
+            }
+        ):
+            continue
+        line_end = text.find("\n", reference.end())
+        if line_end < 0:
+            line_end = len(text)
+        line_start = text.rfind("\n", 0, reference.start()) + 1
+        normalized_line = _normalize_evidence_text(text[line_start:line_end])
+        identified_candidates = _most_specific_identified_citations(
+            [
+                candidate
+                for candidate in (citation, *available_citations)
+                if _reference_identifies_citation(
+                    text,
+                    reference,
+                    candidate,
+                    normalized_line=normalized_line,
+                    line_end=line_end,
+                )
+            ],
+            normalized_line=normalized_line,
+        )
+        if citation in identified_candidates:
+            matching_identity_found = True
+            continue
+        if identified_candidates:
+            conflicting_identity_found = True
+            continue
+        if (
+            (
+                _reference_has_following_identity_hint(
+                    text,
+                    reference,
+                    line_end=line_end,
+                )
+                or _reference_has_preceding_identity_hint(
+                    text,
+                    reference,
+                )
+            )
+        ):
+            conflicting_identity_found = True
+            continue
+    return conflicting_identity_found and not matching_identity_found
+
+
+def _local_marker_context(text: str, marker_position: int) -> str:
+    line_start = text.rfind("\n", 0, marker_position) + 1
+    context = text[line_start:marker_position]
+    original_context = context
+    source_line = _is_source_evidence_line(
+        _normalize_evidence_text(context)
+    )
+    boundaries = tuple(
+        re.finditer(
+            (
+                r"(?:(?<!čl)(?<!cl)(?<!art)(?<!sec)"
+                r"(?<!no)(?<!kap)\.\s+"
+                r"|[!?]\s+|;\s+)"
+            ),
+            context,
+            re.IGNORECASE,
+        )
+    )
+    if boundaries:
+        boundary = boundaries[-1]
+        context = context[boundary.end() :]
+        if not context.strip():
+            previous_end = boundaries[-2].end() if len(boundaries) >= 2 else 0
+            context = original_context[previous_end:boundary.start()]
+        if source_line and boundary.group().lstrip().startswith(";"):
+            context = f"Source: {context}"
+    if source_line:
+        references = tuple(_SECTION_REFERENCE.finditer(context))
+        if references:
+            reference_start = references[-1].start()
+            preceding_commas = tuple(
+                match.start()
+                for match in re.finditer(",", context[:reference_start])
+            )
+            if len(preceding_commas) >= 2:
+                context = f"Source: {context[preceding_commas[-2] + 1:]}"
+    return context
+
+
+def _filter_citations_by_section_labels(
+    citations: tuple[Citation, ...],
+    *,
+    assistant_text: str,
+) -> tuple[Citation, ...]:
+    selected: list[Citation] = []
+    rejected_count = 0
+    for citation in citations:
+        if citation.citation_scope == "document":
+            selected.append(citation)
+            continue
+        referenced_sections = _explicit_section_numbers(
+            assistant_text,
+            citation=citation,
+        )
+        conflicting_identity = _context_identifies_other_directive(
+            assistant_text,
+            citation=citation,
+            available_citations=citations,
+        )
+        if (
+            conflicting_identity
+            or (
+                referenced_sections
+                and (
+                    not citation.section_number
+                    or _normalize_section_number(citation.section_number)
+                    not in referenced_sections
+                )
+            )
+        ):
+            rejected_count += 1
+            continue
+        selected.append(citation)
+    if rejected_count:
+        logger.warning(
+            "Directive citations rejected because answer section labels "
+            "do not match citation metadata rejected_citation_count=%d "
+            "selected_citation_count=%d",
+            rejected_count,
+            len(selected),
+        )
+    return tuple(selected)
+
+
+def _select_mandated_directive_citations(
+    citations: tuple[Citation, ...],
+    *,
+    directive_ids: tuple[str, ...],
+) -> tuple[Citation, ...]:
     selected: list[Citation] = []
     for directive_id in directive_ids:
         candidates = [
@@ -989,25 +1599,6 @@ def _select_mandated_directive_citations(
             selected.append(source_candidates[0])
             continue
 
-        title_matches = [
-            (position, index, citation)
-            for index, citation in enumerate(source_candidates)
-            if (
-                position := _section_evidence_position(
-                    normalized_text,
-                    assistant_text,
-                    citation,
-                )
-            )
-            is not None
-        ]
-        if title_matches:
-            title_matches.sort(key=lambda item: (item[0], item[1]))
-            selected.extend(
-                citation for _, _, citation in title_matches
-            )
-            continue
-
         representative = next(
             (
                 citation
@@ -1016,109 +1607,69 @@ def _select_mandated_directive_citations(
             ),
             candidates[0],
         )
-        selected.append(
-            replace(
-                representative,
-                ref_id=(
-                    representative.directive_version_id
-                    or representative.directive_id
-                    or representative.ref_id
-                ),
-                section_id=None,
-                section_number=None,
-                section_title=None,
-                page_from=None,
-                page_to=None,
-                citation_scope="document",
-            )
-        )
+        selected.append(_to_document_citation(representative))
     return tuple(selected)
-
-
-def _section_evidence_position(
-    normalized_text: str,
-    assistant_text: str,
-    citation: Citation,
-) -> int | None:
-    section_title = citation.section_title
-    if not section_title:
-        title_position = None
-    else:
-        normalized_title = _normalize_evidence_text(section_title)
-        title_pattern = rf"(?<!\w){re.escape(normalized_title)}(?!\w)"
-        if len(normalized_title.split()) > 1:
-            match = re.search(title_pattern, normalized_text)
-            title_position = match.start() if match else None
-        else:
-            title_position = _single_word_title_position(
-                normalized_text,
-                title_pattern,
-                citation.section_number,
-            )
-    if title_position is not None:
-        return title_position
-    return _section_number_position(assistant_text, citation)
-
-
-def _single_word_title_position(
-    normalized_text: str,
-    title_pattern: str,
-    section_number: str | None,
-) -> int | None:
-    if not section_number:
-        return None
-    normalized_number = _normalize_evidence_text(section_number)
-    number_pattern = rf"(?<!\w){re.escape(normalized_number)}(?!\w)"
-    match = re.search(
-        (
-            rf"(?:{number_pattern}.{{0,48}}{title_pattern}"
-            rf"|{title_pattern}.{{0,48}}{number_pattern})"
-        ),
-        normalized_text,
-    )
-    return match.start() if match else None
-
-
-def _section_number_position(
-    assistant_text: str,
-    citation: Citation,
-) -> int | None:
-    if not citation.section_number:
-        return None
-    normalized_number = _normalize_evidence_text(citation.section_number)
-    number_pattern = rf"(?<!\w){re.escape(normalized_number)}(?!\w)"
-    section_pattern = (
-        rf"(?<!\w)(?:section|article|chapter|sec|art|čl|cl|kapitola|kap)"
-        rf"(?:\s+(?:number|no))?\s+{number_pattern}"
-    )
-    offset = 0
-    for line in assistant_text.splitlines():
-        normalized_line = _normalize_evidence_text(line)
-        match = re.search(section_pattern, normalized_line)
-        if match and _line_identifies_citation(normalized_line, citation):
-            return offset + match.start()
-        offset += len(normalized_line) + 1
-    return None
 
 
 def _line_identifies_citation(
     normalized_line: str,
     citation: Citation,
 ) -> bool:
-    if citation.directive_id:
-        normalized_id = _normalize_evidence_text(citation.directive_id)
-        if normalized_id and _contains_normalized_phrase(
-            normalized_line,
-            normalized_id,
-        ):
-            return True
+    if _line_contains_directive_id(normalized_line, citation):
+        return True
     source_tokens = _normalize_evidence_text(citation.source_name).split()
+    phrase_length = min(3, len(source_tokens))
+    if not phrase_length:
+        return False
     return any(
         _contains_normalized_phrase(
             normalized_line,
-            " ".join(source_tokens[index : index + 3]),
+            " ".join(source_tokens[index : index + phrase_length]),
         )
-        for index in range(max(0, len(source_tokens) - 2))
+        for index in range(len(source_tokens) - phrase_length + 1)
+    )
+
+
+def _most_specific_identified_citations(
+    citations: list[Citation],
+    *,
+    normalized_line: str,
+) -> list[Citation]:
+    if len(citations) <= 1:
+        return citations
+    scores = {
+        id(citation): max(
+            (
+                len(identity)
+                for identity in (
+                    _normalize_evidence_text(citation.directive_id or ""),
+                    _normalize_evidence_text(citation.source_name),
+                )
+                if identity
+                and _contains_normalized_phrase(normalized_line, identity)
+            ),
+            default=0,
+        )
+        for citation in citations
+    }
+    best_score = max(scores.values())
+    return [
+        citation
+        for citation in citations
+        if scores[id(citation)] == best_score
+    ]
+
+
+def _line_contains_directive_id(
+    normalized_line: str,
+    citation: Citation,
+) -> bool:
+    if not citation.directive_id:
+        return False
+    normalized_id = _normalize_evidence_text(citation.directive_id)
+    return bool(
+        normalized_id
+        and _contains_normalized_phrase(normalized_line, normalized_id)
     )
 
 
