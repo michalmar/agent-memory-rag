@@ -920,7 +920,7 @@ async def test_validate_output_has_finalize_guard_shape() -> None:
         processing_hash=metadata.processing_hash,
         processing_version="directive-v2-czech-layout",
         search_index="directive-chunks-v2",
-        azure_tenant_id="a7b1484c-f66a-496a-b1cf-35631a50396c",
+        azure_tenant_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         mandate_csv=object(),
         source_kind="local",
         source_storage_account="source",

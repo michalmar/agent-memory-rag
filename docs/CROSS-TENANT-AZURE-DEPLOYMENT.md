@@ -95,13 +95,13 @@ state key. Do not reuse any of these files from the source environment:
 - `infra/terraform.tfvars`
 - `infra/tfplan` or any other saved plan
 
-The checked-in `infra/tfplan` is not a deployment input for the new tenant.
+Saved plans are Git-ignored and are never a deployment input for a new tenant.
 Always create and review a new plan.
 
-`.azure/deployment-plan.md` is a historical source-environment record and
-contains source subscription and image values. Do not treat it as target
-configuration or replay its commands without replacing and revalidating every
-environment-specific value.
+A local `.azure/deployment-plan.md`, if present, is a historical
+source-environment record and contains source subscription and image values. It
+is Git-ignored. Do not treat it as target configuration or replay its commands
+without replacing and revalidating every environment-specific value.
 
 ### 3.2 Decide how the directive model is created
 

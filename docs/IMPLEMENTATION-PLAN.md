@@ -152,7 +152,7 @@ strict application tools and owner-scoped application data.
 - [x] Deployed Foundry Basic Setup, the Hosted MAF agent, and Prompt Agent version 3.
 - [x] Verified the Prompt definition contains only Foundry IQ
   `knowledge_base_retrieve`.
-- [x] Deployed backend revision `ca-agmem-backend--0000020`.
+- [x] Deployed backend revision `ca-<name_prefix>-backend--<revision>`.
 - [x] Verified Prompt and Hosted Foundry IQ grounding with citations.
 - [x] Verified Prompt requests cannot invoke application tools.
 - [x] Verified Hosted order lookup through the app-role-protected gateway.
@@ -256,26 +256,26 @@ strict application tools and owner-scoped application data.
   `AGENT_365`, `DEFENDER_FOR_AI`, and `AUDIT_FOR_AGENTS` service plans report
   successful provisioning.
 - [x] Verified the published package is unblocked, allowed tenant-wide, backed by
-  Agent Identity `a15ba753-8d64-45a3-a34c-5fb507ce34a8`, and supports both Teams
+  Agent Identity `bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb`, and supports both Teams
   and Copilot.
 - [x] Retested `ORD-003` through the published channel. Trace
-  `0d83c8cfa56a5bc8d8d932ce4177d042` called `get_order_status` and returned
+  `<trace-id>` called `get_order_status` and returned
   `delivered`, `Delivered Jan 20, 2026`.
 - [x] Retested Foundry IQ through the published channel. Trace
-  `d383ced605d6bd23a0112584a023bf70` called `knowledge_base_retrieve`, retrieved
+  `<trace-id>` called `knowledge_base_retrieve`, retrieved
   three policy documents, and returned the grounded 30-day policy.
 - [x] Proved the similarly named `agent-framework-agent-foundry-` package was a
-  separate Hosted Agent in `rg-ai/demo-swe/demo-swe-prj`, not an earlier version
+  separate Hosted Agent in a different, unrelated Foundry project, not an earlier version
   of `customer-support-maf-hosted`.
-- [x] Blocked legacy package `T_8f4394fb-7025-5b06-1413-b93e8d5e46b8`, force
+- [x] Blocked legacy package `T_eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee`, force
   deleted Hosted Agent `agent-framework-agent-foundry-skills-responses` and
   versions 1-3, and deleted generated Bot Service
-  `agent-framework-agent-foun51016`.
+  `agent-framework-agent-foundry-<suffix>`.
 - [x] Verified the platform removed dedicated Agent Identity
-  `4c413efd-d9f4-4619-b27c-d86b3b05193f`, blueprint
-  `6e0057e9-ae01-4b2f-83a3-5c0241e93ae8`, and residual RBAC. Agent Registry
+  `cccccccc-cccc-4ccc-8ccc-cccccccccccc`, blueprint
+  `dddddddd-dddd-4ddd-8ddd-dddddddddddd`, and residual RBAC. Agent Registry
   reconciliation removed the blocked package.
-- [x] Preserved the shared `demo-swe` project and its four unrelated agents.
+- [x] Preserved the shared Foundry project and its four unrelated agents.
   `customer-support-maf-hosted` remains enabled on active version 7, and a
   post-cleanup `ORD-003` request returned the authoritative delivered result.
 - [x] Extracted shared Hosted identity, observability middleware, gateway

@@ -169,7 +169,6 @@ Files:
 
 - `README.md`
 - `IDEAS.md`
-- `.azure/deployment-plan.md`
 - `docs/PRD-Solution-Challenges-1-5.md`
 - Directive and support dependency tests
 

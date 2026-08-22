@@ -1,0 +1,1122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Interactive walkthrough of the Directive Assistant grounding and citation flow.">
+  <title>Directive Assistant - Grounding Flow</title>
+  <script>
+    (() => {
+      const param = new URLSearchParams(window.location.search).get("scoutTheme");
+      const theme =
+        param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      document.documentElement.setAttribute("data-theme", theme);
+    })();
+  </script>
+  <style>
+    :root {
+      color-scheme: light;
+      --cp-bg: #f7f4ef;
+      --cp-bg-elevated: #fcfbf8;
+      --cp-surface: #ffffff;
+      --cp-surface-soft: #f5f5f5;
+      --cp-border: #dedede;
+      --cp-border-strong: #919191;
+      --cp-text: #242424;
+      --cp-text-muted: #5c5c5c;
+      --cp-text-soft: #6f6f6f;
+      --cp-accent: #b11f4b;
+      --cp-accent-hover: #9a1a41;
+      --cp-accent-soft: rgba(177, 31, 75, 0.08);
+      --cp-accent-fg: #ffffff;
+      --cp-success: #16a34a;
+      --cp-danger: #dc2626;
+      --cp-warning: #f59e0b;
+      --cp-link: #0078d4;
+      --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12);
+      --cp-overlay: rgba(255, 255, 255, 0.8);
+      --cp-panel: rgba(255, 255, 255, 0.86);
+      --cp-panel-strong: rgba(255, 255, 255, 0.96);
+      --cp-sheen: rgba(255, 255, 255, 0.55);
+      --cp-highlight: rgba(177, 31, 75, 0.12);
+    }
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --cp-bg: #3d3b3a;
+      --cp-bg-elevated: #343231;
+      --cp-surface: #292929;
+      --cp-surface-soft: #2e2e2e;
+      --cp-border: #474747;
+      --cp-border-strong: #5f5f5f;
+      --cp-text: #dedede;
+      --cp-text-muted: #919191;
+      --cp-text-soft: #b0b0b0;
+      --cp-accent: #fd8ea1;
+      --cp-accent-hover: #fb7b91;
+      --cp-accent-soft: rgba(253, 142, 161, 0.14);
+      --cp-accent-fg: #1a1a1a;
+      --cp-success: #4ade80;
+      --cp-danger: #f87171;
+      --cp-warning: #fbbf24;
+      --cp-link: #4da6ff;
+      --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+      --cp-overlay: rgba(41, 41, 41, 0.88);
+      --cp-panel: rgba(41, 41, 41, 0.72);
+      --cp-panel-strong: rgba(41, 41, 41, 0.96);
+      --cp-sheen: rgba(255, 255, 255, 0.04);
+      --cp-highlight: rgba(253, 142, 161, 0.12);
+    }
+    * { box-sizing: border-box; }
+    html, body { min-width: 320px; min-height: 100%; }
+    body {
+      margin: 0;
+      background: var(--cp-bg);
+      color: var(--cp-text);
+      font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+      line-height: 1.45;
+    }
+    button, input, select { color: inherit; font: inherit; }
+    button, input, select {
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-surface);
+    }
+    button { min-height: 36px; padding: 7px 11px; cursor: pointer; }
+    button:hover { border-color: var(--cp-border-strong); background: var(--cp-surface-soft); }
+    button[aria-pressed="true"] { border-color: var(--cp-accent); background: var(--cp-accent-soft); }
+    :focus-visible { outline: 3px solid var(--cp-accent); outline-offset: 2px; }
+    code, .mono { font-family: Consolas, "Courier New", Courier, monospace; }
+    a { color: var(--cp-link); }
+    .shell { width: min(1900px, 100%); margin: 0 auto; padding: 12px; }
+    .card {
+      border: 1px solid var(--cp-border);
+      border-radius: 16px;
+      background: var(--cp-surface);
+      box-shadow: 0 0 2px var(--cp-border), 0 1px 2px var(--cp-border);
+    }
+    header {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 18px;
+    }
+    .eyebrow {
+      margin: 0 0 2px;
+      color: var(--cp-accent);
+      font-size: .72rem;
+      font-weight: 800;
+      letter-spacing: .09em;
+      text-transform: uppercase;
+    }
+    h1 { margin: 0; font-size: clamp(1.25rem, 2.3vw, 2rem); line-height: 1.15; }
+    h2, h3, p { margin-top: 0; }
+    .snapshot { color: var(--cp-text-muted); font-size: .78rem; text-align: right; }
+    .theme-button { white-space: nowrap; }
+    .summary {
+      display: grid;
+      grid-template-columns: minmax(280px, 1.6fr) repeat(4, minmax(120px, .5fr));
+      gap: 10px;
+      margin: 10px 0;
+    }
+    .summary > div { padding: 12px 14px; }
+    .summary .lead { background: var(--cp-bg-elevated); }
+    .summary strong { display: block; font-size: 1.25rem; }
+    .summary small { color: var(--cp-text-muted); }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: end;
+      padding: 10px;
+      margin-bottom: 10px;
+    }
+    .control { display: grid; gap: 4px; min-width: 130px; }
+    .control label { color: var(--cp-text-muted); font-size: .72rem; font-weight: 700; }
+    select, input { min-height: 36px; padding: 7px 9px; }
+    #search { min-width: 250px; }
+    .toolbar-spacer { flex: 1; }
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+      gap: 10px;
+      min-height: 680px;
+    }
+    .diagram-card { position: relative; min-width: 0; overflow: hidden; }
+    .diagram-heading {
+      display: flex;
+      gap: 12px;
+      justify-content: space-between;
+      align-items: start;
+      padding: 12px 14px 8px;
+      border-bottom: 1px solid var(--cp-border);
+    }
+    .diagram-heading h2 { margin-bottom: 2px; font-size: 1.05rem; }
+    .diagram-heading p { margin: 0; color: var(--cp-text-muted); font-size: .82rem; }
+    .canvas {
+      position: relative;
+      height: 620px;
+      overflow: hidden;
+      cursor: grab;
+      background: var(--cp-bg-elevated);
+      touch-action: none;
+    }
+    .canvas.dragging { cursor: grabbing; }
+    .stage {
+      position: absolute;
+      width: 1400px;
+      height: 820px;
+      transform-origin: 0 0;
+    }
+    .lanes, .nodes, .edges { position: absolute; inset: 0; }
+    .lane {
+      position: absolute;
+      border: 1px dashed var(--cp-border-strong);
+      border-radius: 16px;
+      background: var(--cp-sheen);
+      pointer-events: none;
+    }
+    .lane h3 { margin: 0; padding: 8px 10px; font-size: .72rem; letter-spacing: .04em; text-transform: uppercase; }
+    .lane p { margin: 0; padding: 0 10px; color: var(--cp-text-muted); font-size: .68rem; }
+    .node {
+      position: absolute;
+      width: 190px;
+      min-height: 92px;
+      padding: 11px;
+      border: 1px solid var(--cp-border-strong);
+      border-top: 4px solid var(--cp-accent);
+      border-radius: 0.625rem;
+      background: var(--cp-surface);
+      box-shadow: 0 0 2px var(--cp-border), 0 1px 2px var(--cp-border);
+      text-align: left;
+      z-index: 3;
+    }
+    .node.external { border-style: dashed; }
+    .node.data { border-top-style: double; }
+    .node.selected { box-shadow: 0 0 0 4px var(--cp-highlight); border-color: var(--cp-accent); }
+    .node.dim, .flow.dim { opacity: .16; }
+    .node.filtered { display: none; }
+    .node .kind {
+      color: var(--cp-text-muted);
+      font-family: Consolas, "Courier New", Courier, monospace;
+      font-size: .63rem;
+      text-transform: uppercase;
+    }
+    .node strong { display: block; margin: 3px 0; font-size: .86rem; }
+    .node span:last-child { display: block; color: var(--cp-text-muted); font-size: .7rem; line-height: 1.3; }
+    .confidence {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-top: 7px;
+      font-size: .62rem;
+      color: var(--cp-text-soft);
+    }
+    .confidence::before { content: "●"; color: var(--cp-success); }
+    .confidence.inferred::before { color: var(--cp-warning); }
+    .edges { overflow: visible; pointer-events: none; }
+    .flow { pointer-events: stroke; cursor: pointer; fill: none; stroke: var(--cp-border-strong); stroke-width: 2.2; vector-effect: non-scaling-stroke; }
+    .flow.stream { stroke-dasharray: 9 4; stroke: var(--cp-accent); }
+    .flow.async { stroke-dasharray: 2 5; }
+    .flow.batch { stroke-dasharray: 12 4 2 4; }
+    .flow.primary { stroke-width: 3.2; }
+    .flow.selected { stroke: var(--cp-accent); stroke-width: 5; }
+    .flow-hit { fill: none; stroke: var(--cp-overlay); stroke-width: 14; opacity: 0; pointer-events: stroke; cursor: pointer; }
+    .flow-label {
+      position: absolute;
+      z-index: 2;
+      max-width: 150px;
+      padding: 3px 5px;
+      border-radius: 0.625rem;
+      background: var(--cp-panel-strong);
+      color: var(--cp-text-muted);
+      font-size: .64rem;
+      text-align: center;
+      pointer-events: none;
+    }
+    .step {
+      display: inline-grid;
+      place-items: center;
+      width: 18px;
+      height: 18px;
+      margin-right: 3px;
+      border-radius: 50%;
+      background: var(--cp-accent);
+      color: var(--cp-accent-fg);
+      font-weight: 800;
+    }
+    .details {
+      padding: 14px;
+      overflow: auto;
+      max-height: 680px;
+    }
+    .details h2 { font-size: 1.08rem; margin-bottom: 4px; }
+    .details .type { color: var(--cp-accent); font-family: Consolas, "Courier New", Courier, monospace; font-size: .72rem; }
+    .details section { margin-top: 16px; }
+    .details h3 { margin-bottom: 6px; font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; }
+    .details ul, .details ol { margin: 0; padding-left: 20px; }
+    .details li { margin: 4px 0; font-size: .82rem; }
+    .details .empty { color: var(--cp-text-muted); }
+    .evidence-list { list-style: none; padding: 0 !important; }
+    .evidence-list li { padding: 7px; border: 1px solid var(--cp-border); border-radius: 0.625rem; }
+    .evidence-list code { display: block; word-break: break-word; }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      padding: 8px 12px;
+      border-top: 1px solid var(--cp-border);
+      color: var(--cp-text-muted);
+      font-size: .68rem;
+    }
+    .legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .line-sample { width: 28px; border-top: 3px solid var(--cp-border-strong); }
+    .line-sample.stream { border-top-style: dashed; border-color: var(--cp-accent); }
+    .line-sample.async { border-top-style: dotted; }
+    .journey {
+      margin-top: 10px;
+      padding: 14px;
+    }
+    .journey-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 8px;
+    }
+    .journey-step {
+      padding: 10px;
+      border-left: 3px solid var(--cp-accent);
+      background: var(--cp-bg-elevated);
+    }
+    .journey-step strong { display: block; font-size: .82rem; }
+    .journey-step span { color: var(--cp-text-muted); font-size: .72rem; }
+    .assumptions { margin-top: 10px; padding: 14px; }
+    .assumptions p { margin-bottom: 6px; color: var(--cp-text-muted); font-size: .8rem; }
+    .search-results {
+      position: absolute;
+      z-index: 20;
+      display: none;
+      width: min(460px, calc(100vw - 32px));
+      max-height: 260px;
+      overflow: auto;
+      padding: 6px;
+      border: 1px solid var(--cp-border);
+      border-radius: 0.625rem;
+      background: var(--cp-panel-strong);
+      box-shadow: var(--cp-shadow);
+    }
+    .search-results.open { display: grid; }
+    .search-results button { text-align: left; }
+    @media (max-width: 1000px) {
+      .summary { grid-template-columns: repeat(2, 1fr); }
+      .summary .lead { grid-column: 1 / -1; }
+      .workspace { grid-template-columns: 1fr; }
+      .details { max-height: none; }
+      .journey-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 620px) {
+      .shell { padding: 6px; }
+      header { align-items: start; }
+      .snapshot { display: none; }
+      .summary { grid-template-columns: 1fr 1fr; }
+      .toolbar { align-items: stretch; }
+      .control, #search { width: 100%; min-width: 0; }
+      .canvas { height: 520px; }
+      .journey-grid { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { scroll-behavior: auto !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="card">
+      <div>
+        <p class="eyebrow">Architecture explorer · AI execution</p>
+        <h1>Directive Assistant grounding flow</h1>
+      </div>
+      <div class="snapshot">
+        <div>Snapshot <code>9b96da8583fe</code> + working-tree citation changes</div>
+        <div>Generated 2026-08-22</div>
+      </div>
+      <button id="theme" class="theme-button" type="button" aria-label="Toggle theme">Theme</button>
+    </header>
+
+    <section class="summary" aria-label="Architecture summary">
+      <div class="card lead">
+        <strong>One controlled evidence loop</strong>
+        <small>The model plans retrieval, but the application gateway owns identity, current-version filtering, authoritative content access, citation reconciliation, streaming, and persistence.</small>
+      </div>
+      <div class="card"><strong>4</strong><small>Agent-facing directive tools</small></div>
+      <div class="card"><strong>3</strong><small>Evidence stores: Search, Cosmos, Blob</small></div>
+      <div class="card"><strong>SSE</strong><small>AG-UI response stream</small></div>
+      <div class="card"><strong>2</strong><small>Grounding gates: prompt + backend</small></div>
+    </section>
+
+    <section class="toolbar card" aria-label="Diagram controls">
+      <div class="control">
+        <label for="view">Architecture lens</label>
+        <select id="view"></select>
+      </div>
+      <div class="control">
+        <label for="search">Search components, tools, evidence</label>
+        <input id="search" type="search" placeholder="Try citation selector or search_directives">
+        <div id="search-results" class="search-results" role="listbox"></div>
+      </div>
+      <div class="control">
+        <label for="kind-filter">Component kind</label>
+        <select id="kind-filter"><option value="">All kinds</option></select>
+      </div>
+      <div class="control">
+        <label for="mode-filter">Flow mode</label>
+        <select id="mode-filter">
+          <option value="">All modes</option>
+          <option value="sync">Sync</option>
+          <option value="stream">Stream</option>
+          <option value="async">Async</option>
+          <option value="batch">Batch</option>
+        </select>
+      </div>
+      <div class="control">
+        <label for="trace">Dependency trace</label>
+        <select id="trace">
+          <option value="none">Off</option>
+          <option value="downstream">Downstream</option>
+          <option value="upstream">Upstream</option>
+          <option value="both">Both</option>
+        </select>
+      </div>
+      <div class="toolbar-spacer"></div>
+      <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+      <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+      <button id="fit" type="button">Fit</button>
+      <button id="reset" type="button">Reset</button>
+    </section>
+
+    <section class="workspace">
+      <article class="diagram-card card">
+        <div class="diagram-heading">
+          <div>
+            <h2 id="view-title"></h2>
+            <p id="view-description"></p>
+          </div>
+          <button id="clear-selection" type="button">Clear selection</button>
+        </div>
+        <div id="canvas" class="canvas" aria-label="Interactive architecture diagram">
+          <div id="stage" class="stage">
+            <div id="lanes" class="lanes"></div>
+            <svg id="edges" class="edges" width="1400" height="820" aria-label="Architecture flows"></svg>
+            <div id="labels"></div>
+            <div id="nodes" class="nodes"></div>
+          </div>
+        </div>
+        <div class="legend" aria-label="Legend">
+          <span><span class="line-sample"></span> synchronous</span>
+          <span><span class="line-sample stream"></span> stream</span>
+          <span><span class="line-sample async"></span> asynchronous</span>
+          <span>solid node = project-owned</span>
+          <span>dashed node = external/managed</span>
+          <span>● observed · <span class="mono">△ inferred</span></span>
+        </div>
+      </article>
+      <aside id="details" class="details card" aria-live="polite"></aside>
+    </section>
+
+    <section class="journey card">
+      <h2>Default journey: query to grounded response</h2>
+      <div id="journey" class="journey-grid"></div>
+    </section>
+
+    <section class="assumptions card">
+      <h2>Evidence and scope</h2>
+      <p><strong>Observed:</strong> runtime code, contracts, frontend behavior, tests, and Terraform support the components and flows shown. Select any node or arrow to inspect repository evidence.</p>
+      <p><strong>Snapshot caveat:</strong> the citation selector shown includes the current uncommitted grounding fix. Deployment topology is derived from repository IaC and may drift from a live environment.</p>
+      <p><strong>Important distinction:</strong> Azure AI Search is the discovery projection. Cosmos directive content is the runtime authority for exact section text; the backend is the authority for the final citation envelope sent to the UI.</p>
+    </section>
+  </main>
+
+  <script>
+    const evidence = (path, symbol, note) => ({ path, symbol, note });
+    const component = (id, name, kind, group, summary, extra = {}) => ({
+      id, name, kind, group, summary, confidence: "observed",
+      responsibilities: [], technologies: [], interfaces: [], dataOwned: [],
+      deployment: [], security: [], operations: [], evidence: [], ...extra
+    });
+    const flow = (id, from, to, label, mode, views, extra = {}) => ({
+      id, from, to, label, mode, views, purpose: label, data: [], trigger: "",
+      authentication: "", encryption: "", boundaryCrossings: [], failureBehavior: "",
+      confidence: "observed", importance: "primary", evidence: [], ...extra
+    });
+
+    const architecture = {
+      meta: {
+        project: "Agentic AI Memory - Directive Assistant",
+        summary: "Stateful Hosted MAF directive agent with backend-controlled retrieval and citations.",
+        generatedAt: "2026-08-22",
+        commit: "9b96da8583fe50631918cd836ddc5c913db0a293",
+        scope: "User query through grounded answer, citation rendering, and persistence",
+        repositoryUrl: "https://github.com/michalmar/agent-memory-rag",
+        caveats: ["Citation reconciliation reflects current working-tree changes."]
+      },
+      components: [
+        component("user", "Signed-in user", "actor", "experience", "Asks a question in a conversation locked to Directive Assistant.", {
+          interfaces: ["Browser UI"], security: ["Microsoft Entra delegated identity"],
+          evidence: [evidence("frontend/src/app.ts", "agent selection and chat submission", "Conversation agent type is selected and then immutable.")]
+        }),
+        component("browser", "Lit chat SPA", "client", "experience", "Posts the query and incrementally renders AG-UI events.", {
+          technologies: ["TypeScript", "Lit", "Vite"], interfaces: ["POST /chat", "text/event-stream"],
+          responsibilities: ["Acquire delegated auth headers", "Parse SSE frames", "Reduce AG-UI events", "Render answer, Documents, and Sources"],
+          security: ["Sanitized Markdown", "Exact ref_id citation resolution"],
+          evidence: [
+            evidence("frontend/src/client.ts", "AGUIClient.chat", "Posts message, conversation_id, and directive-rag agent_type; reads SSE frames."),
+            evidence("frontend/src/chat-event-reducer.ts", "reduceChatEvent", "Builds the streamed turn and treats final agent_citations as authoritative."),
+            evidence("frontend/src/components/chat-transcript.ts", "renderCitations", "Displays Documents and section-level Sources.")
+          ]
+        }),
+        component("edge", "Public frontend edge", "edge", "experience", "Serves the SPA and proxies API/SSE traffic to internal FastAPI.", {
+          interfaces: ["Public HTTPS", "Internal ACA HTTPS"], deployment: ["Azure Container Apps", "nginx"],
+          security: ["Separate delegated-user and app-only gateway routes"],
+          evidence: [evidence("README.md", "Current architecture", "Public frontend ACA proxies browser and Hosted Agent calls.")]
+        }),
+        component("entra", "Microsoft Entra ID", "identity", "trust", "Issues delegated browser tokens and app-only Hosted Agent gateway tokens.", {
+          confidence: "observed", interfaces: ["OAuth 2.0 / OIDC"], security: ["Token classes validated separately"],
+          evidence: [evidence("backend/agent_memory_backend/auth.py", "get_current_user / get_agent_caller", "Separate user and agent caller validation paths.")]
+        }),
+        component("fastapi", "FastAPI policy boundary", "service", "application", "Authenticates users, validates requests, owns chat and internal tool routes.", {
+          technologies: ["Python", "FastAPI"], interfaces: ["POST /chat", "POST /internal/agent-tools/{tool_name}", "POST /internal/agent-state/*"],
+          responsibilities: ["Authorization", "Runtime routing", "Tool policy", "Persistence", "Citation authority"],
+          deployment: ["Internal Azure Container App"],
+          security: ["Application UAMI for data-plane access", "Hosted Agent has no direct application-data roles"],
+          evidence: [
+            evidence("backend/agent_memory_backend/server.py", "chat / invoke_agent_tool", "Public chat and protected internal gateway endpoints."),
+            evidence("README.md", "FastAPI trust boundary", "Authentication, authorization, persistence, and tool-policy boundary.")
+          ]
+        }),
+        component("coordinator", "Conversation coordinator", "orchestrator", "application", "Creates or restores the immutable Directive Assistant runtime state.", {
+          responsibilities: ["Owner check", "Conversation lease", "State restoration/recovery", "Agent immutability"],
+          dataOwned: ["Application conversation ID", "Runtime descriptor", "Inner model conversation binding"],
+          evidence: [
+            evidence("backend/agent_memory_backend/conversation_coordinator.py", "ConversationCoordinator.prepare", "Creates/restores runtime state and rejects agent changes."),
+            evidence("backend/agent_memory_backend/chat_service.py", "ChatTurnService.create_response", "Acquires lease and starts SSE response.")
+          ]
+        }),
+        component("runtime", "Hosted runtime adapter", "adapter", "application", "Invokes the remote Hosted Agent and normalizes model/tool events.", {
+          technologies: ["Foundry Responses API", "Microsoft Agent Framework"],
+          responsibilities: ["Attach trusted user identity", "Stream text/tool events", "Track progress", "Enrich and reconcile citations"],
+          interfaces: ["Foundry project Agents API", "NormalizedAgentEvent stream"],
+          evidence: [
+            evidence("backend/agent_memory_backend/foundry_hosted_maf_runtime.py", "stream_turn", "Streams Hosted response events and progress."),
+            evidence("backend/agent_memory_backend/foundry_hosted_maf_runtime.py", "_enrich_directive_tool_events", "Collects tool citations and emits authoritative final citations.")
+          ]
+        }),
+        component("prompt", "Directive grounding contract", "guardrail", "agent", "Tells the model how to plan retrieval, obtain exact content, and cite claims.", {
+          responsibilities: ["Classify request", "Use Search for discovery", "Use exact content for normative claims", "Check mandates", "Emit [ref_id] markers"],
+          security: ["Forbids hidden reasoning, raw tool arguments, storage locations, and tokens"],
+          evidence: [evidence("agent_contracts/directive_rag.txt", "Directive Assistant instructions", "Grounding, coverage, citation, and safety rules.")]
+        }),
+        component("agent", "Directive Hosted MAF agent", "ai-runtime", "agent", "Uses the model and four gateway-backed tools to build the answer.", {
+          technologies: ["FoundryChatClient", "Agent", "GPT-5.6 deployment"],
+          interfaces: ["get_directive", "search_directives", "get_directive_content", "get_user_directive_mandates"],
+          responsibilities: ["Retrieval planning", "Tool loop", "Answer drafting", "Inline [ref_id] placement"],
+          deployment: ["Foundry Hosted Agent", "store=true stateful continuation"],
+          security: ["No direct Search, Cosmos, or Blob roles"],
+          evidence: [
+            evidence("agents/directive-rag-maf/src/directive-rag-maf/main.py", "build_agent", "Builds stateful Hosted Agent with rendered contract and directive tools."),
+            evidence("agents/directive-rag-maf/src/directive-rag-maf/gateway_tools.py", "DIRECTIVE_TOOLS", "Defines the four agent-facing tools.")
+          ]
+        }),
+        component("gateway", "Authenticated tool gateway", "gateway", "application", "Binds each agent tool call to the stored user/session/runtime state.", {
+          technologies: ["HTTP", "Agentic identity token", "RequestContext"],
+          interfaces: ["/internal/agent-tools/*", "/internal/agent-state/*"],
+          responsibilities: ["Validate app-only caller", "Validate session binding", "Allowlist tools by agent type", "Manage turn lease/recovery"],
+          failureBehavior: "Rejects missing, stale, foreign, or conflicting state with an explicit error.",
+          evidence: [
+            evidence("maf_hosting/gateway.py", "invoke_gateway_tool", "Posts RequestContext user/session/call IDs using app-only auth."),
+            evidence("backend/agent_memory_backend/agent_tool_gateway.py", "dispatch_agent_tool / resolve_agent_state", "Enforces binding, tool allowlist, and state transitions.")
+          ]
+        }),
+        component("tools", "Directive tool executor", "domain-service", "application", "Validates tool arguments and queries backend-owned repositories.", {
+          responsibilities: ["Bound timeouts and result size", "Return typed data plus citation metadata", "Enforce current publication"],
+          interfaces: ["DirectiveToolExecutor.execute_envelope"],
+          operations: ["directive.tool telemetry", "citation counts and result token estimates"],
+          evidence: [evidence("backend/agent_memory_backend/directive_tools.py", "DirectiveToolExecutor", "Dispatches the four supported tools and returns ToolResultEnvelope.")]
+        }),
+        component("search", "Azure AI Search projection", "data", "knowledge", "Finds candidate sections with direct hybrid retrieval.", {
+          technologies: ["Azure AI Search", "semantic search", "text vectorization", "Reciprocal Rank Fusion"],
+          interfaces: ["Search docs API"], dataOwned: ["Derived index of current published directive chunks"],
+          responsibilities: ["Keyword + vector retrieval", "Current/version filters", "Per-intent ranking and RRF fusion"],
+          security: ["Entra/RBAC; local auth disabled"],
+          evidence: [evidence("backend/agent_memory_backend/directive_search.py", "DirectiveSearchRepository.retrieve", "Parallel semantic+vector queries, prefiltering, and RRF fusion.")]
+        }),
+        component("catalog", "Directive catalog", "data", "knowledge", "Provides current published version identity, manifest, and generic summary.", {
+          technologies: ["Azure Cosmos DB"], dataOwned: ["Published version bundle", "Manifest", "Summary", "Private artifact locators"],
+          security: ["Private endpoint", "Application UAMI read"],
+          evidence: [
+            evidence("backend/agent_memory_backend/directive_tools.py", "_get_directive", "Reads current published metadata, manifest, or summary."),
+            evidence("infra/directive_data.tf", "directive_catalog container", "Partitioned by directive_id.")
+          ]
+        }),
+        component("content", "Directive content authority", "data", "knowledge", "Returns ordered exact current section text for final evidence.", {
+          technologies: ["Azure Cosmos DB"], dataOwned: ["Immutable ordered section content"],
+          responsibilities: ["Exact sections", "Cursor continuation", "Coverage metadata"],
+          security: ["Private endpoint", "Application UAMI read"],
+          evidence: [
+            evidence("backend/agent_memory_backend/directive_tools.py", "_content", "Reads bounded ordered content from the current bundle."),
+            evidence("infra/directive_data.tf", "directive_content container", "Partitioned by directive_version_id; content excluded from indexing.")
+          ]
+        }),
+        component("mandates", "User mandate status", "data", "knowledge", "Labels contributing directives for the authenticated user.", {
+          technologies: ["Azure Cosmos DB"], dataOwned: ["User-partitioned mandatory/non-mandatory status snapshot"],
+          responsibilities: ["Informational status only; never changes retrieval or access"],
+          security: ["Owner-scoped lookup"],
+          evidence: [
+            evidence("agent_contracts/directive_rag.txt", "rule 10", "Mandatory lookup is required after final source selection and cannot affect ranking/access."),
+            evidence("infra/directive_data.tf", "directive_mandates container", "Partitioned by user_id.")
+          ]
+        }),
+        component("selector", "Deterministic citation selector", "guardrail", "application", "Reconciles streamed prose and markers with actual tool citation metadata.", {
+          responsibilities: ["Collect exact marker occurrences", "Parse Czech/English section references", "Bind directive identity locally", "Reject mismatches", "Add explicit section citations", "Fallback conservatively to document scope"],
+          dataOwned: ["Authoritative final citation tuple"],
+          failureBehavior: "A rejected marker keeps its ref_id only as document scope; unsupported or ambiguous section evidence is not guessed.",
+          evidence: [
+            evidence("backend/agent_memory_backend/foundry_hosted_maf_runtime.py", "_select_final_directive_citations", "Final selection and conservative fallback."),
+            evidence("backend/tests/test_directive_streaming.py", "DirectiveRuntimeStreamingTests", "Production-derived 3.2/6.2/8 and identity/marker regressions.")
+          ]
+        }),
+        component("agui", "AG-UI event adapter", "adapter", "response", "Converts normalized text, tools, progress, usage, and citations to SSE events.", {
+          interfaces: ["AG-UI JSON events over SSE"],
+          responsibilities: ["Emit text deltas", "Emit tool activity", "Emit authoritative agent_citations"],
+          evidence: [evidence("backend/agent_memory_backend/agui_adapter.py", "to_agui_events", "Maps normalized events to AG-UI custom and standard events.")]
+        }),
+        component("history", "Conversation history", "data", "response", "Durably stores the user message, answer text, tools, usage, citations, and runtime state.", {
+          technologies: ["Azure Cosmos DB"], dataOwned: ["Owner-partitioned transcript and runtime state"],
+          responsibilities: ["Append turn only after runtime completes", "Restore exact citation envelope on reload"],
+          security: ["Tenant/user ownership checks", "Private endpoint"],
+          evidence: [
+            evidence("backend/agent_memory_backend/chat_service.py", "ChatTurnService._stream_events", "Appends accumulated messages before RUN_FINISHED."),
+            evidence("backend/agent_memory_backend/turn_accumulator.py", "TurnAccumulator", "Stores authoritative citations with the assistant message.")
+          ]
+        }),
+        component("renderer", "Citation and document renderer", "ui", "response", "Uses the authoritative envelope to render inline links, Documents, and section Sources.", {
+          responsibilities: ["Resolve markers by exact ref_id", "Group citations by document", "Exclude document-scope rows from Sources", "Open exact directive version/section"],
+          interfaces: ["Documents list", "Sources details", "Directive document viewer"],
+          evidence: [
+            evidence("frontend/src/citations.ts", "selectCitations / groupCitationsByDocument / sourceCitationEntries", "Exact marker selection and Documents/Sources grouping."),
+            evidence("frontend/src/components/chat-transcript.ts", "renderCitations", "Sources appear only when section/source citations exist.")
+          ]
+        }),
+        component("artifacts", "Published document artifacts", "data", "response", "Serves canonical Markdown and original PDF only when the user opens a cited document.", {
+          technologies: ["Private Azure Blob Storage"], dataOwned: ["Canonical Markdown", "Published PDF"],
+          security: ["Backend-mediated delegated access; no SAS or storage coordinates exposed"],
+          evidence: [
+            evidence("README.md", "Published directive documents", "Exact-version document and source routes."),
+            evidence("infra/directive_data.tf", "directive_artifacts", "Private OAuth-only Blob account with retention and versioning.")
+          ]
+        }),
+        component("telemetry", "Application Insights + logs", "operations", "operations", "Observes agent runs, tool calls, Search latency/retries, coverage, and platform diagnostics.", {
+          technologies: ["OpenTelemetry", "Application Insights", "Log Analytics"],
+          operations: ["agent.run", "directive.tool", "directive.search.retrieve", "Foundry traces and diagnostics"],
+          security: ["Trace content may include user/model/tool content; RBAC-controlled reads"],
+          evidence: [
+            evidence("backend/agent_memory_backend/telemetry.py", "span", "Backend trace helpers."),
+            evidence("infra/monitoring.tf", "Application Insights and diagnostics", "Shared workspace and diagnostic categories.")
+          ]
+        })
+      ],
+      flows: [
+        flow("ask", "user", "browser", "Enter directive question", "sync", ["overview", "request"]),
+        flow("token", "browser", "entra", "Acquire delegated token", "sync", ["request", "trust"], { authentication: "OAuth 2.0 delegated user token" }),
+        flow("post", "browser", "edge", "POST /chat", "stream", ["overview", "request", "trust"], { step: 1, data: ["message", "conversation_id", "agent_type=directive-rag"], authentication: "Bearer delegated token" }),
+        flow("proxy", "edge", "fastapi", "Proxy unbuffered SSE", "stream", ["request", "trust"], { boundaryCrossings: ["Public edge to internal ACA ingress"] }),
+        flow("prepare", "fastapi", "coordinator", "Validate and prepare turn", "sync", ["overview", "request"], { step: 2, data: ["user_id", "conversation ID", "agent type"] }),
+        flow("restore", "coordinator", "history", "Create/restore runtime state", "sync", ["request", "persistence"]),
+        flow("invoke", "coordinator", "runtime", "Start streamed runtime", "stream", ["request"]),
+        flow("remote", "runtime", "agent", "Invoke Hosted Agent", "stream", ["overview", "request", "ai"], { authentication: "Application UAMI with trusted end-user identity", data: ["query", "outer/inner conversation state"] }),
+        flow("contract", "prompt", "agent", "Grounding instructions", "sync", ["ai"], { data: ["retrieval and citation policy"] }),
+        flow("state", "agent", "gateway", "Resolve state / tool calls", "sync", ["request", "ai", "trust"], { authentication: "Agent identity app token", boundaryCrossings: ["Foundry runtime to public edge to internal FastAPI"] }),
+        flow("dispatch", "gateway", "tools", "Validate and dispatch tool", "sync", ["overview", "ai", "retrieval", "trust"], { step: 3, data: ["tool name", "validated arguments", "bound user ID"] }),
+        flow("discover", "tools", "search", "search_directives", "sync", ["overview", "ai", "retrieval"], { step: 4, data: ["semantic intents", "current filters", "top references"], failureBehavior: "Retries bounded transient failures; explicit unavailable error after final attempt." }),
+        flow("identify", "tools", "catalog", "get_directive", "sync", ["ai", "retrieval"], { data: ["metadata", "manifest", "summary", "version citation"] }),
+        flow("exact", "tools", "content", "get_directive_content", "sync", ["overview", "ai", "retrieval"], { data: ["ordered exact section text", "section citation metadata", "coverage"] }),
+        flow("status", "tools", "mandates", "get_user_directive_mandates", "sync", ["ai", "retrieval"], { data: ["selected directive IDs", "status snapshot"] }),
+        flow("tool-return", "tools", "agent", "Typed result + citations", "sync", ["ai", "retrieval"], { data: ["ToolResultEnvelope", "ref_id", "section/page/version metadata"] }),
+        flow("draft", "agent", "runtime", "Answer text + [ref_id]", "stream", ["overview", "ai", "grounding"], { step: 5, data: ["text deltas", "tool events", "completed response"] }),
+        flow("reconcile", "runtime", "selector", "Reconcile answer and evidence", "sync", ["overview", "grounding"], { step: 6, data: ["assistant text", "all tool citations", "mandate statuses"] }),
+        flow("events", "selector", "agui", "Authoritative citations", "stream", ["overview", "grounding"], { data: ["CitationsEvent(authoritative=true)"] }),
+        flow("sse", "agui", "browser", "AG-UI SSE events", "stream", ["overview", "request", "grounding"], { step: 7, data: ["progress", "text deltas", "tool activity", "final citations", "usage"] }),
+        flow("render", "browser", "renderer", "Render grounded response", "sync", ["overview", "grounding"], { step: 8, data: ["answer Markdown", "inline markers", "Documents", "Sources"] }),
+        flow("accumulate", "agui", "history", "Persist completed turn", "async", ["grounding", "persistence"], { data: ["user message", "assistant text", "tools", "usage", "authoritative citations"] }),
+        flow("reload", "history", "browser", "Restore conversation", "sync", ["persistence"], { data: ["stored transcript and citations"] }),
+        flow("open-doc", "renderer", "artifacts", "Open exact document/version", "sync", ["grounding", "persistence"], { data: ["directive_id", "directive_version_id", "section_id/page"], authentication: "Delegated user token" }),
+        flow("trace-runtime", "fastapi", "telemetry", "Backend spans", "async", ["operations"], { importance: "secondary" }),
+        flow("trace-agent", "agent", "telemetry", "Foundry traces", "async", ["operations"], { importance: "secondary" }),
+        flow("trace-search", "search", "telemetry", "Latency/retries/ranking counts", "async", ["operations"], { importance: "secondary" })
+      ],
+      views: [
+        {
+          id: "overview", name: "1. High-level journey",
+          description: "The one-minute flow: user query, controlled tool loop, exact evidence, backend citation gate, streamed answer, and persistence.",
+          lanes: [
+            { name: "Experience", subtitle: "User and browser", ids: ["user", "browser"] },
+            { name: "Application boundary", subtitle: "Authentication, orchestration, citations", ids: ["fastapi", "coordinator", "runtime", "selector"] },
+            { name: "AI execution", subtitle: "Retrieval planning and answer generation", ids: ["agent"] },
+            { name: "Published evidence", subtitle: "Discovery and exact content", ids: ["tools", "search", "content"] },
+            { name: "Response", subtitle: "AG-UI, rendering, durable transcript", ids: ["agui", "renderer", "history"] }
+          ]
+        },
+        {
+          id: "request", name: "2. Request and state",
+          description: "How identity, conversation ownership, immutable agent selection, leases, and remote continuation are established before model execution.",
+          lanes: [
+            { name: "Caller", subtitle: "Delegated user session", ids: ["user", "browser", "entra"] },
+            { name: "Public edge", subtitle: "SSE proxy", ids: ["edge"] },
+            { name: "Application policy", subtitle: "Internal FastAPI", ids: ["fastapi", "coordinator", "history"] },
+            { name: "Runtime adapter", subtitle: "Foundry client", ids: ["runtime"] },
+            { name: "Hosted execution", subtitle: "Stateful MAF", ids: ["agent", "gateway"] }
+          ]
+        },
+        {
+          id: "ai", name: "3. Agent and tools",
+          description: "The model owns retrieval planning; the prompt and gateway constrain what it can call and what evidence is acceptable.",
+          lanes: [
+            { name: "Contract", subtitle: "Behavioral grounding gate", ids: ["prompt"] },
+            { name: "Hosted agent", subtitle: "Model + iterative tool loop", ids: ["agent"] },
+            { name: "Trusted gateway", subtitle: "Identity/session binding", ids: ["gateway", "tools"] },
+            { name: "Evidence services", subtitle: "Current published corpus", ids: ["search", "catalog", "content", "mandates"] },
+            { name: "Application return", subtitle: "Streaming adapter", ids: ["runtime"] }
+          ]
+        },
+        {
+          id: "retrieval", name: "4. Retrieval and data",
+          description: "Search is a derived discovery projection; catalog/content/mandates in Cosmos are authoritative for identity, exact text, and user status.",
+          lanes: [
+            { name: "Tool policy", subtitle: "Validated arguments and budgets", ids: ["gateway", "tools"] },
+            { name: "Discovery", subtitle: "Hybrid candidates + RRF", ids: ["search"] },
+            { name: "Publication authority", subtitle: "Current version and manifest", ids: ["catalog"] },
+            { name: "Exact evidence", subtitle: "Ordered section text", ids: ["content"] },
+            { name: "User context", subtitle: "Informational only", ids: ["mandates"] },
+            { name: "Model", subtitle: "Consumes typed envelopes", ids: ["agent"] }
+          ]
+        },
+        {
+          id: "grounding", name: "5. Citation grounding",
+          description: "Two gates protect grounding: the model must emit exact markers, then the backend independently reconciles prose, section identity, and tool metadata.",
+          lanes: [
+            { name: "Generation", subtitle: "Text plus exact markers", ids: ["prompt", "agent"] },
+            { name: "Runtime evidence", subtitle: "Tool results and statuses", ids: ["tools", "runtime"] },
+            { name: "Deterministic gate", subtitle: "No title guessing", ids: ["selector"] },
+            { name: "Transport", subtitle: "Authoritative AG-UI envelope", ids: ["agui", "history"] },
+            { name: "Presentation", subtitle: "Inline citations, Documents, Sources", ids: ["browser", "renderer", "artifacts"] }
+          ]
+        },
+        {
+          id: "persistence", name: "6. Persistence and document open",
+          description: "The completed answer and exact citation envelope are saved together; reloading preserves Sources and document navigation.",
+          lanes: [
+            { name: "Completed turn", subtitle: "Normalized event stream", ids: ["agui"] },
+            { name: "Durable record", subtitle: "Owner-partitioned Cosmos", ids: ["history"] },
+            { name: "Browser restore", subtitle: "Same citation behavior", ids: ["browser", "renderer"] },
+            { name: "Published artifacts", subtitle: "Exact version and cited location", ids: ["artifacts"] }
+          ]
+        },
+        {
+          id: "trust", name: "7. Identity and trust",
+          description: "Users, the backend, and Hosted Agent use separate identities. The agent cannot query Search or Cosmos directly.",
+          lanes: [
+            { name: "Delegated user", subtitle: "Browser token", ids: ["user", "browser", "entra"] },
+            { name: "Public route", subtitle: "Frontend edge", ids: ["edge"] },
+            { name: "Application UAMI", subtitle: "Internal policy/data access", ids: ["fastapi", "gateway", "tools"] },
+            { name: "Agent identity", subtitle: "Tool invocation only", ids: ["agent"] },
+            { name: "Private data", subtitle: "Backend-mediated", ids: ["search", "catalog", "content", "mandates", "history", "artifacts"] }
+          ]
+        },
+        {
+          id: "operations", name: "8. Operations",
+          description: "Progress events keep the UI responsive; traces cover application, agent, tool, Search, and platform behavior.",
+          lanes: [
+            { name: "Application", subtitle: "Run and gateway spans", ids: ["fastapi", "runtime", "tools"] },
+            { name: "Agent", subtitle: "Hosted execution traces", ids: ["agent"] },
+            { name: "Search", subtitle: "Latency, retries, counts", ids: ["search"] },
+            { name: "Observability", subtitle: "Shared workspace", ids: ["telemetry"] },
+            { name: "User feedback", subtitle: "Progress and failures", ids: ["agui", "browser"] }
+          ]
+        }
+      ],
+      journey: [
+        ["1", "Submit", "Browser sends query, conversation ID, and directive-rag agent type."],
+        ["2", "Bind state", "FastAPI authenticates, checks ownership, and creates/restores one immutable runtime."],
+        ["3", "Plan tools", "Hosted agent classifies intent and calls only the four directive gateway tools."],
+        ["4", "Ground", "Search discovers candidates; Cosmos supplies exact current text and mandate status."],
+        ["5", "Generate", "Model drafts the answer with exact [ref_id] markers after grounded claims."],
+        ["6", "Reconcile", "Backend independently matches markers and human-readable sections to tool metadata."],
+        ["7", "Stream", "AG-UI sends progress, text, tools, authoritative citations, usage, and completion."],
+        ["8", "Render", "UI resolves markers by ref_id and builds Documents and section-level Sources."],
+        ["9", "Persist", "Transcript, tools, usage, citations, and runtime state are saved together."],
+        ["10", "Inspect", "A citation opens the exact published version and cited section/page."]
+      ]
+    };
+
+    const byId = new Map(architecture.components.map(item => [item.id, item]));
+    const flowById = new Map(architecture.flows.map(item => [item.id, item]));
+    const viewById = new Map(architecture.views.map(item => [item.id, item]));
+    const state = {
+      view: "overview", selectedType: "", selectedId: "", kind: "", mode: "",
+      trace: "none", scale: 1, x: 0, y: 0, dragging: false, pointerX: 0, pointerY: 0
+    };
+    const el = id => document.getElementById(id);
+    const viewSelect = el("view");
+    const canvas = el("canvas");
+    const stage = el("stage");
+    const nodesEl = el("nodes");
+    const lanesEl = el("lanes");
+    const edgesEl = el("edges");
+    const labelsEl = el("labels");
+    const detailsEl = el("details");
+
+    function text(tag, value, className) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      node.textContent = value;
+      return node;
+    }
+    function componentIds(view) { return view.lanes.flatMap(lane => lane.ids); }
+    function activeFlows(view) {
+      const ids = new Set(componentIds(view));
+      return architecture.flows.filter(item =>
+        item.views.includes(view.id) && ids.has(item.from) && ids.has(item.to)
+      );
+    }
+    function layout(view) {
+      const positions = new Map();
+      const laneWidth = Math.floor(1320 / view.lanes.length);
+      view.lanes.forEach((lane, laneIndex) => {
+        const x = 35 + laneIndex * laneWidth;
+        const laneNodeGap = Math.min(128, 650 / Math.max(1, lane.ids.length));
+        lane.ids.forEach((id, row) => positions.set(id, {
+          x: x + Math.max(10, (laneWidth - 190) / 2),
+          y: 120 + row * laneNodeGap
+        }));
+      });
+      return { positions, laneWidth };
+    }
+    function pathFor(from, to) {
+      const sx = from.x + 190;
+      const sy = from.y + 46;
+      const tx = to.x;
+      const ty = to.y + 46;
+      if (tx >= sx) {
+        const dx = Math.max(40, (tx - sx) / 2);
+        return `M ${sx} ${sy} C ${sx + dx} ${sy}, ${tx - dx} ${ty}, ${tx} ${ty}`;
+      }
+      const bend = Math.max(sy, ty) + 70;
+      return `M ${sx} ${sy} C ${sx + 50} ${bend}, ${tx - 50} ${bend}, ${tx} ${ty}`;
+    }
+    function setHash() {
+      const params = new URLSearchParams();
+      params.set("view", state.view);
+      if (state.selectedId) params.set(state.selectedType, state.selectedId);
+      history.replaceState(null, "", `#${params.toString()}`);
+    }
+    function readHash() {
+      const params = new URLSearchParams(location.hash.slice(1));
+      if (viewById.has(params.get("view"))) state.view = params.get("view");
+      for (const type of ["component", "flow"]) {
+        const id = params.get(type);
+        if ((type === "component" ? byId : flowById).has(id)) {
+          state.selectedType = type; state.selectedId = id;
+        }
+      }
+    }
+    function renderLanes(view, laneWidth) {
+      lanesEl.replaceChildren();
+      view.lanes.forEach((lane, index) => {
+        const box = document.createElement("section");
+        box.className = "lane";
+        box.style.left = `${20 + index * laneWidth}px`;
+        box.style.top = "38px";
+        box.style.width = `${laneWidth - 10}px`;
+        box.style.height = "690px";
+        box.append(text("h3", lane.name), text("p", lane.subtitle));
+        lanesEl.append(box);
+      });
+    }
+    function renderDiagram() {
+      const view = viewById.get(state.view);
+      el("view-title").textContent = view.name;
+      el("view-description").textContent = view.description;
+      viewSelect.value = view.id;
+      const { positions, laneWidth } = layout(view);
+      renderLanes(view, laneWidth);
+      nodesEl.replaceChildren();
+      labelsEl.replaceChildren();
+      edgesEl.replaceChildren();
+      const mode = state.mode;
+      const visibleIds = new Set(componentIds(view).filter(id => !state.kind || byId.get(id).kind === state.kind));
+      const flows = activeFlows(view).filter(item => (!mode || item.mode === mode) && visibleIds.has(item.from) && visibleIds.has(item.to));
+
+      const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
+      marker.setAttribute("id", "arrow"); marker.setAttribute("viewBox", "0 0 10 10");
+      marker.setAttribute("refX", "9"); marker.setAttribute("refY", "5");
+      marker.setAttribute("markerWidth", "7"); marker.setAttribute("markerHeight", "7");
+      marker.setAttribute("orient", "auto-start-reverse");
+      const markerPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      markerPath.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
+      markerPath.setAttribute("fill", "var(--cp-border-strong)");
+      marker.append(markerPath);
+      const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+      defs.append(marker); edgesEl.append(defs);
+
+      flows.forEach(item => {
+        const d = pathFor(positions.get(item.from), positions.get(item.to));
+        const hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        hit.setAttribute("d", d); hit.setAttribute("class", "flow-hit");
+        hit.dataset.flowId = item.id; edgesEl.append(hit);
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", d);
+        path.setAttribute("class", `flow ${item.mode} ${item.importance === "primary" ? "primary" : ""}`);
+        path.setAttribute("marker-end", "url(#arrow)");
+        path.dataset.flowId = item.id;
+        path.setAttribute("role", "button"); path.setAttribute("tabindex", "0");
+        path.setAttribute("aria-label", `${byId.get(item.from).name} to ${byId.get(item.to).name}: ${item.label}`);
+        edgesEl.append(path);
+        const from = positions.get(item.from), to = positions.get(item.to);
+        const label = document.createElement("div");
+        label.className = "flow-label";
+        label.dataset.flowId = item.id;
+        label.style.left = `${(from.x + to.x + 190) / 2 - 65}px`;
+        label.style.top = `${(from.y + to.y) / 2 + 22}px`;
+        if (item.step) label.append(text("span", String(item.step), "step"));
+        label.append(document.createTextNode(item.label));
+        labelsEl.append(label);
+      });
+
+      componentIds(view).forEach(id => {
+        const item = byId.get(id);
+        const pos = positions.get(id);
+        const node = document.createElement("button");
+        node.type = "button";
+        node.className = `node ${["data", "operations", "identity", "ai-runtime"].includes(item.kind) ? "external" : ""} ${item.kind === "data" ? "data" : ""}`;
+        node.dataset.componentId = id;
+        node.style.left = `${pos.x}px`; node.style.top = `${pos.y}px`;
+        node.append(text("span", item.kind, "kind"), text("strong", item.name), text("span", item.summary));
+        node.append(text("span", item.confidence, `confidence ${item.confidence}`));
+        if (!visibleIds.has(id)) node.classList.add("filtered");
+        nodesEl.append(node);
+      });
+      applySelection();
+      applyTransform();
+    }
+    function connectedSet(start, direction) {
+      const result = new Set([start]);
+      let frontier = [start];
+      const view = viewById.get(state.view);
+      const flows = activeFlows(view);
+      while (frontier.length) {
+        const current = frontier.shift();
+        for (const item of flows) {
+          const next = [];
+          if ((direction === "downstream" || direction === "both") && item.from === current) next.push(item.to);
+          if ((direction === "upstream" || direction === "both") && item.to === current) next.push(item.from);
+          for (const id of next) if (!result.has(id)) { result.add(id); frontier.push(id); }
+        }
+      }
+      return result;
+    }
+    function applySelection() {
+      document.querySelectorAll(".node, .flow").forEach(node => node.classList.remove("selected", "dim"));
+      if (!state.selectedId) { renderDetails(null); return; }
+      if (state.selectedType === "component") {
+        document.querySelector(`.node[data-component-id="${CSS.escape(state.selectedId)}"]`)?.classList.add("selected");
+        if (state.trace !== "none") {
+          const related = connectedSet(state.selectedId, state.trace);
+          document.querySelectorAll(".node").forEach(node => {
+            if (!related.has(node.dataset.componentId)) node.classList.add("dim");
+          });
+          document.querySelectorAll(".flow").forEach(path => {
+            const item = flowById.get(path.dataset.flowId);
+            if (!related.has(item.from) || !related.has(item.to)) path.classList.add("dim");
+          });
+        }
+        renderDetails(byId.get(state.selectedId));
+      } else {
+        document.querySelector(`.flow[data-flow-id="${CSS.escape(state.selectedId)}"]`)?.classList.add("selected");
+        renderDetails(flowById.get(state.selectedId));
+      }
+      setHash();
+    }
+    function detailList(title, values) {
+      if (!values || !values.length) return null;
+      const section = document.createElement("section");
+      section.append(text("h3", title));
+      const list = document.createElement("ul");
+      values.forEach(value => list.append(text("li", value)));
+      section.append(list); return section;
+    }
+    function renderDetails(item) {
+      detailsEl.replaceChildren();
+      if (!item) {
+        detailsEl.append(text("h2", "Explore the flow"), text("p", "Select a component or arrow. Use the first lens for the big picture, then follow the numbered views.", "empty"));
+        const list = document.createElement("ol");
+        architecture.journey.slice(0, 6).forEach(step => list.append(text("li", `${step[1]} — ${step[2]}`)));
+        detailsEl.append(list); return;
+      }
+      const isFlow = "from" in item;
+      detailsEl.append(text("div", isFlow ? `${item.mode} flow` : item.kind, "type"));
+      detailsEl.append(text("h2", isFlow ? item.label : item.name));
+      detailsEl.append(text("p", isFlow ? item.purpose : item.summary));
+      if (isFlow) {
+        detailsEl.append(text("p", `${byId.get(item.from).name} → ${byId.get(item.to).name}`, "mono"));
+      }
+      const sections = isFlow ? [
+        detailList("Data", item.data),
+        detailList("Authentication", item.authentication ? [item.authentication] : []),
+        detailList("Boundary crossings", item.boundaryCrossings),
+        detailList("Failure behavior", item.failureBehavior ? [item.failureBehavior] : [])
+      ] : [
+        detailList("Responsibilities", item.responsibilities),
+        detailList("Technologies", item.technologies),
+        detailList("Interfaces / tools", item.interfaces),
+        detailList("Data owned", item.dataOwned),
+        detailList("Deployment", item.deployment),
+        detailList("Security", item.security),
+        detailList("Operations", item.operations)
+      ];
+      sections.filter(Boolean).forEach(section => detailsEl.append(section));
+      const confidence = document.createElement("section");
+      confidence.append(text("h3", "Confidence"), text("p", item.confidence));
+      detailsEl.append(confidence);
+      if (item.evidence?.length) {
+        const section = document.createElement("section");
+        section.append(text("h3", "Repository evidence"));
+        const list = document.createElement("ul"); list.className = "evidence-list";
+        item.evidence.forEach(entry => {
+          const li = document.createElement("li");
+          const link = document.createElement("a");
+          link.href = `${architecture.meta.repositoryUrl}/blob/${architecture.meta.commit}/${entry.path}`;
+          link.target = "_blank"; link.rel = "noreferrer";
+          link.append(text("code", entry.path));
+          li.append(link, text("strong", entry.symbol), text("span", entry.note));
+          list.append(li);
+        });
+        section.append(list); detailsEl.append(section);
+      }
+    }
+    function applyTransform() {
+      stage.style.transform = `translate(${state.x}px, ${state.y}px) scale(${state.scale})`;
+    }
+    function fit() {
+      const width = canvas.clientWidth, height = canvas.clientHeight;
+      state.scale = Math.min(.95, width / 1400, height / 820);
+      state.x = (width - 1400 * state.scale) / 2;
+      state.y = (height - 820 * state.scale) / 2;
+      applyTransform();
+    }
+    function select(type, id) {
+      state.selectedType = type; state.selectedId = id;
+      applySelection();
+    }
+    function populateControls() {
+      architecture.views.forEach(item => {
+        const option = document.createElement("option");
+        option.value = item.id; option.textContent = item.name; viewSelect.append(option);
+      });
+      [...new Set(architecture.components.map(item => item.kind))].sort().forEach(kind => {
+        const option = document.createElement("option");
+        option.value = kind; option.textContent = kind; el("kind-filter").append(option);
+      });
+      architecture.journey.forEach(item => {
+        const card = document.createElement("div"); card.className = "journey-step";
+        card.append(text("strong", `${item[0]}. ${item[1]}`), text("span", item[2]));
+        el("journey").append(card);
+      });
+    }
+    function search() {
+      const query = el("search").value.trim().toLocaleLowerCase();
+      const results = el("search-results"); results.replaceChildren();
+      if (!query) { results.classList.remove("open"); return; }
+      const matches = architecture.components.filter(item =>
+        JSON.stringify(item).toLocaleLowerCase().includes(query)
+      ).slice(0, 10);
+      matches.forEach(item => {
+        const button = document.createElement("button");
+        button.type = "button"; button.textContent = `${item.name} · ${item.kind}`;
+        button.addEventListener("click", () => {
+          const targetView = architecture.views.find(view => componentIds(view).includes(item.id));
+          if (targetView) { state.view = targetView.id; renderDiagram(); fit(); }
+          select("component", item.id); results.classList.remove("open");
+        });
+        results.append(button);
+      });
+      results.classList.toggle("open", matches.length > 0);
+    }
+    viewSelect.addEventListener("change", () => {
+      state.view = viewSelect.value; state.selectedId = ""; renderDiagram(); fit(); setHash();
+    });
+    el("kind-filter").addEventListener("change", event => { state.kind = event.target.value; renderDiagram(); });
+    el("mode-filter").addEventListener("change", event => { state.mode = event.target.value; renderDiagram(); });
+    el("trace").addEventListener("change", event => { state.trace = event.target.value; applySelection(); });
+    el("search").addEventListener("input", search);
+    el("clear-selection").addEventListener("click", () => { state.selectedId = ""; applySelection(); setHash(); });
+    el("reset").addEventListener("click", () => {
+      state.kind = ""; state.mode = ""; state.trace = "none"; state.selectedId = "";
+      el("kind-filter").value = ""; el("mode-filter").value = ""; el("trace").value = "none";
+      renderDiagram(); fit(); setHash();
+    });
+    el("fit").addEventListener("click", fit);
+    el("zoom-in").addEventListener("click", () => { state.scale = Math.min(2, state.scale * 1.2); applyTransform(); });
+    el("zoom-out").addEventListener("click", () => { state.scale = Math.max(.25, state.scale / 1.2); applyTransform(); });
+    el("theme").addEventListener("click", () => {
+      const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+      document.documentElement.dataset.theme = next;
+    });
+    nodesEl.addEventListener("click", event => {
+      const node = event.target.closest("[data-component-id]");
+      if (node) select("component", node.dataset.componentId);
+    });
+    edgesEl.addEventListener("click", event => {
+      const path = event.target.closest("[data-flow-id]");
+      if (path) select("flow", path.dataset.flowId);
+    });
+    edgesEl.addEventListener("keydown", event => {
+      if ((event.key === "Enter" || event.key === " ") && event.target.dataset.flowId) {
+        event.preventDefault(); select("flow", event.target.dataset.flowId);
+      }
+    });
+    canvas.addEventListener("pointerdown", event => {
+      if (event.target.closest?.(".node")) return;
+      state.dragging = true; state.pointerX = event.clientX; state.pointerY = event.clientY;
+      canvas.classList.add("dragging"); canvas.setPointerCapture(event.pointerId);
+    });
+    canvas.addEventListener("pointermove", event => {
+      if (!state.dragging) return;
+      state.x += event.clientX - state.pointerX; state.y += event.clientY - state.pointerY;
+      state.pointerX = event.clientX; state.pointerY = event.clientY; applyTransform();
+    });
+    canvas.addEventListener("pointerup", event => {
+      state.dragging = false; canvas.classList.remove("dragging"); canvas.releasePointerCapture(event.pointerId);
+    });
+    canvas.addEventListener("wheel", event => {
+      event.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const px = event.clientX - rect.left, py = event.clientY - rect.top;
+      const previous = state.scale;
+      state.scale = Math.max(.25, Math.min(2, state.scale * (event.deltaY < 0 ? 1.1 : .9)));
+      state.x = px - (px - state.x) * state.scale / previous;
+      state.y = py - (py - state.y) * state.scale / previous;
+      applyTransform();
+    }, { passive: false });
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape") {
+        state.selectedId = ""; el("search-results").classList.remove("open"); applySelection(); setHash();
+      }
+    });
+    window.addEventListener("hashchange", () => { readHash(); renderDiagram(); });
+    window.addEventListener("resize", fit);
+
+    populateControls();
+    readHash();
+    renderDiagram();
+    requestAnimationFrame(fit);
+  </script>
+</body>
+</html>

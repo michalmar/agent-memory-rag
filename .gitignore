@@ -231,3 +231,10 @@ infra/tf.plan
 
 # Target-specific directive assignments
 setup/directives/mandatory/mand.csv
+
+# Environment-specific deployment records and saved plans
+.azure/
+infra/tfplan
+
+# macOS
+.DS_Store

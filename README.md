@@ -593,7 +593,7 @@ its path to the script:
 ```bash
 ./scripts/deploy_app_only_directive.sh <release> \
   --with-directive \
-  --env-file ./env/.env.rlp
+  --env-file ./env/.env.example
 ```
 
 The local `env/` directory is ignored by Git. To use already-exported
@@ -644,8 +644,10 @@ The active Hosted image repository is `customer-support-maf-hosted`;
 `kb-setup` and `prompt-agent-release` repositories are not retained.
 
 Exact deployed versions, image digests, rollback targets, and production
-acceptance evidence are recorded in
-[`.azure/deployment-plan.md`](.azure/deployment-plan.md).
+acceptance evidence are environment-specific. Record them in a local,
+Git-ignored `.azure/deployment-plan.md`; the repository intentionally ships no
+deployment log so that no tenant, subscription, or endpoint values are
+committed.
 
 ## Repository layout
 

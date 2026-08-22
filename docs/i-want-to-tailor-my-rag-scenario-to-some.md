@@ -97,7 +97,7 @@ Remaining non-blocking questions to measure during implementation and review lat
 
 - Phase 1's disabled third-agent boundary is deployed. The original Prompt and Hosted support agents remain unchanged, and `DIRECTIVE_AGENT_ENABLED` plus `DIRECTIVE_AGENT_VISIBLE` remain `false`.
 - Phase 2's private Blob artifacts, Document Intelligence, `directives` Cosmos database/containers, backend read roles, and model adoption are deployed.
-- Phase 3 uses manual job `job-agmem-directive-ingest` and UAMI `id-agmem-ingestion-5df652`. Live role verification confirms only ACR pull, artifact-container write, Document Intelligence use, Search service/index write, `/dbs/directives` Cosmos contribution, and OpenAI use.
+- Phase 3 uses manual job `job-<name_prefix>-directive-ingest` and UAMI `id-<name_prefix>-ingestion-<suffix>`. Live role verification confirms only ACR pull, artifact-container write, Document Intelligence use, Search service/index write, `/dbs/directives` Cosmos contribution, and OpenAI use.
 - Directive retrieval now uses stable Search API `2026-04-01` direct hybrid queries. The Hosted GPT-5.6 agent supplies final retrieval intents, the backend applies deterministic filters and cross-intent reciprocal-rank fusion, and the dedicated GPT-5 Nano knowledge-base planner deployment is retired.
 - Every release first persists and verifies `directive-ingest preflight`, proving ACR pull and Blob, Cosmos, Search, Document Intelligence, embeddings, and summary-model access without publication. It then switches to `run-daily`, verifies the actual execution command, and finally runs a read-only cross-store `verify` command that exercises direct vector and semantic Search.
 - The first successful publication produced seven versions across four stable directive IDs, four current versions, one canonical parent/sub-directive relation, 91 published chunks with 3,072-dimensional vectors, 119 required Blob artifacts, and five mandatory assignments for two users. The active snapshot is `mandates-a2769c0a0f84afda090ede178b4e8cbe2667762b5bd4cc13ce525533fa56f283`.
@@ -1135,19 +1135,19 @@ This design uses Search to discover and focus evidence, while the agent decides 
 
 ### Repository evidence
 
-- **[R1]** Repository architecture and implemented capabilities: [`README.md`](file:///Users/mimarusa/Documents/PRJ/_DEMOS/agent-memory-rag/README.md), especially lines 12-70, 83-115, and 134-181.
-- **[R2]** Current product and architecture decisions: [`docs/PRD-Solution-Challenges-1-5.md`](file:///Users/mimarusa/Documents/PRJ/_DEMOS/agent-memory-rag/docs/PRD-Solution-Challenges-1-5.md), especially lines 24-44, 72-168, 183-229, and 302-308.
-- **[R3]** Current Search indexes, embeddings, uploads, knowledge sources, and knowledge base: [`setup/knowledgebase/setup_search.py`](file:///Users/mimarusa/Documents/PRJ/_DEMOS/agent-memory-rag/setup/knowledgebase/setup_search.py), especially lines 18-81, 91-160, 163-169, 207-213, 248-352.
-- **[R4]** Current Hosted-agent prompt: [`agent_contracts/customer_support.txt`](file:///Users/mimarusa/Documents/PRJ/_DEMOS/agent-memory-rag/agent_contracts/customer_support.txt).
-- **[R5]** Current Prompt-agent prompt: [`agent_contracts/foundry_prompt.txt`](file:///Users/mimarusa/Documents/PRJ/_DEMOS/agent-memory-rag/agent_contracts/foundry_prompt.txt).
-- **[R6]** Current Hosted MAF agent and tool configuration: [`agents/customer-support-maf/src/customer-support-maf/main.py`](file:///Users/mimarusa/Documents/PRJ/_DEMOS/agent-memory-rag/agents/customer-support-maf/src/customer-support-maf/main.py), lines 88-137.
-- **[R7]** Current Prompt Agent release: [`setup/agents/release_prompt_agent.py`](file:///Users/mimarusa/Documents/PRJ/_DEMOS/agent-memory-rag/setup/agents/release_prompt_agent.py), lines 26-53.
-- **[R8]** Current citation model and parsing: [`agent_contracts/models.py`](file:///Users/mimarusa/Documents/PRJ/_DEMOS/agent-memory-rag/agent_contracts/models.py), lines 15-38; [`backend/agent_memory_backend/foundry_runtime_base.py`](file:///Users/mimarusa/Documents/PRJ/_DEMOS/agent-memory-rag/backend/agent_memory_backend/foundry_runtime_base.py), lines 29-93.
-- **[R9]** Current Foundry IQ MCP endpoint, connection identity, and Search RBAC: [`infra/foundry_agents.tf`](file:///Users/mimarusa/Documents/PRJ/_DEMOS/agent-memory-rag/infra/foundry_agents.tf), lines 5-10, 106-152.
-- **[R10]** Current Foundry end-user request header: [`backend/agent_memory_backend/foundry_hosted_maf_runtime.py`](file:///Users/mimarusa/Documents/PRJ/_DEMOS/agent-memory-rag/backend/agent_memory_backend/foundry_hosted_maf_runtime.py), lines 62-64, 104-118.
-- **[R11]** Current model and Search SKU defaults: [`infra/variables.tf`](file:///Users/mimarusa/Documents/PRJ/_DEMOS/agent-memory-rag/infra/variables.tf), lines 63-97.
-- **[R12]** Current Search service semantic plan: [`infra/data.tf`](file:///Users/mimarusa/Documents/PRJ/_DEMOS/agent-memory-rag/infra/data.tf), lines 169-186.
-- **[R13]** Existing serverless Cosmos DB account, `support` database, and current history/profile/memory containers: [`infra/data.tf`](file:///Users/mimarusa/Documents/PRJ/_DEMOS/agent-memory-rag/infra/data.tf), lines 1-147.
+- **[R1]** Repository architecture and implemented capabilities: [`README.md`](README.md), especially lines 12-70, 83-115, and 134-181.
+- **[R2]** Current product and architecture decisions: [`docs/PRD-Solution-Challenges-1-5.md`](docs/PRD-Solution-Challenges-1-5.md), especially lines 24-44, 72-168, 183-229, and 302-308.
+- **[R3]** Current Search indexes, embeddings, uploads, knowledge sources, and knowledge base: [`setup/knowledgebase/setup_search.py`](setup/knowledgebase/setup_search.py), especially lines 18-81, 91-160, 163-169, 207-213, 248-352.
+- **[R4]** Current Hosted-agent prompt: [`agent_contracts/customer_support.txt`](agent_contracts/customer_support.txt).
+- **[R5]** Current Prompt-agent prompt: [`agent_contracts/foundry_prompt.txt`](agent_contracts/foundry_prompt.txt).
+- **[R6]** Current Hosted MAF agent and tool configuration: [`agents/customer-support-maf/src/customer-support-maf/main.py`](agents/customer-support-maf/src/customer-support-maf/main.py), lines 88-137.
+- **[R7]** Current Prompt Agent release: [`setup/agents/release_prompt_agent.py`](setup/agents/release_prompt_agent.py), lines 26-53.
+- **[R8]** Current citation model and parsing: [`agent_contracts/models.py`](agent_contracts/models.py), lines 15-38; [`backend/agent_memory_backend/foundry_runtime_base.py`](backend/agent_memory_backend/foundry_runtime_base.py), lines 29-93.
+- **[R9]** Current Foundry IQ MCP endpoint, connection identity, and Search RBAC: [`infra/foundry_agents.tf`](infra/foundry_agents.tf), lines 5-10, 106-152.
+- **[R10]** Current Foundry end-user request header: [`backend/agent_memory_backend/foundry_hosted_maf_runtime.py`](backend/agent_memory_backend/foundry_hosted_maf_runtime.py), lines 62-64, 104-118.
+- **[R11]** Current model and Search SKU defaults: [`infra/variables.tf`](infra/variables.tf), lines 63-97.
+- **[R12]** Current Search service semantic plan: [`infra/data.tf`](infra/data.tf), lines 169-186.
+- **[R13]** Existing serverless Cosmos DB account, `support` database, and current history/profile/memory containers: [`infra/data.tf`](infra/data.tf), lines 1-147.
 
 ### Microsoft and Azure evidence
 

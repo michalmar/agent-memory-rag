@@ -809,7 +809,7 @@ class DirectiveFeatureBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 "FOUNDRY_HOSTED_ENABLED": "true",
                 "AGENT_GATEWAY_AUDIENCE": "api://backend",
                 "SUPPORT_HOSTED_AGENT_PRINCIPAL_IDS": (
-                    "a15ba753-8d64-45a3-a34c-5fb507ce34a8"
+                    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
                 ),
             },
             clear=True,

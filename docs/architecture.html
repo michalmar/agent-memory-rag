@@ -2006,7 +2006,7 @@
             evidence("backend/agent_memory_backend/auth.py", "200-262", "Role, token type, audience, and principal validation")
           ]
         }),
-        component("foundry-project", "Foundry agent account and project", "managed-ai", ["agent-runtime", "knowledge"], "The single public Basic Setup Foundry account and project (agmem5df652aif2 / agmem-agents) hosting both logical agents, the chat/embedding deployments, the Foundry IQ connection, and the project Application Insights connection.", {
+        component("foundry-project", "Foundry agent account and project", "managed-ai", ["agent-runtime", "knowledge"], "The single public Basic Setup Foundry account and project (<name_prefix><suffix>aif2 / <name_prefix>-agents) hosting both logical agents, the chat/embedding deployments, the Foundry IQ connection, and the project Application Insights connection.", {
           technologies: ["Microsoft Foundry", "AIServices", "Basic Setup", "azapi provider"],
           interfaces: ["Project endpoint", "Responses API", "Hosted Agent control plane"],
           responsibilities: ["Host agent definitions and runtime", "Own the project Foundry IQ MCP connection", "Own the project App Insights connection", "Manage platform agent state"],

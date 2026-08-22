@@ -118,8 +118,8 @@ Built UTC: ${BUILD_ID}
 
 The archive contains current working-tree versions of the selected deployment
 files. It intentionally excludes Git metadata, local Terraform state and
-variables, saved plans, caches, tests, and the historical source-environment
-.azure/deployment-plan.md.
+variables, saved plans, caches, tests, and any local source-environment
+deployment record.
 EOF
 
 # Fail closed if known local target/source identifiers survived the export.

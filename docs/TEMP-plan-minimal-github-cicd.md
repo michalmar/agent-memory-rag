@@ -111,7 +111,7 @@ Create one user-assigned managed identity for GitHub Actions and:
 3. Store its client ID and the existing tenant/subscription IDs in the GitHub
    repository settings listed above.
 
-The implemented deployment identity is `id-agmem-github-5df652` in
+The implemented deployment identity is `id-<name_prefix>-github-<suffix>` in
 `rg-agent-memory-rag`. Its federated credential trusts only the `main` branch,
 and the required GitHub Actions secrets and repository variables are configured.
 
